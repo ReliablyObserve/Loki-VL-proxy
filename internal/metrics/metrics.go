@@ -18,6 +18,10 @@ type Metrics struct {
 	requestsTotal    map[string]*atomic.Int64 // "endpoint:status" → count
 	requestDurations map[string]*histogram     // "endpoint" → duration histogram
 
+	// Per-tenant request counters
+	tenantRequests   map[string]*atomic.Int64 // "tenant:endpoint:status" → count
+	tenantDurations  map[string]*histogram     // "tenant:endpoint" → duration histogram
+
 	// Cache stats
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
@@ -25,6 +29,9 @@ type Metrics struct {
 	// Translation stats
 	translationsTotal  atomic.Int64
 	translationErrors  atomic.Int64
+
+	// Client error tracking
+	clientErrors map[string]*atomic.Int64 // "endpoint:reason" → count
 
 	// Active connections
 	activeRequests atomic.Int64
@@ -67,6 +74,9 @@ func NewMetrics() *Metrics {
 	return &Metrics{
 		requestsTotal:    make(map[string]*atomic.Int64),
 		requestDurations: make(map[string]*histogram),
+		tenantRequests:   make(map[string]*atomic.Int64),
+		tenantDurations:  make(map[string]*histogram),
+		clientErrors:     make(map[string]*atomic.Int64),
 		startTime:        time.Now(),
 	}
 }
@@ -99,6 +109,63 @@ func (m *Metrics) RecordRequest(endpoint string, statusCode int, duration time.D
 		m.mu.Unlock()
 	}
 	hist.observe(duration.Seconds())
+}
+
+// RecordTenantRequest records a request for a specific tenant (X-Scope-OrgID).
+// Empty tenant is recorded as "__none__".
+func (m *Metrics) RecordTenantRequest(tenant, endpoint string, statusCode int, duration time.Duration) {
+	if tenant == "" {
+		tenant = "__none__"
+	}
+	key := fmt.Sprintf("%s:%s:%d", tenant, endpoint, statusCode)
+	m.mu.RLock()
+	counter, ok := m.tenantRequests[key]
+	m.mu.RUnlock()
+
+	if !ok {
+		m.mu.Lock()
+		counter, ok = m.tenantRequests[key]
+		if !ok {
+			counter = &atomic.Int64{}
+			m.tenantRequests[key] = counter
+		}
+		m.mu.Unlock()
+	}
+	counter.Add(1)
+
+	durKey := fmt.Sprintf("%s:%s", tenant, endpoint)
+	m.mu.RLock()
+	hist, hok := m.tenantDurations[durKey]
+	m.mu.RUnlock()
+	if !hok {
+		m.mu.Lock()
+		hist, hok = m.tenantDurations[durKey]
+		if !hok {
+			hist = newHistogram()
+			m.tenantDurations[durKey] = hist
+		}
+		m.mu.Unlock()
+	}
+	hist.observe(duration.Seconds())
+}
+
+// RecordClientError records a client-side error with a reason category.
+func (m *Metrics) RecordClientError(endpoint, reason string) {
+	key := fmt.Sprintf("%s:%s", endpoint, reason)
+	m.mu.RLock()
+	counter, ok := m.clientErrors[key]
+	m.mu.RUnlock()
+
+	if !ok {
+		m.mu.Lock()
+		counter, ok = m.clientErrors[key]
+		if !ok {
+			counter = &atomic.Int64{}
+			m.clientErrors[key] = counter
+		}
+		m.mu.Unlock()
+	}
+	counter.Add(1)
 }
 
 func (m *Metrics) RecordCacheHit()  { m.cacheHits.Add(1) }
@@ -145,7 +212,6 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&sb, "loki_vl_proxy_request_duration_seconds_count{endpoint=%q} %d\n", ep, h.count)
 		h.mu.Unlock()
 	}
-	m.mu.RUnlock()
 
 	sb.WriteString("# HELP loki_vl_proxy_cache_hits_total Cache hits.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_cache_hits_total counter\n")
@@ -166,6 +232,72 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 	sb.WriteString("# HELP loki_vl_proxy_uptime_seconds Proxy uptime.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_uptime_seconds gauge\n")
 	fmt.Fprintf(&sb, "loki_vl_proxy_uptime_seconds %g\n", time.Since(m.startTime).Seconds())
+
+	// Per-tenant request counters
+	sb.WriteString("# HELP loki_vl_proxy_tenant_requests_total Requests by tenant.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_tenant_requests_total counter\n")
+	tenantKeys := make([]string, 0, len(m.tenantRequests))
+	for k := range m.tenantRequests {
+		tenantKeys = append(tenantKeys, k)
+	}
+	sort.Strings(tenantKeys)
+	for _, key := range tenantKeys {
+		parts := strings.SplitN(key, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		count := m.tenantRequests[key].Load()
+		fmt.Fprintf(&sb, "loki_vl_proxy_tenant_requests_total{tenant=%q,endpoint=%q,status=%q} %d\n",
+			parts[0], parts[1], parts[2], count)
+	}
+
+	// Per-tenant latency histograms
+	sb.WriteString("# HELP loki_vl_proxy_tenant_request_duration_seconds Per-tenant request duration.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_tenant_request_duration_seconds histogram\n")
+	tenantDurKeys := make([]string, 0, len(m.tenantDurations))
+	for k := range m.tenantDurations {
+		tenantDurKeys = append(tenantDurKeys, k)
+	}
+	sort.Strings(tenantDurKeys)
+	for _, key := range tenantDurKeys {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		tenant, ep := parts[0], parts[1]
+		h := m.tenantDurations[key]
+		h.mu.Lock()
+		for i, b := range h.buckets {
+			fmt.Fprintf(&sb, "loki_vl_proxy_tenant_request_duration_seconds_bucket{tenant=%q,endpoint=%q,le=\"%g\"} %d\n",
+				tenant, ep, b, h.counts[i])
+		}
+		fmt.Fprintf(&sb, "loki_vl_proxy_tenant_request_duration_seconds_bucket{tenant=%q,endpoint=%q,le=\"+Inf\"} %d\n",
+			tenant, ep, h.count)
+		fmt.Fprintf(&sb, "loki_vl_proxy_tenant_request_duration_seconds_sum{tenant=%q,endpoint=%q} %g\n",
+			tenant, ep, h.sum)
+		fmt.Fprintf(&sb, "loki_vl_proxy_tenant_request_duration_seconds_count{tenant=%q,endpoint=%q} %d\n",
+			tenant, ep, h.count)
+		h.mu.Unlock()
+	}
+
+	// Client error breakdown
+	sb.WriteString("# HELP loki_vl_proxy_client_errors_total Client errors by reason.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_client_errors_total counter\n")
+	ceKeys := make([]string, 0, len(m.clientErrors))
+	for k := range m.clientErrors {
+		ceKeys = append(ceKeys, k)
+	}
+	sort.Strings(ceKeys)
+	for _, key := range ceKeys {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		count := m.clientErrors[key].Load()
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_errors_total{endpoint=%q,reason=%q} %d\n",
+			parts[0], parts[1], count)
+	}
+	m.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.Write([]byte(sb.String()))

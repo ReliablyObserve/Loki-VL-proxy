@@ -9,9 +9,19 @@ import (
 	"strings"
 )
 
+// LabelTranslateFunc translates a Loki label name to a VL field name (query direction).
+// If nil, no translation is performed.
+type LabelTranslateFunc func(lokiLabel string) string
+
 // TranslateLogQL converts a LogQL query string to a LogsQL query string.
 // It handles stream selectors, line filters, label filters, parsers, and metric queries.
 func TranslateLogQL(logql string) (string, error) {
+	return TranslateLogQLWithLabels(logql, nil)
+}
+
+// TranslateLogQLWithLabels converts a LogQL query to LogsQL, applying label name
+// translation in stream selectors and label filters.
+func TranslateLogQLWithLabels(logql string, labelFn LabelTranslateFunc) (string, error) {
 	logql = strings.TrimSpace(logql)
 	if logql == "" {
 		return "*", nil
@@ -22,11 +32,11 @@ func TranslateLogQL(logql string) (string, error) {
 		return metricResult, nil
 	}
 
-	return translateLogQuery(logql)
+	return translateLogQuery(logql, labelFn)
 }
 
 // translateLogQuery handles log queries (non-metric).
-func translateLogQuery(logql string) (string, error) {
+func translateLogQuery(logql string, labelFn LabelTranslateFunc) (string, error) {
 	var parts []string
 
 	remaining := logql
@@ -50,7 +60,7 @@ func translateLogQuery(logql string) (string, error) {
 
 		matchers := splitStreamMatchers(streamContent)
 		for _, m := range matchers {
-			ff := streamMatcherToFieldFilter(m)
+			ff := streamMatcherToFieldFilter(m, labelFn)
 			if ff != "" {
 				parts = append(parts, ff)
 			}
@@ -307,7 +317,7 @@ func tryTranslateMetricQuery(logql string) (string, bool) {
 		query, _ := extractQueryAndDuration(inner)
 
 		// Translate the inner log query part
-		logsqlQuery, err := translateLogQuery(query)
+		logsqlQuery, err := translateLogQuery(query, nil)
 		if err != nil {
 			continue
 		}
@@ -556,7 +566,7 @@ func splitStreamMatchers(s string) []string {
 // streamMatcherToFieldFilter converts a stream matcher like `level="error"`
 // to a LogsQL field filter like `level:="error"`.
 // Returns "" if the matcher can't be converted (shouldn't happen).
-func streamMatcherToFieldFilter(matcher string) string {
+func streamMatcherToFieldFilter(matcher string, labelFn LabelTranslateFunc) string {
 	matcher = strings.TrimSpace(matcher)
 
 	// Try operators in order of specificity
@@ -578,9 +588,17 @@ func streamMatcherToFieldFilter(matcher string) string {
 			label := strings.TrimSpace(matcher[:idx])
 			value := strings.TrimSpace(matcher[idx+len(op.logql):])
 
+			// Apply label name translation (e.g., service_name → service.name)
+			if labelFn != nil {
+				label = labelFn(label)
+			}
+
+			// VL requires quoting for dotted field names
+			if strings.Contains(label, ".") {
+				label = `"` + label + `"`
+			}
+
 			if op.isRe {
-				// Regex values: keep quotes for VL field regex filters
-				// VL syntax: field:~"regex"
 				value = strings.Trim(value, `"`)
 				if op.neg {
 					return fmt.Sprintf(`-%s%s"%s"`, label, op.logsql, value)
@@ -588,7 +606,6 @@ func streamMatcherToFieldFilter(matcher string) string {
 				return fmt.Sprintf(`%s%s"%s"`, label, op.logsql, value)
 			}
 
-			// Exact match: strip quotes
 			value = strings.Trim(value, `"`)
 			if op.neg {
 				return fmt.Sprintf("-%s%s%s", label, op.logsql, value)

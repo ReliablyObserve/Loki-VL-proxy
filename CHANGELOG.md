@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-04
+
+### Features
+
+- **OTel label translation**: Bidirectional dot↔underscore conversion for 50+ OTel semantic convention fields
+  - `-label-style=underscores` converts VL dotted names (service.name) to Loki underscores (service_name)
+  - `-label-style=passthrough` (default) passes VL field names as-is
+  - Query direction: `{service_name="x"}` → VL `"service.name":"x"` with automatic field quoting
+  - Response direction: all 7 response paths translated (labels, label_values, detected_fields, series, query results, streaming, tail)
+- **Custom field remapping**: `-field-mapping` JSON config for arbitrary VL↔Loki field name mappings
+- **Per-tenant metrics**: `loki_vl_proxy_tenant_requests_total{tenant,endpoint,status}` and latency histograms
+- **Client error breakdown**: `loki_vl_proxy_client_errors_total{endpoint,reason}` — bad_request, rate_limited, not_found, body_too_large
+- **Request logging middleware**: Structured JSON log per request with tenant, query, status, duration, client IP
+- **Tenant wildcard**: `X-Scope-OrgID: "*"` or `"0"` skips tenant headers for single-tenant VL setups
+- **Grafana dashboard**: Pre-built importable dashboard (`examples/grafana-dashboard.json`) with tenant breakdown
+- **Alerting rules**: 16 Prometheus/VM alert rules (`examples/alerting-rules.yaml`) including per-tenant abuse detection
+- **Operations guide**: SRE documentation (`docs/operations.md`) — capacity planning, perf tuning, troubleshooting
+
+### Tests
+
+- 44 new unit tests for label translation (SanitizeLabelName, LabelTranslator, TranslateLogQLWithLabels)
+- 50+ OTel e2e compatibility tests across 12 scenarios (dots→underscores, passthrough, mixed, query direction, Drilldown)
+- Docker-compose: added `loki-vl-proxy-underscore` service at :3102 for e2e label translation tests
+- **263 unit tests, 50+ e2e tests** — all passing
+
 ## [0.6.0] - 2026-04-03
 
 ### Features

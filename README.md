@@ -94,6 +94,11 @@ flowchart LR
 - **TLS server**: HTTPS support via `-tls-cert-file` / `-tls-key-file`
 - **Hardened HTTP**: Request body/header size limits, read/write/idle timeouts, security headers
 - **Concurrency-safe**: No shared mutable state — tenant IDs flow via request context, all goroutines are stoppable
+- **OTel label translation**: Bidirectional dot↔underscore conversion for all 50+ OTel semantic convention fields
+- **Field remapping**: Custom VL↔Loki field name mappings via `-field-mapping` for non-standard VL setups
+- **Per-tenant metrics**: Request rate, latency, error rate broken down by tenant (X-Scope-OrgID)
+- **Request logging**: Structured JSON logs with tenant, query, status, latency, client IP per request
+- **Client error breakdown**: Categorized 4xx errors (bad_request, rate_limited, not_found, body_too_large)
 - **Single static binary**, ~10MB Docker image, zero external dependencies at runtime
 
 ## API Coverage
@@ -117,7 +122,7 @@ flowchart LR
 | `/metrics` | Implemented | — | — | 1 |
 | `/debug/queries` | Implemented | — | — | 1 |
 
-**210+ tests total** (156 unit + 54 e2e, all at 100% compatibility)
+**310+ tests total** (263 unit + 50+ e2e, all at 100% compatibility)
 
 ## Protection Layers
 
@@ -255,6 +260,9 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`):
 | `-listen` | `LISTEN_ADDR` | `:3100` | Listen address |
 | `-backend` | `VL_BACKEND_URL` | `http://localhost:9428` | VictoriaLogs backend URL |
 | `-log-level` | — | `info` | Log level: debug, info, warn, error |
+| **Label Translation** | | | |
+| `-label-style` | `LABEL_STYLE` | `passthrough` | `passthrough` or `underscores` (see below) |
+| `-field-mapping` | `FIELD_MAPPING` | — | JSON custom field mappings |
 | **Cache (L1 in-memory)** | | | |
 | `-cache-ttl` | — | `60s` | Default cache TTL |
 | `-cache-max` | — | `10000` | Maximum cache entries |
@@ -341,6 +349,30 @@ The proxy maps VL fields to Loki's model:
 
 In practice, Grafana Explore treats both stream labels and structured metadata as queryable labels, so the distinction is mostly cosmetic.
 
+## OTel Label Translation
+
+VictoriaLogs stores OTel attributes with their native dotted names (`service.name`, `k8s.pod.name`). Loki sanitizes dots to underscores (`service_name`, `k8s_pod_name`). The `-label-style` flag controls translation:
+
+| Mode | When to Use | Response Direction | Query Direction |
+|---|---|---|---|
+| `passthrough` | VL already stores underscore labels (Vector/FluentBit normalize) | No translation | No translation |
+| `underscores` | VL stores OTel dotted labels (OTLP direct, native ingestion) | `service.name` → `service_name` | `{service_name="x"}` → VL `"service.name":"x"` |
+
+### Configuration
+
+```bash
+# OTel-compatible mode (VL stores dots, Loki sees underscores)
+./loki-vl-proxy -backend=http://vl:9428 -label-style=underscores
+
+# Custom field mappings for non-standard VL field names
+./loki-vl-proxy -label-style=underscores \
+  -field-mapping='[{"vl_field":"my_trace_id","loki_label":"traceID"}]'
+```
+
+Built-in reverse mappings for 50+ OTel semantic convention fields ensure query-direction translation (e.g., `{service_name="x"}` queries VL field `service.name`) works for all standard OTel attributes: service, k8s, cloud, host, process, container, network, OS, log, telemetry, deployment.
+
+See [docs/operations.md](docs/operations.md) for the full field mapping table.
+
 ## Observability
 
 ### Metrics (Prometheus scrape)
@@ -351,6 +383,13 @@ In practice, Grafana Explore treats both stream labels and structured metadata a
 # Request tracking
 loki_vl_proxy_requests_total{endpoint, status}
 loki_vl_proxy_request_duration_seconds{endpoint}  (histogram)
+
+# Per-tenant tracking (who is hurting VL)
+loki_vl_proxy_tenant_requests_total{tenant, endpoint, status}
+loki_vl_proxy_tenant_request_duration_seconds{tenant, endpoint}  (histogram)
+
+# Client error breakdown
+loki_vl_proxy_client_errors_total{endpoint, reason}  # bad_request, rate_limited, not_found, body_too_large
 
 # Cache efficiency
 loki_vl_proxy_cache_hits_total
@@ -364,14 +403,23 @@ loki_vl_proxy_translation_errors_total
 loki_vl_proxy_uptime_seconds
 ```
 
+### Grafana Dashboard & Alerts
+
+Import the pre-built dashboard and alerting rules:
+
+- **Dashboard**: [`examples/grafana-dashboard.json`](examples/grafana-dashboard.json) — request rate, latency, cache, tenant breakdown, error analysis
+- **Alert rules**: [`examples/alerting-rules.yaml`](examples/alerting-rules.yaml) — backend down, high error rate, tenant abuse, latency SLOs
+
 ### Logs
 
-Structured JSON to stdout via Go's `slog`:
+Structured JSON to stdout via Go's `slog`, with per-request detail:
 
 ```json
-{"time":"2024-01-15T10:30:00Z","level":"INFO","msg":"query_range request","logql":"{app=\"nginx\"} |= \"error\""}
-{"time":"2024-01-15T10:30:00Z","level":"DEBUG","msg":"translated query","logsql":"{app=\"nginx\"} \"error\""}
+{"time":"2026-04-04T10:30:00Z","level":"INFO","msg":"request","endpoint":"query_range","method":"GET","status":200,"duration_ms":42,"tenant":"team-alpha","query":"{app=\"nginx\"} |= \"error\"","client":"10.0.1.42:5678"}
+{"time":"2026-04-04T10:30:01Z","level":"WARN","msg":"request","endpoint":"query_range","method":"GET","status":400,"duration_ms":1,"tenant":"team-beta","query":"invalid{","client":"10.0.1.43:9876"}
 ```
+
+Every request log includes: endpoint, method, HTTP status, duration, tenant, query (truncated), client IP.
 
 ## Testing
 
@@ -426,4 +474,10 @@ go build -o loki-vl-proxy ./cmd/proxy
 - [x] Grafana datasource config: maxLines, basic auth, TLS, header forwarding
 - [x] Derived fields — regex extraction for trace linking (traceID, spanID)
 - [x] Query result streaming — chunked transfer encoding for large results
+- [x] OTel label translation — bidirectional dot↔underscore for 50+ semantic convention fields
+- [x] Custom field remapping — `-field-mapping` for non-standard VL setups
+- [x] Per-tenant metrics — request rate, latency, error rate by `X-Scope-OrgID`
+- [x] Client error breakdown — categorized 4xx errors in metrics
+- [x] Grafana dashboard & alerting rules — pre-built examples
+- [x] Operational documentation — capacity planning, performance tuning, troubleshooting
 - [ ] `/loki/api/v1/patterns` — real implementation

@@ -70,6 +70,10 @@ type Config struct {
 	BackendTLSSkip   bool              // skip TLS verification for VL backend
 	DerivedFields    []DerivedField    // derived fields for trace/link extraction
 	StreamResponse   bool              // stream responses via chunked transfer (default: false)
+
+	// Label translation
+	LabelStyle    LabelStyle     // how to translate VL field names to Loki labels
+	FieldMappings []FieldMapping // custom VL↔Loki field name mappings
 }
 
 // DerivedField extracts a value from log lines and creates a link (e.g., to a trace backend).
@@ -113,8 +117,9 @@ type Proxy struct {
 	maxLines       int
 	forwardHeaders []string          // headers to copy from client request to VL
 	backendHeaders map[string]string // static headers on all VL requests
-	derivedFields  []DerivedField
-	streamResponse bool
+	derivedFields    []DerivedField
+	streamResponse   bool
+	labelTranslator  *LabelTranslator
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -193,8 +198,9 @@ func New(cfg Config) (*Proxy, error) {
 		maxLines:       maxLines,
 		forwardHeaders: cfg.ForwardHeaders,
 		backendHeaders: backendHeaders,
-		derivedFields:  cfg.DerivedFields,
-		streamResponse: cfg.StreamResponse,
+		derivedFields:    cfg.DerivedFields,
+		streamResponse:   cfg.StreamResponse,
+		labelTranslator:  NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
 	}, nil
 }
 
@@ -215,28 +221,28 @@ func securityHeaders(h http.Handler) http.Handler {
 }
 
 func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
-	// Rate-limited endpoints with security headers
-	rl := func(h http.HandlerFunc) http.Handler {
-		return securityHeaders(p.limiter.Middleware(http.HandlerFunc(h)))
+	// Rate-limited endpoints with security headers + request logging
+	rl := func(endpoint string, h http.HandlerFunc) http.Handler {
+		return securityHeaders(p.limiter.Middleware(p.requestLogger(endpoint, h)))
 	}
 
 	// Loki API endpoints — data queries are rate-limited
-	mux.Handle("/loki/api/v1/query_range", rl(p.handleQueryRange))
-	mux.Handle("/loki/api/v1/query", rl(p.handleQuery))
-	mux.Handle("/loki/api/v1/series", rl(p.handleSeries))
+	mux.Handle("/loki/api/v1/query_range", rl("query_range", p.handleQueryRange))
+	mux.Handle("/loki/api/v1/query", rl("query", p.handleQuery))
+	mux.Handle("/loki/api/v1/series", rl("series", p.handleSeries))
 
 	// Metadata endpoints — rate-limited but cached
-	mux.Handle("/loki/api/v1/labels", rl(p.handleLabels))
-	mux.Handle("/loki/api/v1/label/", rl(p.handleLabelValues))
-	mux.Handle("/loki/api/v1/detected_fields", rl(p.handleDetectedFields))
-	mux.Handle("/loki/api/v1/detected_field/", rl(p.handleDetectedFieldValues))
+	mux.Handle("/loki/api/v1/labels", rl("labels", p.handleLabels))
+	mux.Handle("/loki/api/v1/label/", rl("label_values", p.handleLabelValues))
+	mux.Handle("/loki/api/v1/detected_fields", rl("detected_fields", p.handleDetectedFields))
+	mux.Handle("/loki/api/v1/detected_field/", rl("detected_field_values", p.handleDetectedFieldValues))
 
 	// Lighter endpoints — still rate-limited
-	mux.Handle("/loki/api/v1/index/stats", rl(p.handleIndexStats))
-	mux.Handle("/loki/api/v1/index/volume", rl(p.handleVolume))
-	mux.Handle("/loki/api/v1/index/volume_range", rl(p.handleVolumeRange))
-	mux.Handle("/loki/api/v1/patterns", rl(p.handlePatterns))
-	mux.Handle("/loki/api/v1/tail", rl(p.handleTail))
+	mux.Handle("/loki/api/v1/index/stats", rl("index_stats", p.handleIndexStats))
+	mux.Handle("/loki/api/v1/index/volume", rl("volume", p.handleVolume))
+	mux.Handle("/loki/api/v1/index/volume_range", rl("volume_range", p.handleVolumeRange))
+	mux.Handle("/loki/api/v1/patterns", rl("patterns", p.handlePatterns))
+	mux.Handle("/loki/api/v1/tail", rl("tail", p.handleTail))
 
 	// Health / readiness — NOT rate-limited
 	mux.HandleFunc("/ready", p.handleReady)
@@ -259,7 +265,7 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	p.log.Debug("query_range request", "logql", logqlQuery)
 
-	logsqlQuery, err := translator.TranslateLogQL(logqlQuery)
+	logsqlQuery, err := p.translateQuery(logqlQuery)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
 		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
@@ -287,7 +293,7 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	p.log.Debug("query request", "logql", logqlQuery)
 
-	logsqlQuery, err := translator.TranslateLogQL(logqlQuery)
+	logsqlQuery, err := p.translateQuery(logqlQuery)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
 		p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
@@ -362,6 +368,9 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 		labels = append(labels, v.Value)
 	}
 
+	// Apply label name translation (e.g., dots → underscores)
+	labels = p.labelTranslator.TranslateLabelsList(labels)
+
 	result := lokiLabelsResponse(labels)
 	p.cache.SetWithTTL(cacheKey, result, CacheTTLs["labels"])
 	w.Header().Set("Content-Type", "application/json")
@@ -382,6 +391,8 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	labelName := parts[5]
+	// Translate Loki label name to VL field name for the backend query
+	vlFieldName := p.labelTranslator.ToVL(labelName)
 
 	cacheKey := "label_values:" + labelName + ":" + r.URL.RawQuery
 	if cached, ok := p.cache.Get(cacheKey); ok {
@@ -396,7 +407,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 
 	params := url.Values{}
 	params.Set("query", "*")
-	params.Set("field", labelName)
+	params.Set("field", vlFieldName)
 	if s := r.FormValue("start"); s != "" {
 		params.Set("start", s)
 	}
@@ -448,7 +459,7 @@ func (p *Proxy) handleSeries(w http.ResponseWriter, r *http.Request) {
 	matchQueries := r.Form["match[]"]
 	query := "*"
 	if len(matchQueries) > 0 {
-		translated, err := translator.TranslateLogQL(matchQueries[0])
+		translated, err := p.translateQuery(matchQueries[0])
 		if err == nil {
 			query = translated
 		}
@@ -486,6 +497,7 @@ func (p *Proxy) handleSeries(w http.ResponseWriter, r *http.Request) {
 	for _, v := range vlResp.Values {
 		labels := parseStreamLabels(v.Value)
 		if len(labels) > 0 {
+			labels = p.labelTranslator.TranslateLabelsMap(labels)
 			series = append(series, labels)
 		}
 	}
@@ -508,7 +520,7 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	if query == "" {
 		query = "*"
 	}
-	logsqlQuery, _ := translator.TranslateLogQL(query)
+	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery)
@@ -559,7 +571,7 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	if query == "" {
 		query = "*"
 	}
-	logsqlQuery, _ := translator.TranslateLogQL(query)
+	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery)
@@ -604,7 +616,7 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	if query == "" {
 		query = "*"
 	}
-	logsqlQuery, _ := translator.TranslateLogQL(query)
+	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery)
@@ -643,7 +655,7 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 		query = "*"
 	}
 
-	logsqlQuery, _ := translator.TranslateLogQL(query)
+	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery)
@@ -686,12 +698,18 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(body, &vlResp)
 
 	fields := make([]map[string]interface{}, 0, len(vlResp.Values))
+	seen := make(map[string]bool)
 	for _, v := range vlResp.Values {
 		if isVLInternalField(v.Value) {
 			continue
 		}
+		translated := p.labelTranslator.ToLoki(v.Value)
+		if seen[translated] {
+			continue
+		}
+		seen[translated] = true
 		fields = append(fields, map[string]interface{}{
-			"label":       v.Value,
+			"label":       translated,
 			"type":        "string",
 			"cardinality": v.Hits,
 		})
@@ -730,11 +748,13 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	if query == "" {
 		query = "*"
 	}
-	logsqlQuery, _ := translator.TranslateLogQL(query)
+	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
+	// Translate Loki field name to VL field name for the backend query
+	vlFieldName := p.labelTranslator.ToVL(fieldName)
 	params.Set("query", logsqlQuery)
-	params.Set("field", fieldName)
+	params.Set("field", vlFieldName)
 	if s := r.FormValue("start"); s != "" {
 		params.Set("start", s)
 	}
@@ -798,7 +818,7 @@ func (p *Proxy) handleTail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logsqlQuery, err := translator.TranslateLogQL(logqlQuery)
+	logsqlQuery, err := p.translateQuery(logqlQuery)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
 		p.metrics.RecordRequest("tail", http.StatusBadRequest, time.Since(start))
@@ -912,10 +932,13 @@ func (p *Proxy) vlLineToTailFrame(vlLine map[string]interface{}) map[string]inte
 		ts = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 
+	// Apply label name translation
+	translatedLabels := p.labelTranslator.TranslateLabelsMap(labels)
+
 	return map[string]interface{}{
 		"streams": []map[string]interface{}{
 			{
-				"stream": labels,
+				"stream": translatedLabels,
 				"values": [][]string{{ts, msg}},
 			},
 		},
@@ -1106,6 +1129,9 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 	// Loki expects: {"status":"success","data":{"resultType":"streams","result":[...]}}
 	streams := vlLogsToLokiStreams(body)
 
+	// Apply label name translation (e.g., dots → underscores)
+	p.translateStreamLabels(streams)
+
 	// Apply derived fields (extract trace_id etc. from log lines)
 	if len(p.derivedFields) > 0 {
 		p.applyDerivedFields(streams)
@@ -1168,7 +1194,7 @@ func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response) {
 				continue
 			}
 			if s, ok := v.(string); ok {
-				labels[k] = s
+				labels[p.labelTranslator.ToLoki(k)] = s
 			}
 		}
 
@@ -1518,6 +1544,12 @@ func formatVLTimestamp(ts string) string {
 func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 	orgID := getOrgID(req.Context())
 	if orgID == "" {
+		// No tenant header → default VL tenant (0:0), serves all data
+		return
+	}
+
+	// Wildcard: "*" or "0" → skip tenant headers, let VL serve all data
+	if orgID == "*" || orgID == "0" {
 		return
 	}
 
@@ -1602,4 +1634,92 @@ func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 	}
 	// Forward client headers if configured (requires original request in context)
 	// Forwarded headers are set by the middleware before vlGet/vlPost
+}
+
+// statusCapture wraps ResponseWriter to capture the status code.
+type statusCapture struct {
+	http.ResponseWriter
+	code int
+}
+
+func (sc *statusCapture) WriteHeader(code int) {
+	sc.code = code
+	sc.ResponseWriter.WriteHeader(code)
+}
+
+// requestLogger wraps a handler with structured logging and per-tenant metrics.
+func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		tenant := r.Header.Get("X-Scope-OrgID")
+		query := r.FormValue("query")
+
+		sc := &statusCapture{ResponseWriter: w, code: 200}
+		next.ServeHTTP(sc, r)
+
+		elapsed := time.Since(start)
+
+		// Per-tenant metrics
+		p.metrics.RecordTenantRequest(tenant, endpoint, sc.code, elapsed)
+
+		// Client error categorization
+		if sc.code >= 400 && sc.code < 500 {
+			reason := "bad_request"
+			switch sc.code {
+			case 400:
+				reason = "bad_request"
+			case 429:
+				reason = "rate_limited"
+			case 404:
+				reason = "not_found"
+			case 413:
+				reason = "body_too_large"
+			}
+			p.metrics.RecordClientError(endpoint, reason)
+		}
+
+		// Structured request log — includes tenant, query, status, latency, cache info
+		logLevel := p.log.Info
+		if sc.code >= 500 {
+			logLevel = p.log.Error
+		} else if sc.code >= 400 {
+			logLevel = p.log.Warn
+		}
+		logLevel("request",
+			"endpoint", endpoint,
+			"method", r.Method,
+			"status", sc.code,
+			"duration_ms", elapsed.Milliseconds(),
+			"tenant", tenant,
+			"query", truncateQuery(query, 200),
+			"client", r.RemoteAddr,
+		)
+	})
+}
+
+func truncateQuery(q string, maxLen int) string {
+	if len(q) <= maxLen {
+		return q
+	}
+	return q[:maxLen] + "..."
+}
+
+// translateQuery translates a LogQL query to LogsQL, applying label name translation.
+func (p *Proxy) translateQuery(logql string) (string, error) {
+	if p.labelTranslator.IsPassthrough() {
+		return translator.TranslateLogQL(logql)
+	}
+	return translator.TranslateLogQLWithLabels(logql, p.labelTranslator.ToVL)
+}
+
+// translateStreamLabels applies label name translation to all streams in a Loki-format result.
+func (p *Proxy) translateStreamLabels(streams []map[string]interface{}) {
+	if p.labelTranslator.IsPassthrough() {
+		return
+	}
+	for _, stream := range streams {
+		if labels, ok := stream["stream"].(map[string]string); ok {
+			stream["stream"] = p.labelTranslator.TranslateLabelsMap(labels)
+		}
+	}
 }

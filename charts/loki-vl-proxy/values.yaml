@@ -1,0 +1,257 @@
+# Loki-VL-proxy Helm values
+# VictoriaMetrics-style: all proxy flags exposed as extraArgs
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/szibis/loki-vl-proxy
+  tag: ""  # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# VictoriaMetrics-style: pass any CLI flag via extraArgs
+# These map directly to the binary's -flag arguments.
+extraArgs:
+  listen: ":3100"
+  backend: "http://victorialogs:9428"
+  cache-ttl: "60s"
+  cache-max: "10000"
+  log-level: "info"
+  # Hardening
+  http-read-timeout: "30s"
+  http-write-timeout: "120s"
+  http-idle-timeout: "120s"
+  http-max-header-bytes: "1048576"
+  http-max-body-bytes: "10485760"
+  # Uncomment to enable features:
+  # tenant-map: '{"team-alpha":{"account_id":"100","project_id":"1"}}'
+  # disk-cache-path: "/cache/data.db"
+  # disk-cache-compress: "true"
+  # disk-cache-flush-size: "100"
+  # disk-cache-flush-interval: "5s"
+  # disk-cache-encryption-key: ""
+  # otlp-endpoint: "http://otel-collector:4318/v1/metrics"
+  # otlp-interval: "30s"
+  # otlp-compression: "gzip"
+  # otlp-timeout: "10s"
+  # Label translation (OTel compatibility)
+  # label-style: "underscores"  # convert VL dotted fields (service.name) to Loki underscores (service_name)
+  # field-mapping: '[{"vl_field":"custom.field","loki_label":"custom_label"}]'
+  # Derived fields (trace linking)
+  # derived-fields: '[{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]'
+  # stream-response: "true"  # chunked transfer encoding for large results
+
+# Environment variables (alternative to flags, also for secrets)
+env: []
+  # - name: VL_BACKEND_URL
+  #   value: "http://victorialogs:9428"
+  # - name: TENANT_MAP
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: tenant-config
+  #       key: tenant-map
+  # - name: OTLP_ENDPOINT
+  #   value: "http://otel-collector:4318/v1/metrics"
+  # - name: LABEL_STYLE
+  #   value: "underscores"
+  # - name: FIELD_MAPPING
+  #   valueFrom:
+  #     configMapKeyRef:
+  #       name: loki-vl-proxy-config
+  #       key: field-mapping
+
+envFrom: []
+  # - secretRef:
+  #     name: loki-vl-proxy-env
+  # - configMapRef:
+  #     name: loki-vl-proxy-config
+
+# --- Service Account ---
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# --- Service ---
+service:
+  type: ClusterIP
+  port: 3100
+  annotations: {}
+  labels: {}
+
+# --- ServiceMonitor (Prometheus Operator) ---
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: "30s"
+  scrapeTimeout: "10s"
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+# --- Ingress ---
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    # nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  hosts:
+    - host: loki-vl-proxy.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: loki-vl-proxy-tls
+    #   hosts:
+    #     - loki-vl-proxy.local
+
+# --- Resources ---
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# --- Probes ---
+probe:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  readiness:
+    enabled: true
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
+  startup:
+    enabled: false
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+
+# --- Pod Disruption Budget ---
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# --- Horizontal Pod Autoscaler ---
+horizontalPodAutoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+# --- Network Policy ---
+networkPolicy:
+  enabled: false
+  # Allow ingress from Grafana and other datasource consumers
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: grafana
+      ports:
+        - port: 3100
+          protocol: TCP
+  # Allow egress to VictoriaLogs backend
+  egress:
+    - to: []
+      ports:
+        - port: 9428
+          protocol: TCP
+    # Allow DNS
+    - to: []
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+# --- Pod Security ---
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  runAsNonRoot: true
+  runAsUser: 65534
+
+# --- Scheduling ---
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+  # podAntiAffinity:
+  #   preferredDuringSchedulingIgnoredDuringExecution:
+  #     - weight: 100
+  #       podAffinityTerm:
+  #         topologyKey: kubernetes.io/hostname
+  #         labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/name: loki-vl-proxy
+
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: topology.kubernetes.io/zone
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: loki-vl-proxy
+
+priorityClassName: ""
+
+# --- Labels & Annotations ---
+podAnnotations: {}
+podLabels: {}
+extraLabels: {}
+
+# --- Lifecycle ---
+terminationGracePeriodSeconds: 30
+lifecycle: {}
+  # preStop:
+  #   exec:
+  #     command: ["/bin/sh", "-c", "sleep 5"]
+
+# --- Additional containers/volumes ---
+initContainers: []
+extraContainers: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# --- Disk cache persistent volume ---
+persistence:
+  enabled: false
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  storageClass: ""  # e.g., "gp3", "st1" for AWS
+  annotations: {}
+  # mountPath defaults to /cache, used with disk-cache-path=/cache/data.db

@@ -67,6 +67,12 @@ func main() {
 	derivedFieldsJSON := flag.String("derived-fields", "", `JSON derived fields: [{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]`)
 	streamResponse := flag.Bool("stream-response", false, "Stream log responses via chunked transfer encoding")
 
+	// Label translation
+	labelStyle := flag.String("label-style", "passthrough", `Label name translation mode:
+  passthrough  - no translation, pass VL field names as-is (use when VL stores underscores)
+  underscores  - convert dots to underscores (use when VL stores OTel-style dotted names like service.name)`)
+	fieldMappingJSON := flag.String("field-mapping", "", `JSON custom field mappings: [{"vl_field":"service.name","loki_label":"service_name"}]`)
+
 	flag.Parse()
 
 	// Environment variable overrides
@@ -84,6 +90,12 @@ func main() {
 	}
 	if v := os.Getenv("OTLP_COMPRESSION"); v != "" && *otlpCompression == "none" {
 		*otlpCompression = v
+	}
+	if v := os.Getenv("LABEL_STYLE"); v != "" && *labelStyle == "passthrough" {
+		*labelStyle = v
+	}
+	if v := os.Getenv("FIELD_MAPPING"); v != "" && *fieldMappingJSON == "" {
+		*fieldMappingJSON = v
 	}
 
 	// Parse tenant map
@@ -134,6 +146,27 @@ func main() {
 		}
 	}
 
+	// Parse field mappings
+	var fieldMappings []proxy.FieldMapping
+	if *fieldMappingJSON != "" {
+		if err := json.Unmarshal([]byte(*fieldMappingJSON), &fieldMappings); err != nil {
+			log.Fatalf("Failed to parse -field-mapping JSON: %v", err)
+		}
+		log.Printf("Loaded %d custom field mappings", len(fieldMappings))
+	}
+
+	// Validate label style
+	ls := proxy.LabelStyle(*labelStyle)
+	switch ls {
+	case proxy.LabelStylePassthrough, proxy.LabelStyleUnderscores:
+		// valid
+	default:
+		log.Fatalf("Invalid -label-style: %q (must be 'passthrough' or 'underscores')", *labelStyle)
+	}
+	if ls == proxy.LabelStyleUnderscores {
+		log.Printf("Label style: underscores (VL dotted field names → Loki underscore labels)")
+	}
+
 	// Parse derived fields
 	var derivedFields []proxy.DerivedField
 	if *derivedFieldsJSON != "" {
@@ -155,6 +188,8 @@ func main() {
 		ForwardHeaders:   fwdHeaders,
 		DerivedFields:    derivedFields,
 		StreamResponse:   *streamResponse,
+		LabelStyle:       ls,
+		FieldMappings:    fieldMappings,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)

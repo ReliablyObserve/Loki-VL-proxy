@@ -1,0 +1,211 @@
+# Loki-VL-Proxy Alerting Rules
+# Import into Prometheus, VictoriaMetrics vmalert, or Grafana alerting.
+#
+# Adjust thresholds and labels for your environment.
+
+groups:
+  - name: loki-vl-proxy
+    interval: 30s
+    rules:
+      # ── Availability ──
+
+      - alert: LokiVLProxyDown
+        expr: up{job="loki-vl-proxy"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: loki-vl-proxy
+        annotations:
+          summary: "Loki-VL-proxy is down"
+          description: "Loki-VL-proxy instance {{ $labels.instance }} has been down for >1m."
+
+      - alert: LokiVLProxyHighErrorRate
+        expr: |
+          100 * sum(rate(loki_vl_proxy_requests_total{status=~"5.."}[5m])) by (job)
+          / sum(rate(loki_vl_proxy_requests_total[5m])) by (job) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "High 5xx error rate ({{ $value | printf \"%.1f\" }}%)"
+          description: "Loki-VL-proxy 5xx error rate is above 5% for 5 minutes."
+
+      - alert: LokiVLProxyCriticalErrorRate
+        expr: |
+          100 * sum(rate(loki_vl_proxy_requests_total{status=~"5.."}[5m])) by (job)
+          / sum(rate(loki_vl_proxy_requests_total[5m])) by (job) > 25
+        for: 2m
+        labels:
+          severity: critical
+          component: loki-vl-proxy
+        annotations:
+          summary: "Critical 5xx error rate ({{ $value | printf \"%.1f\" }}%)"
+          description: "Loki-VL-proxy 5xx error rate is above 25% — backend may be down."
+
+      # ── Latency ──
+
+      - alert: LokiVLProxyHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(loki_vl_proxy_request_duration_seconds_bucket{endpoint="query_range"}[5m])) by (le, job)
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "High P99 query_range latency ({{ $value | printf \"%.1f\" }}s)"
+          description: "P99 query_range latency exceeds 10s for 5 minutes."
+
+      - alert: LokiVLProxyHighLatencyLabels
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(loki_vl_proxy_request_duration_seconds_bucket{endpoint="labels"}[5m])) by (le, job)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "High P99 labels latency ({{ $value | printf \"%.1f\" }}s)"
+          description: "P99 labels endpoint latency exceeds 2s — possible VL backend issue."
+
+      # ── Cache ──
+
+      - alert: LokiVLProxyLowCacheHitRate
+        expr: |
+          100 * rate(loki_vl_proxy_cache_hits_total[5m])
+          / (rate(loki_vl_proxy_cache_hits_total[5m]) + rate(loki_vl_proxy_cache_misses_total[5m]))
+          < 30
+        for: 15m
+        labels:
+          severity: info
+          component: loki-vl-proxy
+        annotations:
+          summary: "Low cache hit rate ({{ $value | printf \"%.0f\" }}%)"
+          description: "Cache hit rate below 30% for 15 minutes. Consider increasing cache-max or cache-ttl."
+
+      # ── Translation ──
+
+      - alert: LokiVLProxyTranslationErrors
+        expr: rate(loki_vl_proxy_translation_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "LogQL translation errors ({{ $value | printf \"%.2f\" }}/s)"
+          description: "Translation errors are occurring — check for unsupported LogQL queries."
+
+      # ── Client Errors ──
+
+      - alert: LokiVLProxyHighClientErrors
+        expr: |
+          100 * sum(rate(loki_vl_proxy_requests_total{status=~"4.."}[5m])) by (job)
+          / sum(rate(loki_vl_proxy_requests_total[5m])) by (job) > 20
+        for: 10m
+        labels:
+          severity: info
+          component: loki-vl-proxy
+        annotations:
+          summary: "High 4xx client error rate ({{ $value | printf \"%.1f\" }}%)"
+          description: "Many client errors — check for misconfigured Grafana datasources or invalid queries."
+
+      # ── Backend Health ──
+
+      - alert: LokiVLProxyBackendUnreachable
+        expr: |
+          sum(rate(loki_vl_proxy_requests_total{status="502"}[5m])) by (job) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+          component: loki-vl-proxy
+        annotations:
+          summary: "VictoriaLogs backend unreachable"
+          description: "Proxy returning 502 errors — VL backend may be down or network issue."
+
+      # ── Resource ──
+
+      - alert: LokiVLProxyHighMemory
+        expr: |
+          container_memory_working_set_bytes{container="loki-vl-proxy"}
+          / container_spec_memory_limit_bytes{container="loki-vl-proxy"} > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "High memory usage ({{ $value | printf \"%.0f\" }}%)"
+          description: "Memory usage above 90% of limit. Reduce cache-max or increase memory limit."
+
+      # ── Per-Tenant ──
+
+      - alert: LokiVLProxyTenantHighErrorRate
+        expr: |
+          100 * sum(rate(loki_vl_proxy_tenant_requests_total{status=~"5.."}[5m])) by (tenant)
+          / sum(rate(loki_vl_proxy_tenant_requests_total[5m])) by (tenant) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "Tenant {{ $labels.tenant }} high error rate ({{ $value | printf \"%.1f\" }}%)"
+          description: "Tenant {{ $labels.tenant }} has >10% error rate. Check their queries."
+
+      - alert: LokiVLProxyTenantHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(loki_vl_proxy_tenant_request_duration_seconds_bucket[5m])) by (tenant, le)
+          ) > 30
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "Tenant {{ $labels.tenant }} high P99 latency ({{ $value | printf \"%.1f\" }}s)"
+          description: "Tenant {{ $labels.tenant }} P99 latency exceeds 30s — expensive queries."
+
+      - alert: LokiVLProxyTenantBurstTraffic
+        expr: |
+          sum(rate(loki_vl_proxy_tenant_requests_total[5m])) by (tenant) > 100
+        for: 5m
+        labels:
+          severity: info
+          component: loki-vl-proxy
+        annotations:
+          summary: "Tenant {{ $labels.tenant }} burst traffic ({{ $value | printf \"%.0f\" }} req/s)"
+          description: "Tenant {{ $labels.tenant }} is sending >100 req/s."
+
+      - alert: LokiVLProxyHighClientErrorRate
+        expr: |
+          sum(rate(loki_vl_proxy_client_errors_total{reason="bad_request"}[5m])) by (endpoint) > 1
+        for: 10m
+        labels:
+          severity: info
+          component: loki-vl-proxy
+        annotations:
+          summary: "High bad_request rate on {{ $labels.endpoint }} ({{ $value | printf \"%.1f\" }}/s)"
+          description: "Clients sending many invalid queries to {{ $labels.endpoint }}."
+
+      - alert: LokiVLProxyRateLimiting
+        expr: |
+          sum(rate(loki_vl_proxy_client_errors_total{reason="rate_limited"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "Rate limiting active ({{ $value | printf \"%.1f\" }}/s)"
+          description: "Clients are being rate-limited. May need to increase rate-per-second."
+
+      - alert: LokiVLProxyRestarting
+        expr: |
+          increase(kube_pod_container_status_restarts_total{container="loki-vl-proxy"}[1h]) > 3
+        for: 0m
+        labels:
+          severity: warning
+          component: loki-vl-proxy
+        annotations:
+          summary: "Proxy restarting frequently ({{ $value }} restarts/hour)"
+          description: "Pod is crash-looping. Check logs for OOM or startup errors."
