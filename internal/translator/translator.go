@@ -71,19 +71,22 @@ func translateLogQuery(logql string) (string, error) {
 		}
 
 		// Check for line filter operators first (these are NOT pipe stages)
+		// CRITICAL: Loki |= is SUBSTRING match, not word match.
+		// VL's "text" is word-only; VL's ~"text" is substring/regexp.
+		// We must use ~"text" to match Loki's substring semantics.
 		if strings.HasPrefix(remaining, "|= ") || strings.HasPrefix(remaining, "|=\"") {
-			// Substring match: |= "text" → "text"
+			// Substring match: |= "text" → ~"text" (NOT "text" which is word-only)
 			remaining = strings.TrimSpace(remaining[2:])
 			val, rest := extractQuotedValue(remaining)
-			parts = append(parts, val)
+			parts = append(parts, "~"+val)
 			remaining = rest
 			continue
 		}
 		if strings.HasPrefix(remaining, "!= ") || strings.HasPrefix(remaining, "!=\"") {
-			// Negative substring: != "text" → -"text"
+			// Negative substring: != "text" → NOT ~"text"
 			remaining = strings.TrimSpace(remaining[2:])
 			val, rest := extractQuotedValue(remaining)
-			parts = append(parts, "-"+val)
+			parts = append(parts, "NOT ~"+val)
 			remaining = rest
 			continue
 		}

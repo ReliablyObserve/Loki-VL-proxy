@@ -27,14 +27,14 @@ func TestTranslateLogQL(t *testing.T) {
 			want:  `app:=nginx host:=host-42`,
 		},
 		{
-			name:  "line contains filter",
+			name:  "line contains filter — substring semantics",
 			logql: `{app="nginx"} |= "error"`,
-			want:  `app:=nginx "error"`,
+			want:  `app:=nginx ~"error"`,
 		},
 		{
-			name:  "line not contains filter",
+			name:  "line not contains filter — substring semantics",
 			logql: `{app="nginx"} != "debug"`,
-			want:  `app:=nginx -"debug"`,
+			want:  `app:=nginx NOT ~"debug"`,
 		},
 		{
 			name:  "regexp filter",
@@ -87,9 +87,9 @@ func TestTranslateLogQL(t *testing.T) {
 			want:  `app:=nginx | fields _time, _msg, _stream, app, message`,
 		},
 		{
-			name:  "multiple line filters",
+			name:  "multiple line filters — both substring",
 			logql: `{app="nginx"} |= "error" |= "timeout"`,
-			want:  `app:=nginx "error" "timeout"`,
+			want:  `app:=nginx ~"error" ~"timeout"`,
 		},
 		{
 			name:  "go template to logsql format",
@@ -120,6 +120,18 @@ func TestTranslateLogQL(t *testing.T) {
 			name:  "regex with alternation",
 			logql: `{namespace=~"prod|staging"}`,
 			want:  `namespace:~"prod|staging"`,
+		},
+		// Substring semantics test — critical correctness
+		{
+			name:  "substring matches partial words like Loki does",
+			logql: `{app="nginx"} |= "err"`,
+			// Must use ~"err" not "err" — Loki matches "error", "stderr", etc.
+			want: `app:=nginx ~"err"`,
+		},
+		{
+			name:  "chained substring + negative substring",
+			logql: `{app="nginx"} |= "error" != "timeout"`,
+			want:  `app:=nginx ~"error" NOT ~"timeout"`,
 		},
 		// Parser + filter chain tests
 		{
