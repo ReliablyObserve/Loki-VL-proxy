@@ -109,12 +109,43 @@ func TestTranslateLogQL(t *testing.T) {
 		{
 			name:  "regex label in stream selector",
 			logql: `{app=~"api-.*",namespace="prod"}`,
-			want:  `app:~api-.* namespace:=prod`,
+			want:  `app:~"api-.*" namespace:=prod`,
 		},
 		{
 			name:  "negative regex in stream selector",
 			logql: `{namespace!~"kube-.*"}`,
-			want:  `-namespace:~kube-.*`,
+			want:  `-namespace:~"kube-.*"`,
+		},
+		{
+			name:  "regex with alternation",
+			logql: `{namespace=~"prod|staging"}`,
+			want:  `namespace:~"prod|staging"`,
+		},
+		// Parser + filter chain tests
+		{
+			name:  "json then label filter",
+			logql: `{app="api"} | json | status >= 400`,
+			want:  `app:=api | unpack_json | filter status:>=400`,
+		},
+		{
+			name:  "json then multiple filters",
+			logql: `{app="api"} | json | status >= 500 | method = "POST"`,
+			want:  `app:=api | unpack_json | filter status:>=500 | filter method:=POST`,
+		},
+		{
+			name:  "logfmt then label filter",
+			logql: `{app="api"} | logfmt | duration > "1s"`,
+			want:  `app:=api | unpack_logfmt | filter duration:>1s`,
+		},
+		{
+			name:  "json then keep",
+			logql: `{app="api"} | json | keep level, status`,
+			want:  `app:=api | unpack_json | fields level, status`,
+		},
+		{
+			name:  "json then drop",
+			logql: `{app="api"} | json | drop __error__`,
+			want:  `app:=api | unpack_json | delete __error__`,
 		},
 	}
 

@@ -57,6 +57,10 @@ func translateLogQuery(logql string) (string, error) {
 		}
 	}
 
+	// Track whether we've seen a parser pipe (json, logfmt, pattern, regexp).
+	// After a parser, label filters must become VL `| filter` pipes.
+	afterParser := false
+
 	// 2. Process pipeline stages: | operator ...
 	// LogQL line filters: |= "text", != "text", |~ "regexp", !~ "regexp"
 	// LogQL pipe stages: | json, | logfmt, | label == "value", etc.
@@ -115,6 +119,14 @@ func translateLogQuery(logql string) (string, error) {
 
 		translated := translatePipelineStage(stage)
 		if translated != "" {
+			// Track parser state — after a parser, label filters become | filter
+			if isParserStage(translated) {
+				afterParser = true
+			}
+			// If this is a bare field filter after a parser, wrap it as | filter
+			if afterParser && !strings.HasPrefix(translated, "|") && isFieldFilter(translated) {
+				translated = "| filter " + translated
+			}
 			parts = append(parts, translated)
 		}
 	}
@@ -529,11 +541,12 @@ func streamMatcherToFieldFilter(matcher string) string {
 		logql  string
 		logsql string
 		neg    bool
+		isRe   bool // regex values need quotes preserved
 	}{
-		{"!~", ":~", true},
-		{"=~", ":~", false},
-		{"!=", ":=", true},
-		{"=", ":=", false},
+		{"!~", ":~", true, true},
+		{"=~", ":~", false, true},
+		{"!=", ":=", true, false},
+		{"=", ":=", false, false},
 	}
 
 	for _, op := range ops {
@@ -541,8 +554,19 @@ func streamMatcherToFieldFilter(matcher string) string {
 		if idx > 0 {
 			label := strings.TrimSpace(matcher[:idx])
 			value := strings.TrimSpace(matcher[idx+len(op.logql):])
-			value = strings.Trim(value, `"`)
 
+			if op.isRe {
+				// Regex values: keep quotes for VL field regex filters
+				// VL syntax: field:~"regex"
+				value = strings.Trim(value, `"`)
+				if op.neg {
+					return fmt.Sprintf(`-%s%s"%s"`, label, op.logsql, value)
+				}
+				return fmt.Sprintf(`%s%s"%s"`, label, op.logsql, value)
+			}
+
+			// Exact match: strip quotes
+			value = strings.Trim(value, `"`)
 			if op.neg {
 				return fmt.Sprintf("-%s%s%s", label, op.logsql, value)
 			}
@@ -550,6 +574,17 @@ func streamMatcherToFieldFilter(matcher string) string {
 		}
 	}
 	return ""
+}
+
+func isParserStage(translated string) bool {
+	return translated == "| unpack_json" || translated == "| unpack_logfmt" ||
+		strings.HasPrefix(translated, "| extract ") || strings.HasPrefix(translated, "| extract_regexp ")
+}
+
+func isFieldFilter(s string) bool {
+	// Field filters contain :=, :~, :>, :<, :>=, :<=
+	return strings.Contains(s, ":=") || strings.Contains(s, ":~") ||
+		strings.Contains(s, ":>") || strings.Contains(s, ":<")
 }
 
 func translateBareFilter(s string) string {
