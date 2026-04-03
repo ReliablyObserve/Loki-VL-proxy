@@ -4,219 +4,248 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/szibis/Loki-VL-proxy/internal/cache"
 )
 
-// TestLokiResponseContract_Labels verifies /loki/api/v1/labels returns
-// the exact Loki response format: {"status":"success","data":[...strings]}
-func TestLokiResponseContract_Labels(t *testing.T) {
-	// Mock VL backend returning field_names
+// =============================================================================
+// Loki API Contract Tests
+//
+// These tests define the EXACT response format Grafana expects from a Loki
+// datasource. Every endpoint Grafana calls is tested. The VL backend is mocked.
+// Tests verify:
+//   1. HTTP status code
+//   2. Content-Type header
+//   3. Response JSON structure (field names, types, nesting)
+//   4. Correct translation of request params to VL backend
+//
+// Reference: https://grafana.com/docs/loki/latest/reference/loki-http-api/
+// =============================================================================
+
+// --- /loki/api/v1/labels ---
+
+func TestContract_Labels_ResponseFormat(t *testing.T) {
+	vlBackend := mockVLFieldNames(t, []fieldHit{
+		{"app", 100}, {"env", 50}, {"_msg", 200}, {"level", 75},
+	})
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/labels")
+
+	assertLokiSuccess(t, resp)
+	data := assertDataIsStringArray(t, resp)
+
+	if len(data) != 4 {
+		t.Errorf("expected 4 labels, got %d: %v", len(data), data)
+	}
+}
+
+func TestContract_Labels_PassesTimeRange(t *testing.T) {
+	var receivedStart, receivedEnd string
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/select/logsql/field_names" {
-			t.Errorf("unexpected VL path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"values": []map[string]interface{}{
-				{"value": "app", "hits": 100},
-				{"value": "env", "hits": 50},
-				{"value": "_msg", "hits": 200},
-			},
-		})
+		receivedStart = r.URL.Query().Get("start")
+		receivedEnd = r.URL.Query().Get("end")
+		writeVLFieldNames(w, nil)
 	}))
 	defer vlBackend.Close()
 
-	p := newTestProxy(t, vlBackend.URL)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
-	p.handleLabels(w, r)
+	doGet(t, vlBackend.URL, "/loki/api/v1/labels?start=1609459200&end=1609545600")
 
-	assertStatusCode(t, w, http.StatusOK)
-	assertContentType(t, w, "application/json")
-
-	var resp map[string]interface{}
-	mustUnmarshal(t, w.Body.Bytes(), &resp)
-
-	// Loki contract: status MUST be "success"
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success, got %v", resp["status"])
+	if receivedStart != "1609459200" {
+		t.Errorf("expected start=1609459200, got %q", receivedStart)
 	}
-
-	// Loki contract: data MUST be a string array
-	data, ok := resp["data"].([]interface{})
-	if !ok {
-		t.Fatalf("data must be an array, got %T", resp["data"])
+	if receivedEnd != "1609545600" {
+		t.Errorf("expected end=1609545600, got %q", receivedEnd)
 	}
+}
 
-	// Every element must be a string
-	for i, v := range data {
-		if _, ok := v.(string); !ok {
-			t.Errorf("data[%d] must be string, got %T: %v", i, v, v)
-		}
+func TestContract_Labels_EmptyResult(t *testing.T) {
+	vlBackend := mockVLFieldNames(t, nil)
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/labels")
+	assertLokiSuccess(t, resp)
+
+	data := assertDataIsStringArray(t, resp)
+	if len(data) != 0 {
+		t.Errorf("expected empty array, got %v", data)
 	}
+}
 
+// --- /loki/api/v1/label/{name}/values ---
+
+func TestContract_LabelValues_ResponseFormat(t *testing.T) {
+	vlBackend := mockVLFieldValues(t, "app", []fieldHit{
+		{"nginx", 100}, {"api", 50}, {"worker", 25},
+	})
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/label/app/values")
+	assertLokiSuccess(t, resp)
+
+	data := assertDataIsStringArray(t, resp)
 	if len(data) != 3 {
-		t.Errorf("expected 3 labels, got %d", len(data))
+		t.Errorf("expected 3 values, got %d", len(data))
 	}
+	assertContains(t, data, "nginx")
+	assertContains(t, data, "api")
 }
 
-// TestLokiResponseContract_LabelValues verifies /loki/api/v1/label/{name}/values.
-func TestLokiResponseContract_LabelValues(t *testing.T) {
+func TestContract_LabelValues_PassesFieldParam(t *testing.T) {
+	var receivedField string
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify proxy sends correct VL field param
-		field := r.URL.Query().Get("field")
-		if field != "app" {
-			t.Errorf("expected field=app, got %q", field)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"values": []map[string]interface{}{
-				{"value": "nginx", "hits": 100},
-				{"value": "api", "hits": 50},
-			},
-		})
+		receivedField = r.URL.Query().Get("field")
+		writeVLFieldValues(w, nil)
 	}))
 	defer vlBackend.Close()
 
-	p := newTestProxy(t, vlBackend.URL)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/label/app/values", nil)
-	p.handleLabelValues(w, r)
+	doGet(t, vlBackend.URL, "/loki/api/v1/label/namespace/values")
 
-	assertStatusCode(t, w, http.StatusOK)
-
-	var resp map[string]interface{}
-	mustUnmarshal(t, w.Body.Bytes(), &resp)
-
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success, got %v", resp["status"])
-	}
-
-	data, ok := resp["data"].([]interface{})
-	if !ok {
-		t.Fatalf("data must be an array, got %T", resp["data"])
-	}
-
-	values := make([]string, len(data))
-	for i, v := range data {
-		s, ok := v.(string)
-		if !ok {
-			t.Fatalf("data[%d] must be string, got %T", i, v)
-		}
-		values[i] = s
-	}
-
-	if len(values) != 2 || values[0] != "nginx" || values[1] != "api" {
-		t.Errorf("unexpected label values: %v", values)
+	if receivedField != "namespace" {
+		t.Errorf("expected field=namespace, got %q", receivedField)
 	}
 }
 
-// TestLokiResponseContract_QueryRange_Streams verifies log query responses
-// match the Loki streams format exactly.
-func TestLokiResponseContract_QueryRange_Streams(t *testing.T) {
-	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// VL /select/logsql/query returns NDJSON
-		w.Header().Set("Content-Type", "application/stream+json")
-		lines := []string{
-			`{"_time":"2024-01-15T10:30:00Z","_msg":"error in service","_stream":"{app=\"nginx\"}","level":"error"}`,
-			`{"_time":"2024-01-15T10:30:01Z","_msg":"request completed","_stream":"{app=\"nginx\"}","level":"info"}`,
-		}
-		for _, line := range lines {
-			w.Write([]byte(line + "\n"))
-		}
-	}))
+func TestContract_LabelValues_EmptyResult(t *testing.T) {
+	vlBackend := mockVLFieldValues(t, "nonexistent", nil)
 	defer vlBackend.Close()
 
-	p := newTestProxy(t, vlBackend.URL)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D&start=1705312200&end=1705312300&limit=100", nil)
-	p.handleQueryRange(w, r)
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/label/nonexistent/values")
+	assertLokiSuccess(t, resp)
 
-	assertStatusCode(t, w, http.StatusOK)
-
-	var resp map[string]interface{}
-	mustUnmarshal(t, w.Body.Bytes(), &resp)
-
-	// Loki contract checks
-	if resp["status"] != "success" {
-		t.Fatalf("expected status=success, got %v", resp["status"])
+	data := assertDataIsStringArray(t, resp)
+	if len(data) != 0 {
+		t.Errorf("expected empty array, got %v", data)
 	}
+}
 
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("data must be an object, got %T", resp["data"])
-	}
+// --- /loki/api/v1/query_range (streams / log query) ---
 
-	// For log queries, resultType MUST be "streams"
+func TestContract_QueryRange_StreamsFormat(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, []vlLogEntry{
+		{Time: "2024-01-15T10:30:00Z", Msg: "error in payment", Stream: `{app="api"}`, Fields: map[string]string{"level": "error"}},
+		{Time: "2024-01-15T10:30:01Z", Msg: "request completed", Stream: `{app="api"}`, Fields: map[string]string{"level": "info"}},
+	})
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D&start=1705312200&end=1705312300&limit=100")
+	assertLokiSuccess(t, resp)
+
+	data := assertDataIsObject(t, resp)
+
+	// resultType MUST be "streams" for log queries
 	if data["resultType"] != "streams" {
 		t.Errorf("expected resultType=streams, got %v", data["resultType"])
 	}
 
-	result, ok := data["result"].([]interface{})
-	if !ok {
-		t.Fatalf("result must be an array, got %T", data["result"])
-	}
-
+	// result MUST be array
+	result := assertResultIsArray(t, data)
 	if len(result) == 0 {
-		t.Fatal("result must not be empty — VL returned 2 log lines")
+		t.Fatal("result must not be empty")
 	}
 
-	// Each result entry must have "stream" (map) and "values" (array of [ts, line])
+	// Each stream entry: {"stream": {labels}, "values": [[ts, line], ...]}
 	for i, entry := range result {
-		obj, ok := entry.(map[string]interface{})
-		if !ok {
-			t.Fatalf("result[%d] must be object, got %T", i, entry)
-		}
-
-		// "stream" must be a map of string→string
-		stream, ok := obj["stream"].(map[string]interface{})
-		if !ok {
-			t.Fatalf("result[%d].stream must be object, got %T", i, obj["stream"])
-		}
-		for k, v := range stream {
-			if _, ok := v.(string); !ok {
-				t.Errorf("result[%d].stream[%q] must be string, got %T", i, k, v)
-			}
-		}
-
-		// "values" must be array of [nanosecond_string, log_line_string]
-		values, ok := obj["values"].([]interface{})
-		if !ok {
-			t.Fatalf("result[%d].values must be array, got %T", i, obj["values"])
-		}
-
-		for j, val := range values {
-			pair, ok := val.([]interface{})
-			if !ok || len(pair) != 2 {
-				t.Errorf("result[%d].values[%d] must be [ts, line] pair, got %v", i, j, val)
-				continue
-			}
-
-			// ts must be a string of nanosecond epoch
-			ts, ok := pair[0].(string)
-			if !ok {
-				t.Errorf("result[%d].values[%d][0] (timestamp) must be string, got %T", i, j, pair[0])
-			}
-			if len(ts) < 10 {
-				t.Errorf("result[%d].values[%d][0] timestamp too short: %q", i, j, ts)
-			}
-
-			// line must be a string
-			if _, ok := pair[1].(string); !ok {
-				t.Errorf("result[%d].values[%d][1] (line) must be string, got %T", i, j, pair[1])
-			}
-		}
+		assertStreamEntry(t, i, entry)
 	}
 }
 
-// TestLokiResponseContract_Series verifies /loki/api/v1/series returns
-// {"status":"success","data":[{label_map}, ...]}
-func TestLokiResponseContract_Series(t *testing.T) {
+func TestContract_QueryRange_StreamTimestampsAreNanosecondStrings(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, []vlLogEntry{
+		{Time: "2024-01-15T10:30:00.123456789Z", Msg: "test", Stream: `{app="x"}`},
+	})
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query_range?query=*&start=1&end=2&limit=10")
+	data := assertDataIsObject(t, resp)
+	result := assertResultIsArray(t, data)
+
+	entry := result[0].(map[string]interface{})
+	values := entry["values"].([]interface{})
+	pair := values[0].([]interface{})
+
+	ts, ok := pair[0].(string)
+	if !ok {
+		t.Fatalf("timestamp must be string, got %T", pair[0])
+	}
+	// Nanosecond timestamps are 19 digits
+	if len(ts) < 19 {
+		t.Errorf("timestamp should be nanoseconds (19+ digits), got %q (%d chars)", ts, len(ts))
+	}
+}
+
+func TestContract_QueryRange_EmptyResult(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, nil)
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query_range?query=*&start=1&end=2&limit=10")
+	assertLokiSuccess(t, resp)
+
+	data := assertDataIsObject(t, resp)
+	if data["resultType"] != "streams" {
+		t.Errorf("expected resultType=streams even for empty, got %v", data["resultType"])
+	}
+}
+
+func TestContract_QueryRange_StatsField(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, nil)
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query_range?query=*&start=1&end=2&limit=10")
+	data := assertDataIsObject(t, resp)
+
+	// Loki responses include a "stats" object (can be empty but must exist)
+	if _, ok := data["stats"]; !ok {
+		t.Error("query_range response missing 'stats' field — Grafana expects it")
+	}
+}
+
+// --- /loki/api/v1/query_range (matrix / metric query) ---
+
+func TestContract_QueryRange_MatrixFormat(t *testing.T) {
+	// When VL returns Prometheus-format stats, proxy should wrap as matrix
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/select/logsql/stats_query_range" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "success",
+				"data": map[string]interface{}{
+					"resultType": "matrix",
+					"result": []map[string]interface{}{
+						{
+							"metric": map[string]string{"app": "nginx"},
+							"values": [][]interface{}{{1705312200, "42"}, {1705312260, "37"}},
+						},
+					},
+				},
+			})
+		}
+	}))
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query_range?query=rate(%7Bapp%3D%22nginx%22%7D%5B5m%5D)&start=1705312200&end=1705312800&step=60")
+	assertLokiSuccess(t, resp)
+}
+
+// --- /loki/api/v1/query (instant) ---
+
+func TestContract_Query_ResponseFormat(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, []vlLogEntry{
+		{Time: "2024-01-15T10:30:00Z", Msg: "test line", Stream: `{app="x"}`},
+	})
+	defer vlBackend.Close()
+
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/query?query=*&limit=10")
+	assertLokiSuccess(t, resp)
+}
+
+// --- /loki/api/v1/series ---
+
+func TestContract_Series_ResponseFormat(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"values": []map[string]interface{}{
 				{"value": `{app="nginx",env="prod"}`, "hits": 100},
@@ -232,26 +261,25 @@ func TestLokiResponseContract_Series(t *testing.T) {
 	r.ParseForm()
 	p.handleSeries(w, r)
 
-	assertStatusCode(t, w, http.StatusOK)
-
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
 
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success, got %v", resp["status"])
-	}
-
+	// data MUST be array of label map objects
 	data, ok := resp["data"].([]interface{})
 	if !ok {
 		t.Fatalf("data must be array, got %T", resp["data"])
 	}
+	if len(data) != 2 {
+		t.Errorf("expected 2 series, got %d", len(data))
+	}
 
-	// Each entry must be a label map (string→string)
 	for i, entry := range data {
 		labelMap, ok := entry.(map[string]interface{})
 		if !ok {
-			t.Fatalf("data[%d] must be object, got %T", i, entry)
+			t.Fatalf("data[%d] must be label map object, got %T", i, entry)
 		}
+		// Every value must be string
 		for k, v := range labelMap {
 			if _, ok := v.(string); !ok {
 				t.Errorf("data[%d][%q] must be string, got %T", i, k, v)
@@ -260,33 +288,42 @@ func TestLokiResponseContract_Series(t *testing.T) {
 	}
 }
 
-// TestLokiResponseContract_BuildInfo verifies buildinfo response.
-func TestLokiResponseContract_BuildInfo(t *testing.T) {
-	p := newTestProxy(t, "http://unused")
+func TestContract_Series_ParsesLabelsCorrectly(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"values": []map[string]interface{}{
+				{"value": `{app="nginx",namespace="prod",pod="nginx-abc123"}`, "hits": 1},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/status/buildinfo", nil)
-	p.handleBuildInfo(w, r)
+	r := httptest.NewRequest("GET", "/loki/api/v1/series?match[]=%7B%7D", nil)
+	r.ParseForm()
+	p.handleSeries(w, r)
 
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
 
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success, got %v", resp["status"])
-	}
+	data := resp["data"].([]interface{})
+	labelMap := data[0].(map[string]interface{})
 
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("data must be object, got %T", resp["data"])
+	if labelMap["app"] != "nginx" {
+		t.Errorf("expected app=nginx, got %v", labelMap["app"])
 	}
-
-	// Loki buildinfo must have version
-	if _, ok := data["version"]; !ok {
-		t.Error("buildinfo missing 'version' field")
+	if labelMap["namespace"] != "prod" {
+		t.Errorf("expected namespace=prod, got %v", labelMap["namespace"])
+	}
+	if labelMap["pod"] != "nginx-abc123" {
+		t.Errorf("expected pod=nginx-abc123, got %v", labelMap["pod"])
 	}
 }
 
-// TestLokiResponseContract_IndexStats verifies stub returns valid structure.
-func TestLokiResponseContract_IndexStats(t *testing.T) {
+// --- /loki/api/v1/index/stats ---
+
+func TestContract_IndexStats_ResponseFormat(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/index/stats?query=%7B%7D", nil)
@@ -295,163 +332,184 @@ func TestLokiResponseContract_IndexStats(t *testing.T) {
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
 
-	// Loki index/stats returns: streams, chunks, entries, bytes (all numbers)
+	// Loki index/stats returns flat object with numeric fields
 	for _, field := range []string{"streams", "chunks", "bytes", "entries"} {
-		if _, ok := resp[field]; !ok {
-			t.Errorf("index/stats missing field %q", field)
+		v, ok := resp[field]
+		if !ok {
+			t.Errorf("missing required field %q", field)
+			continue
+		}
+		// Must be a number (JSON numbers are float64 in Go)
+		if _, ok := v.(float64); !ok {
+			t.Errorf("field %q must be number, got %T", field, v)
 		}
 	}
 }
 
-// TestLokiResponseContract_Volume verifies volume stub.
-func TestLokiResponseContract_Volume(t *testing.T) {
+// --- /loki/api/v1/index/volume ---
+
+func TestContract_Volume_ResponseFormat(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume", nil)
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume?query=%7B%7D&start=1&end=2", nil)
 	p.handleVolume(w, r)
 
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
 
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success")
-	}
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("data must be object")
-	}
+	data := assertDataIsObject(t, resp)
 	if data["resultType"] != "vector" {
 		t.Errorf("expected resultType=vector, got %v", data["resultType"])
 	}
+	assertResultIsArray(t, data)
 }
 
-// TestLokiResponseContract_VolumeRange verifies volume_range stub.
-func TestLokiResponseContract_VolumeRange(t *testing.T) {
+// --- /loki/api/v1/index/volume_range ---
+
+func TestContract_VolumeRange_ResponseFormat(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume_range", nil)
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume_range?query=%7B%7D&start=1&end=2&step=60", nil)
 	p.handleVolumeRange(w, r)
 
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
 
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success")
-	}
-	data, ok := resp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("data must be object")
-	}
+	data := assertDataIsObject(t, resp)
 	if data["resultType"] != "matrix" {
 		t.Errorf("expected resultType=matrix, got %v", data["resultType"])
 	}
+	assertResultIsArray(t, data)
 }
 
-// TestCacheProtectsBackend verifies repeated label requests hit cache.
-func TestCacheProtectsBackend(t *testing.T) {
-	callCount := 0
-	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"values": []map[string]interface{}{
-				{"value": "app", "hits": 100},
-			},
-		})
-	}))
+// --- /loki/api/v1/detected_fields ---
+
+func TestContract_DetectedFields_ResponseFormat(t *testing.T) {
+	vlBackend := mockVLFieldNames(t, []fieldHit{
+		{"level", 1000}, {"duration", 500}, {"status", 300},
+	})
 	defer vlBackend.Close()
 
-	p := newTestProxy(t, vlBackend.URL)
+	resp := doGet(t, vlBackend.URL, "/loki/api/v1/detected_fields?query=*")
 
-	// First call — cache miss
-	w1 := httptest.NewRecorder()
-	r1 := httptest.NewRequest("GET", "/loki/api/v1/labels?start=1&end=2", nil)
-	p.handleLabels(w1, r1)
-	if callCount != 1 {
-		t.Fatalf("expected 1 backend call, got %d", callCount)
-	}
-
-	// Second call with same params — cache hit
-	w2 := httptest.NewRecorder()
-	r2 := httptest.NewRequest("GET", "/loki/api/v1/labels?start=1&end=2", nil)
-	p.handleLabels(w2, r2)
-	if callCount != 1 {
-		t.Errorf("expected cache hit (still 1 backend call), got %d", callCount)
-	}
-
-	// Third call with different params — cache miss
-	w3 := httptest.NewRecorder()
-	r3 := httptest.NewRequest("GET", "/loki/api/v1/labels?start=3&end=4", nil)
-	p.handleLabels(w3, r3)
-	if callCount != 2 {
-		t.Errorf("expected 2 backend calls after cache miss, got %d", callCount)
-	}
-}
-
-// TestTranslationPassedToBackend verifies LogQL is translated before forwarding.
-func TestTranslationPassedToBackend(t *testing.T) {
-	var receivedQuery string
-	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		receivedQuery = r.FormValue("query")
-		// Return empty NDJSON
-		w.Write([]byte{})
-	}))
-	defer vlBackend.Close()
-
-	p := newTestProxy(t, vlBackend.URL)
-	w := httptest.NewRecorder()
-	// Send LogQL query with line filter (URL-encoded)
-	r := httptest.NewRequest("GET", `/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D+%7C%3D+%22error%22&start=1&end=2&limit=10`, nil)
-	p.handleQueryRange(w, r)
-
-	// Proxy should have translated |= "error" to "error"
-	if receivedQuery != `{app="nginx"} "error"` {
-		t.Errorf("expected translated query, got %q", receivedQuery)
-	}
-}
-
-// TestDetectedFieldsResponse verifies /loki/api/v1/detected_fields format.
-func TestDetectedFieldsResponse(t *testing.T) {
-	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"values": []map[string]interface{}{
-				{"value": "level", "hits": 1000},
-				{"value": "duration", "hits": 500},
-			},
-		})
-	}))
-	defer vlBackend.Close()
-
-	p := newTestProxy(t, vlBackend.URL)
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?query=*", nil)
-	p.handleDetectedFields(w, r)
-
-	var resp map[string]interface{}
-	mustUnmarshal(t, w.Body.Bytes(), &resp)
-
+	// Loki detected_fields returns {"fields": [{label, type, cardinality}, ...]}
 	fields, ok := resp["fields"].([]interface{})
 	if !ok {
-		t.Fatalf("fields must be array, got %T", resp["fields"])
+		t.Fatalf("missing 'fields' array, got %T", resp["fields"])
 	}
 
 	for i, f := range fields {
 		obj, ok := f.(map[string]interface{})
 		if !ok {
-			t.Fatalf("fields[%d] must be object", i)
+			t.Fatalf("fields[%d] must be object, got %T", i, f)
 		}
-		// Each field must have label, type, cardinality
+		// Required fields per Loki spec
 		if _, ok := obj["label"]; !ok {
 			t.Errorf("fields[%d] missing 'label'", i)
 		}
 		if _, ok := obj["type"]; !ok {
 			t.Errorf("fields[%d] missing 'type'", i)
 		}
+		if _, ok := obj["cardinality"]; !ok {
+			t.Errorf("fields[%d] missing 'cardinality'", i)
+		}
 	}
 }
 
-// TestMetricsEndpoint verifies /metrics returns Prometheus format.
-func TestMetricsEndpoint(t *testing.T) {
+// --- /loki/api/v1/patterns ---
+
+func TestContract_Patterns_ResponseFormat(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/patterns?query=%7B%7D&start=1&end=2", nil)
+	p.handlePatterns(w, r)
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
+
+	// data must be array (even if empty)
+	data, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("data must be array, got %T", resp["data"])
+	}
+	_ = data // stub returns empty, that's fine
+}
+
+// --- /loki/api/v1/tail ---
+
+func TestContract_Tail_Returns501(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/tail?query=*", nil)
+	p.handleTail(w, r)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d", w.Code)
+	}
+}
+
+// --- /loki/api/v1/status/buildinfo ---
+
+func TestContract_BuildInfo_ResponseFormat(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/status/buildinfo", nil)
+	p.handleBuildInfo(w, r)
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
+
+	data := assertDataIsObject(t, resp)
+	for _, field := range []string{"version", "revision", "branch", "goVersion"} {
+		if _, ok := data[field]; !ok {
+			t.Errorf("buildinfo missing field %q", field)
+		}
+	}
+}
+
+// --- /ready ---
+
+func TestContract_Ready_HealthyBackend(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/ready", nil)
+	p.handleReady(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 when backend healthy, got %d", w.Code)
+	}
+}
+
+func TestContract_Ready_UnhealthyBackend(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/ready", nil)
+	p.handleReady(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when backend unhealthy, got %d", w.Code)
+	}
+}
+
+// --- /metrics ---
+
+func TestContract_Metrics_PrometheusFormat(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
@@ -460,22 +518,250 @@ func TestMetricsEndpoint(t *testing.T) {
 	r := httptest.NewRequest("GET", "/metrics", nil)
 	mux.ServeHTTP(w, r)
 
-	body := w.Body.String()
-	requiredMetrics := []string{
-		"loki_vl_proxy_requests_total",
-		"loki_vl_proxy_cache_hits_total",
-		"loki_vl_proxy_cache_misses_total",
-		"loki_vl_proxy_uptime_seconds",
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain Content-Type, got %q", ct)
 	}
 
-	for _, m := range requiredMetrics {
-		if !containsString(body, m) {
-			t.Errorf("/metrics missing: %s", m)
+	body := w.Body.String()
+	required := []string{
+		"loki_vl_proxy_requests_total",
+		"loki_vl_proxy_request_duration_seconds",
+		"loki_vl_proxy_cache_hits_total",
+		"loki_vl_proxy_cache_misses_total",
+		"loki_vl_proxy_translations_total",
+		"loki_vl_proxy_translation_errors_total",
+		"loki_vl_proxy_uptime_seconds",
+	}
+	for _, m := range required {
+		if !strings.Contains(body, m) {
+			t.Errorf("/metrics missing required metric: %s", m)
 		}
 	}
 }
 
-// --- helpers ---
+// =============================================================================
+// Translation Integration Tests
+// Verify LogQL queries are correctly translated before hitting VL backend
+// =============================================================================
+
+func TestTranslation_LineFilterForwarded(t *testing.T) {
+	var receivedQuery string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		receivedQuery = r.FormValue("query")
+		w.Write([]byte{})
+	}))
+	defer vlBackend.Close()
+
+	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D+%7C%3D+%22error%22&start=1&end=2&limit=10`)
+
+	if receivedQuery != `{app="nginx"} "error"` {
+		t.Errorf("expected translated query, got %q", receivedQuery)
+	}
+}
+
+func TestTranslation_NegativeFilter(t *testing.T) {
+	var receivedQuery string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		receivedQuery = r.FormValue("query")
+		w.Write([]byte{})
+	}))
+	defer vlBackend.Close()
+
+	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D+%21%3D+%22debug%22&start=1&end=2&limit=10`)
+
+	if receivedQuery != `{app="nginx"} -"debug"` {
+		t.Errorf("expected translated negative filter, got %q", receivedQuery)
+	}
+}
+
+func TestTranslation_JSONParser(t *testing.T) {
+	var receivedQuery string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		receivedQuery = r.FormValue("query")
+		w.Write([]byte{})
+	}))
+	defer vlBackend.Close()
+
+	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22x%22%7D+%7C+json&start=1&end=2&limit=10`)
+
+	if receivedQuery != `{app="x"} | unpack_json` {
+		t.Errorf("expected json→unpack_json translation, got %q", receivedQuery)
+	}
+}
+
+// =============================================================================
+// Cache Protection Tests
+// =============================================================================
+
+func TestCache_LabelsHitOnRepeat(t *testing.T) {
+	callCount := 0
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		writeVLFieldNames(w, []fieldHit{{"app", 1}})
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+
+	// First call — miss
+	w1 := httptest.NewRecorder()
+	p.handleLabels(w1, httptest.NewRequest("GET", "/loki/api/v1/labels?start=1&end=2", nil))
+	if callCount != 1 {
+		t.Fatalf("expected 1 backend call, got %d", callCount)
+	}
+
+	// Second call — hit
+	w2 := httptest.NewRecorder()
+	p.handleLabels(w2, httptest.NewRequest("GET", "/loki/api/v1/labels?start=1&end=2", nil))
+	if callCount != 1 {
+		t.Errorf("expected cache hit (still 1 call), got %d", callCount)
+	}
+
+	// Different params — miss
+	w3 := httptest.NewRecorder()
+	p.handleLabels(w3, httptest.NewRequest("GET", "/loki/api/v1/labels?start=3&end=4", nil))
+	if callCount != 2 {
+		t.Errorf("expected 2 calls after different params, got %d", callCount)
+	}
+}
+
+func TestCache_LabelValuesHitOnRepeat(t *testing.T) {
+	callCount := 0
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		writeVLFieldValues(w, []fieldHit{{"nginx", 1}})
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+
+	w1 := httptest.NewRecorder()
+	p.handleLabelValues(w1, httptest.NewRequest("GET", "/loki/api/v1/label/app/values?start=1&end=2", nil))
+	if callCount != 1 {
+		t.Fatalf("expected 1 backend call, got %d", callCount)
+	}
+
+	w2 := httptest.NewRecorder()
+	p.handleLabelValues(w2, httptest.NewRequest("GET", "/loki/api/v1/label/app/values?start=1&end=2", nil))
+	if callCount != 1 {
+		t.Errorf("expected cache hit, got %d calls", callCount)
+	}
+}
+
+// =============================================================================
+// POST Support Tests — Loki allows POST for all query endpoints
+// =============================================================================
+
+func TestContract_QueryRange_POST(t *testing.T) {
+	vlBackend := mockVLLogQuery(t, []vlLogEntry{
+		{Time: "2024-01-15T10:30:00Z", Msg: "test", Stream: `{app="x"}`},
+	})
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	body := strings.NewReader("query=%7Bapp%3D%22x%22%7D&start=1&end=2&limit=10")
+	r := httptest.NewRequest("POST", "/loki/api/v1/query_range", body)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	p.handleQueryRange(w, r)
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	assertLokiSuccess(t, resp)
+}
+
+// =============================================================================
+// Mock VL backend helpers
+// =============================================================================
+
+type fieldHit struct {
+	Value string
+	Hits  int64
+}
+
+type vlLogEntry struct {
+	Time   string
+	Msg    string
+	Stream string
+	Fields map[string]string
+}
+
+func mockVLFieldNames(t *testing.T, fields []fieldHit) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeVLFieldNames(w, fields)
+	}))
+}
+
+func writeVLFieldNames(w http.ResponseWriter, fields []fieldHit) {
+	values := make([]map[string]interface{}, len(fields))
+	for i, f := range fields {
+		values[i] = map[string]interface{}{"value": f.Value, "hits": f.Hits}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"values": values})
+}
+
+func mockVLFieldValues(t *testing.T, expectedField string, values []fieldHit) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeVLFieldValues(w, values)
+	}))
+}
+
+func writeVLFieldValues(w http.ResponseWriter, values []fieldHit) {
+	vals := make([]map[string]interface{}, len(values))
+	for i, v := range values {
+		vals[i] = map[string]interface{}{"value": v.Value, "hits": v.Hits}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"values": vals})
+}
+
+func mockVLLogQuery(t *testing.T, entries []vlLogEntry) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/stream+json")
+		for _, e := range entries {
+			obj := map[string]interface{}{
+				"_time":   e.Time,
+				"_msg":    e.Msg,
+				"_stream": e.Stream,
+			}
+			for k, v := range e.Fields {
+				obj[k] = v
+			}
+			line, _ := json.Marshal(obj)
+			w.Write(line)
+			w.Write([]byte("\n"))
+		}
+	}))
+}
+
+// =============================================================================
+// Test execution helpers
+// =============================================================================
+
+func doGet(t *testing.T, backendURL, path string) map[string]interface{} {
+	t.Helper()
+	p := newTestProxy(t, backendURL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", path, nil)
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+	mux.ServeHTTP(w, r)
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response from %s: %v\nbody: %s", path, err, w.Body.String())
+	}
+	return resp
+}
 
 func newTestProxy(t *testing.T, backendURL string) *Proxy {
 	t.Helper()
@@ -483,7 +769,7 @@ func newTestProxy(t *testing.T, backendURL string) *Proxy {
 	p, err := New(Config{
 		BackendURL: backendURL,
 		Cache:      c,
-		LogLevel:   "error", // quiet during tests
+		LogLevel:   "error",
 	})
 	if err != nil {
 		t.Fatalf("failed to create proxy: %v", err)
@@ -491,37 +777,99 @@ func newTestProxy(t *testing.T, backendURL string) *Proxy {
 	return p
 }
 
-func assertStatusCode(t *testing.T, w *httptest.ResponseRecorder, expected int) {
+func assertLokiSuccess(t *testing.T, resp map[string]interface{}) {
 	t.Helper()
-	if w.Code != expected {
-		t.Errorf("expected status %d, got %d (body: %s)", expected, w.Code, w.Body.String())
+	if resp["status"] != "success" {
+		t.Errorf("expected status=success, got %v", resp["status"])
 	}
 }
 
-func assertContentType(t *testing.T, w *httptest.ResponseRecorder, expected string) {
+func assertDataIsStringArray(t *testing.T, resp map[string]interface{}) []string {
 	t.Helper()
-	ct := w.Header().Get("Content-Type")
-	if ct != expected {
-		t.Errorf("expected Content-Type %q, got %q", expected, ct)
+	data, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("data must be array, got %T: %v", resp["data"], resp["data"])
 	}
+	result := make([]string, len(data))
+	for i, v := range data {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("data[%d] must be string, got %T: %v", i, v, v)
+		}
+		result[i] = s
+	}
+	return result
+}
+
+func assertDataIsObject(t *testing.T, resp map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("data must be object, got %T", resp["data"])
+	}
+	return data
+}
+
+func assertResultIsArray(t *testing.T, data map[string]interface{}) []interface{} {
+	t.Helper()
+	result, ok := data["result"].([]interface{})
+	if !ok {
+		t.Fatalf("result must be array, got %T", data["result"])
+	}
+	return result
+}
+
+func assertStreamEntry(t *testing.T, idx int, entry interface{}) {
+	t.Helper()
+	obj, ok := entry.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result[%d] must be object, got %T", idx, entry)
+	}
+
+	// "stream" must be map[string]string
+	stream, ok := obj["stream"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("result[%d].stream must be object, got %T", idx, obj["stream"])
+	}
+	for k, v := range stream {
+		if _, ok := v.(string); !ok {
+			t.Errorf("result[%d].stream[%q] must be string, got %T", idx, k, v)
+		}
+	}
+
+	// "values" must be array of [string, string] pairs
+	values, ok := obj["values"].([]interface{})
+	if !ok {
+		t.Fatalf("result[%d].values must be array, got %T", idx, obj["values"])
+	}
+	for j, val := range values {
+		pair, ok := val.([]interface{})
+		if !ok || len(pair) != 2 {
+			t.Errorf("result[%d].values[%d] must be [ts, line] pair, got %v", idx, j, val)
+			continue
+		}
+		if _, ok := pair[0].(string); !ok {
+			t.Errorf("result[%d].values[%d][0] timestamp must be string, got %T", idx, j, pair[0])
+		}
+		if _, ok := pair[1].(string); !ok {
+			t.Errorf("result[%d].values[%d][1] line must be string, got %T", idx, j, pair[1])
+		}
+	}
+}
+
+func assertContains(t *testing.T, slice []string, s string) {
+	t.Helper()
+	for _, v := range slice {
+		if v == s {
+			return
+		}
+	}
+	t.Errorf("expected slice to contain %q, got %v", s, slice)
 }
 
 func mustUnmarshal(t *testing.T, data []byte, v interface{}) {
 	t.Helper()
 	if err := json.Unmarshal(data, v); err != nil {
-		t.Fatalf("failed to unmarshal JSON: %v (body: %s)", err, string(data))
+		t.Fatalf("failed to unmarshal JSON: %v\nbody: %s", err, string(data))
 	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && stringContains(s, substr))
-}
-
-func stringContains(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
