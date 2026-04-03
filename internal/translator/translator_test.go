@@ -84,7 +84,7 @@ func TestTranslateLogQL(t *testing.T) {
 		{
 			name:  "keep labels",
 			logql: `{app="nginx"} | keep app, message`,
-			want:  `app:=nginx | fields app, message`,
+			want:  `app:=nginx | fields _time, _msg, _stream, app, message`,
 		},
 		{
 			name:  "multiple line filters",
@@ -140,7 +140,7 @@ func TestTranslateLogQL(t *testing.T) {
 		{
 			name:  "json then keep",
 			logql: `{app="api"} | json | keep level, status`,
-			want:  `app:=api | unpack_json | fields level, status`,
+			want:  `app:=api | unpack_json | fields _time, _msg, _stream, level, status`,
 		},
 		{
 			name:  "json then drop",

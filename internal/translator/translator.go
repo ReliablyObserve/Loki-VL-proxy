@@ -191,7 +191,9 @@ func translatePipelineStage(stage string) string {
 		return "| delete " + stage[5:]
 	}
 	if strings.HasPrefix(stage, "keep ") {
-		return "| fields " + stage[5:]
+		// Always include _time and _msg so the proxy can build the response
+		fields := stage[5:]
+		return "| fields _time, _msg, _stream, " + fields
 	}
 
 	// Label filters: label op value
