@@ -17,84 +17,104 @@ func TestTranslateLogQL(t *testing.T) {
 			want:  "*",
 		},
 		{
-			name:  "stream selector only",
+			name:  "stream selector only — single label",
 			logql: `{app="nginx"}`,
-			want:  `{app="nginx"}`,
+			want:  `app:=nginx`,
 		},
 		{
 			name:  "stream selector with multiple labels",
 			logql: `{app="nginx",host="host-42"}`,
-			want:  `{app="nginx",host="host-42"}`,
+			want:  `app:=nginx host:=host-42`,
 		},
 		{
 			name:  "line contains filter",
 			logql: `{app="nginx"} |= "error"`,
-			want:  `{app="nginx"} "error"`,
+			want:  `app:=nginx "error"`,
 		},
 		{
 			name:  "line not contains filter",
 			logql: `{app="nginx"} != "debug"`,
-			want:  `{app="nginx"} -"debug"`,
+			want:  `app:=nginx -"debug"`,
 		},
 		{
 			name:  "regexp filter",
 			logql: `{app="nginx"} |~ "err.*"`,
-			want:  `{app="nginx"} ~"err.*"`,
+			want:  `app:=nginx ~"err.*"`,
 		},
 		{
 			name:  "negative regexp filter",
 			logql: `{app="nginx"} !~ "debug.*"`,
-			want:  `{app="nginx"} NOT ~"debug.*"`,
+			want:  `app:=nginx NOT ~"debug.*"`,
 		},
 		{
 			name:  "json parser",
 			logql: `{app="nginx"} | json`,
-			want:  `{app="nginx"} | unpack_json`,
+			want:  `app:=nginx | unpack_json`,
 		},
 		{
 			name:  "logfmt parser",
 			logql: `{app="nginx"} | logfmt`,
-			want:  `{app="nginx"} | unpack_logfmt`,
+			want:  `app:=nginx | unpack_logfmt`,
 		},
 		{
 			name:  "pattern parser",
 			logql: `{app="nginx"} | pattern "<ip> - - <_>"`,
-			want:  `{app="nginx"} | extract "<ip> - - <_>"`,
+			want:  `app:=nginx | extract "<ip> - - <_>"`,
 		},
 		{
 			name:  "regexp parser",
 			logql: `{app="nginx"} | regexp "(?P<ip>\\d+\\.\\d+)"`,
-			want:  `{app="nginx"} | extract_regexp "(?P<ip>\\d+\\.\\d+)"`,
+			want:  `app:=nginx | extract_regexp "(?P<ip>\\d+\\.\\d+)"`,
 		},
 		{
-			name:  "label equal filter",
+			name:  "label equal filter after pipe",
 			logql: `{app="nginx"} | status == "200"`,
-			want:  `{app="nginx"} status:=200`,
+			want:  `app:=nginx status:=200`,
 		},
 		{
-			name:  "label not equal filter",
+			name:  "label not equal filter after pipe",
 			logql: `{app="nginx"} | status != "500"`,
-			want:  `{app="nginx"} -status:=500`,
+			want:  `app:=nginx -status:=500`,
 		},
 		{
 			name:  "drop labels",
 			logql: `{app="nginx"} | drop trace_id, span_id`,
-			want:  `{app="nginx"} | delete trace_id, span_id`,
+			want:  `app:=nginx | delete trace_id, span_id`,
 		},
 		{
 			name:  "keep labels",
 			logql: `{app="nginx"} | keep app, message`,
-			want:  `{app="nginx"} | fields app, message`,
+			want:  `app:=nginx | fields app, message`,
 		},
 		{
 			name:  "multiple line filters",
 			logql: `{app="nginx"} |= "error" |= "timeout"`,
-			want:  `{app="nginx"} "error" "timeout"`,
+			want:  `app:=nginx "error" "timeout"`,
 		},
 		{
 			name:  "go template to logsql format",
 			logql: `{app="nginx"} | line_format "{{.status}} {{.method}}"`,
-			want:  `{app="nginx"} | format "<status> <method>"`,
+			want:  `app:=nginx | format "<status> <method>"`,
+		},
+		{
+			name:  "multi-label with level filter",
+			logql: `{app="api",namespace="prod",level="error"}`,
+			want:  `app:=api namespace:=prod level:=error`,
+		},
+		{
+			name:  "negative label in stream selector",
+			logql: `{app="api",level!="info"}`,
+			want:  `app:=api -level:=info`,
+		},
+		{
+			name:  "regex label in stream selector",
+			logql: `{app=~"api-.*",namespace="prod"}`,
+			want:  `app:~api-.* namespace:=prod`,
+		},
+		{
+			name:  "negative regex in stream selector",
+			logql: `{namespace!~"kube-.*"}`,
+			want:  `-namespace:~kube-.*`,
 		},
 	}
 
@@ -139,17 +159,17 @@ func TestMetricQueryTranslation(t *testing.T) {
 		{
 			name:  "rate",
 			logql: `rate({app="nginx"}[5m])`,
-			want:  `{app="nginx"} | stats rate()`,
+			want:  `app:=nginx | stats rate()`,
 		},
 		{
 			name:  "count_over_time",
 			logql: `count_over_time({app="nginx"}[5m])`,
-			want:  `{app="nginx"} | stats count()`,
+			want:  `app:=nginx | stats count()`,
 		},
 		{
 			name:  "sum of rate by label",
 			logql: `sum(rate({app="nginx"}[5m])) by (host)`,
-			want:  `{app="nginx"} | stats by (host) rate()`,
+			want:  `app:=nginx | stats by (host) rate()`,
 		},
 	}
 

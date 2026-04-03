@@ -32,16 +32,29 @@ func translateLogQuery(logql string) (string, error) {
 	remaining := logql
 
 	// 1. Extract stream selector {key="value", ...}
+	// In VL, stream selectors `{...}` only match labels that were declared as
+	// _stream_fields at ingestion time. Labels like "level" are typically NOT
+	// stream fields. If we pass {level="error"} to VL, the stream filter
+	// returns zero results.
+	//
+	// Solution: convert ALL Loki stream matchers to LogsQL field filters.
+	// This works regardless of whether the label is a stream field or not,
+	// because VL's field filters match all indexed fields.
 	if strings.HasPrefix(remaining, "{") {
 		end := findMatchingBrace(remaining)
 		if end < 0 {
 			return "", fmt.Errorf("unmatched '{' in stream selector")
 		}
-		streamSelector := remaining[:end+1]
+		streamContent := remaining[1:end]
 		remaining = strings.TrimSpace(remaining[end+1:])
 
-		// Stream selectors are identical between LogQL and LogsQL
-		parts = append(parts, streamSelector)
+		matchers := splitStreamMatchers(streamContent)
+		for _, m := range matchers {
+			ff := streamMatcherToFieldFilter(m)
+			if ff != "" {
+				parts = append(parts, ff)
+			}
+		}
 	}
 
 	// 2. Process pipeline stages: | operator ...
@@ -478,6 +491,65 @@ func extractQuotedOrWord(s string) string {
 	}
 	// Return as quoted
 	return `"` + s + `"`
+}
+
+// splitStreamMatchers splits stream selector content like `app="x",level="error"`
+// into individual matchers, respecting quotes.
+func splitStreamMatchers(s string) []string {
+	var matchers []string
+	inQuote := false
+	start := 0
+	for i, c := range s {
+		if c == '"' {
+			inQuote = !inQuote
+		}
+		if c == ',' && !inQuote {
+			m := strings.TrimSpace(s[start:i])
+			if m != "" {
+				matchers = append(matchers, m)
+			}
+			start = i + 1
+		}
+	}
+	m := strings.TrimSpace(s[start:])
+	if m != "" {
+		matchers = append(matchers, m)
+	}
+	return matchers
+}
+
+// streamMatcherToFieldFilter converts a stream matcher like `level="error"`
+// to a LogsQL field filter like `level:="error"`.
+// Returns "" if the matcher can't be converted (shouldn't happen).
+func streamMatcherToFieldFilter(matcher string) string {
+	matcher = strings.TrimSpace(matcher)
+
+	// Try operators in order of specificity
+	ops := []struct {
+		logql  string
+		logsql string
+		neg    bool
+	}{
+		{"!~", ":~", true},
+		{"=~", ":~", false},
+		{"!=", ":=", true},
+		{"=", ":=", false},
+	}
+
+	for _, op := range ops {
+		idx := strings.Index(matcher, op.logql)
+		if idx > 0 {
+			label := strings.TrimSpace(matcher[:idx])
+			value := strings.TrimSpace(matcher[idx+len(op.logql):])
+			value = strings.Trim(value, `"`)
+
+			if op.neg {
+				return fmt.Sprintf("-%s%s%s", label, op.logsql, value)
+			}
+			return fmt.Sprintf("%s%s%s", label, op.logsql, value)
+		}
+	}
+	return ""
 }
 
 func translateBareFilter(s string) string {

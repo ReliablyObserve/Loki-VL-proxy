@@ -556,7 +556,7 @@ func TestTranslation_LineFilterForwarded(t *testing.T) {
 
 	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D+%7C%3D+%22error%22&start=1&end=2&limit=10`)
 
-	if receivedQuery != `{app="nginx"} "error"` {
+	if receivedQuery != `app:=nginx "error"` {
 		t.Errorf("expected translated query, got %q", receivedQuery)
 	}
 }
@@ -572,7 +572,7 @@ func TestTranslation_NegativeFilter(t *testing.T) {
 
 	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22nginx%22%7D+%21%3D+%22debug%22&start=1&end=2&limit=10`)
 
-	if receivedQuery != `{app="nginx"} -"debug"` {
+	if receivedQuery != `app:=nginx -"debug"` {
 		t.Errorf("expected translated negative filter, got %q", receivedQuery)
 	}
 }
@@ -588,7 +588,7 @@ func TestTranslation_JSONParser(t *testing.T) {
 
 	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bapp%3D%22x%22%7D+%7C+json&start=1&end=2&limit=10`)
 
-	if receivedQuery != `{app="x"} | unpack_json` {
+	if receivedQuery != `app:=x | unpack_json` {
 		t.Errorf("expected json→unpack_json translation, got %q", receivedQuery)
 	}
 }
