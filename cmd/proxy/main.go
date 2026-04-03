@@ -56,6 +56,8 @@ func main() {
 	backendBasicAuth := flag.String("backend-basic-auth", "", "Basic auth for VL backend (user:password)")
 	backendTLSSkip := flag.Bool("backend-tls-skip-verify", false, "Skip TLS verification for VL backend")
 	forwardHeaders := flag.String("forward-headers", "", "Comma-separated list of HTTP headers to forward to VL backend")
+	derivedFieldsJSON := flag.String("derived-fields", "", `JSON derived fields: [{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]`)
+	streamResponse := flag.Bool("stream-response", false, "Stream log responses via chunked transfer encoding")
 
 	flag.Parse()
 
@@ -124,6 +126,15 @@ func main() {
 		}
 	}
 
+	// Parse derived fields
+	var derivedFields []proxy.DerivedField
+	if *derivedFieldsJSON != "" {
+		if err := json.Unmarshal([]byte(*derivedFieldsJSON), &derivedFields); err != nil {
+			log.Fatalf("Failed to parse -derived-fields JSON: %v", err)
+		}
+		log.Printf("Loaded %d derived fields", len(derivedFields))
+	}
+
 	// Create proxy
 	p, err := proxy.New(proxy.Config{
 		BackendURL:       *backendURL,
@@ -134,6 +145,8 @@ func main() {
 		BackendBasicAuth: *backendBasicAuth,
 		BackendTLSSkip:   *backendTLSSkip,
 		ForwardHeaders:   fwdHeaders,
+		DerivedFields:    derivedFields,
+		StreamResponse:   *streamResponse,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)

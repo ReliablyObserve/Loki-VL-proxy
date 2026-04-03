@@ -420,6 +420,6 @@ go build -o loki-vl-proxy ./cmd/proxy
 - [x] Auto-warming cache for top-N queries
 - [x] Graceful HTTP server shutdown (SIGTERM/SIGINT)
 - [x] Grafana datasource config: maxLines, basic auth, TLS, header forwarding
+- [x] Derived fields — regex extraction for trace linking (traceID, spanID)
+- [x] Query result streaming — chunked transfer encoding for large results
 - [ ] `/loki/api/v1/patterns` — real implementation
-- [ ] Derived fields / trace link support
-- [ ] Query result streaming (chunked responses)

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"fmt"
 	"io"
 	"log/slog"
@@ -67,6 +68,18 @@ type Config struct {
 	BackendHeaders   map[string]string // static headers to add to all VL requests
 	BackendBasicAuth string            // "user:password" for VL backend basic auth
 	BackendTLSSkip   bool              // skip TLS verification for VL backend
+	DerivedFields    []DerivedField    // derived fields for trace/link extraction
+	StreamResponse   bool              // stream responses via chunked transfer (default: false)
+}
+
+// DerivedField extracts a value from log lines and creates a link (e.g., to a trace backend).
+// Matches Grafana Loki datasource "Derived fields" config.
+type DerivedField struct {
+	Name          string `json:"name" yaml:"name"`                       // field name (e.g., "traceID")
+	MatcherRegex  string `json:"matcherRegex" yaml:"matcherRegex"`       // regex to extract value from log line
+	URL           string `json:"url" yaml:"url"`                         // link template (e.g., "http://tempo:3200/trace/${__value.raw}")
+	URLDisplayLabel string `json:"urlDisplayLabel" yaml:"urlDisplayLabel"` // display text for the link
+	DatasourceUID string `json:"datasourceUid" yaml:"datasourceUid"`     // Grafana datasource UID for internal link
 }
 
 const (
@@ -100,6 +113,8 @@ type Proxy struct {
 	maxLines       int
 	forwardHeaders []string          // headers to copy from client request to VL
 	backendHeaders map[string]string // static headers on all VL requests
+	derivedFields  []DerivedField
+	streamResponse bool
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -178,6 +193,8 @@ func New(cfg Config) (*Proxy, error) {
 		maxLines:       maxLines,
 		forwardHeaders: cfg.ForwardHeaders,
 		backendHeaders: backendHeaders,
+		derivedFields:  cfg.DerivedFields,
+		streamResponse: cfg.StreamResponse,
 	}, nil
 }
 
@@ -1062,11 +1079,22 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 	}
 	defer resp.Body.Close()
 
+	// Chunked streaming: flush partial results as they arrive from VL
+	if p.streamResponse {
+		p.streamLogQuery(w, resp)
+		return
+	}
+
 	body, _ := io.ReadAll(resp.Body)
 
 	// VL returns newline-delimited JSON, each line is a log entry.
 	// Loki expects: {"status":"success","data":{"resultType":"streams","result":[...]}}
 	streams := vlLogsToLokiStreams(body)
+
+	// Apply derived fields (extract trace_id etc. from log lines)
+	if len(p.derivedFields) > 0 {
+		p.applyDerivedFields(streams)
+	}
 
 	result, _ := json.Marshal(map[string]interface{}{
 		"status": "success",
@@ -1078,6 +1106,127 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
+}
+
+// streamLogQuery streams VL NDJSON response as chunked Loki-compatible JSON.
+func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response) {
+	flusher, canFlush := w.(http.Flusher)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Transfer-Encoding", "chunked")
+
+	// Write opening envelope
+	w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[`))
+	if canFlush {
+		flusher.Flush()
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	first := true
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry map[string]interface{}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+
+		timeStr, _ := entry["_time"].(string)
+		msg, _ := entry["_msg"].(string)
+		if timeStr == "" {
+			continue
+		}
+
+		ts, err := time.Parse(time.RFC3339Nano, timeStr)
+		if err != nil {
+			continue
+		}
+
+		labels := make(map[string]string)
+		for k, v := range entry {
+			if k == "_time" || k == "_msg" || k == "_stream" || k == "_stream_id" {
+				continue
+			}
+			if s, ok := v.(string); ok {
+				labels[k] = s
+			}
+		}
+
+		stream := map[string]interface{}{
+			"stream": labels,
+			"values": [][]string{{strconv.FormatInt(ts.UnixNano(), 10), msg}},
+		}
+
+		chunk, _ := json.Marshal(stream)
+		if !first {
+			w.Write([]byte(","))
+		}
+		w.Write(chunk)
+		first = false
+
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	// Close envelope
+	w.Write([]byte(`],"stats":{}}}`))
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+// applyDerivedFields extracts values from log lines using regex and adds them as labels.
+// This enables Grafana's "Derived fields" feature for trace linking.
+func (p *Proxy) applyDerivedFields(streams []map[string]interface{}) {
+	// Pre-compile regexes
+	type compiledDF struct {
+		name  string
+		re    *regexp.Regexp
+		url   string
+	}
+	compiled := make([]compiledDF, 0, len(p.derivedFields))
+	for _, df := range p.derivedFields {
+		re, err := regexp.Compile(df.MatcherRegex)
+		if err != nil {
+			p.log.Warn("invalid derived field regex", "name", df.Name, "error", err)
+			continue
+		}
+		compiled = append(compiled, compiledDF{name: df.Name, re: re, url: df.URL})
+	}
+
+	for _, stream := range streams {
+		values, ok := stream["values"].([][]string)
+		if !ok {
+			continue
+		}
+		labels, _ := stream["stream"].(map[string]string)
+		if labels == nil {
+			continue
+		}
+
+		for _, val := range values {
+			if len(val) < 2 {
+				continue
+			}
+			line := val[1]
+			for _, cdf := range compiled {
+				matches := cdf.re.FindStringSubmatch(line)
+				if len(matches) > 1 {
+					// Use first capture group as the value
+					labels[cdf.name] = matches[1]
+				} else if len(matches) == 1 {
+					// Full match, no capture group
+					labels[cdf.name] = matches[0]
+				}
+			}
+		}
+	}
 }
 
 // --- Response converters ---
