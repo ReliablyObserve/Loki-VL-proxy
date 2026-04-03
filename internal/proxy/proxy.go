@@ -569,6 +569,10 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	if e := r.FormValue("end"); e != "" {
 		params.Set("end", formatVLTimestamp(e))
 	}
+	// VL v1.49+ requires step for hits
+	if params.Get("step") == "" {
+		params.Set("step", "1h")
+	}
 	// Request field-level grouping
 	if fields := r.FormValue("targetLabels"); fields != "" {
 		params.Set("field", fields)
@@ -683,6 +687,9 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 
 	fields := make([]map[string]interface{}, 0, len(vlResp.Values))
 	for _, v := range vlResp.Values {
+		if isVLInternalField(v.Value) {
+			continue
+		}
 		fields = append(fields, map[string]interface{}{
 			"label":       v.Value,
 			"type":        "string",
@@ -1400,9 +1407,22 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 type vlHitsResponse struct {
 	Hits []struct {
 		Fields     map[string]string `json:"fields"`
-		Timestamps []int64          `json:"timestamps"`
+		Timestamps []string         `json:"timestamps"` // VL v1.49+: RFC3339 strings
 		Values     []int            `json:"values"`
 	} `json:"hits"`
+}
+
+// parseTimestampToUnix converts a VL timestamp (RFC3339 string or numeric) to Unix seconds.
+func parseTimestampToUnix(ts string) float64 {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err == nil {
+		return float64(t.Unix())
+	}
+	// Try numeric fallback
+	if f, err := strconv.ParseFloat(ts, 64); err == nil {
+		return f
+	}
+	return float64(time.Now().Unix())
 }
 
 func parseHits(body []byte) vlHitsResponse {
@@ -1427,16 +1447,16 @@ func hitsToVolumeVector(body []byte) map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(hits.Hits))
 	for _, h := range hits.Hits {
 		total := 0
-		var lastTS int64
+		var lastTS float64
 		for i, v := range h.Values {
 			total += v
 			if i < len(h.Timestamps) {
-				lastTS = h.Timestamps[i]
+				lastTS = parseTimestampToUnix(h.Timestamps[i])
 			}
 		}
 		result = append(result, map[string]interface{}{
 			"metric": h.Fields,
-			"value":  []interface{}{float64(lastTS) / 1000, strconv.Itoa(total)},
+			"value":  []interface{}{lastTS, strconv.Itoa(total)},
 		})
 	}
 	return map[string]interface{}{
@@ -1458,7 +1478,7 @@ func hitsToVolumeMatrix(body []byte) map[string]interface{} {
 			if i < len(h.Values) {
 				val = h.Values[i]
 			}
-			values = append(values, []interface{}{float64(ts) / 1000, strconv.Itoa(val)})
+			values = append(values, []interface{}{parseTimestampToUnix(ts), strconv.Itoa(val)})
 		}
 		result = append(result, map[string]interface{}{
 			"metric": h.Fields,
