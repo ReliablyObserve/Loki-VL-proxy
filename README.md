@@ -169,23 +169,74 @@ Full reference: https://docs.victoriametrics.com/victorialogs/logql-to-logsql/
 
 See also: [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for VL compatibility gaps and limitations.
 
-## Quick Start
+## Installation
+
+### Binary
 
 ```bash
-# Build and run locally
+# Build from source
 go build -o loki-vl-proxy ./cmd/proxy
 ./loki-vl-proxy -backend=http://your-victorialogs:9428
+```
 
-# Docker
+### Docker
+
+```bash
 docker build -t loki-vl-proxy .
 docker run -p 3100:3100 loki-vl-proxy -backend=http://victorialogs:9428
+```
 
-# Docker Compose (with VictoriaLogs + Grafana)
+### Helm (Kubernetes)
+
+```bash
+helm install loki-vl-proxy ./charts/loki-vl-proxy \
+  --set extraArgs.backend=http://victorialogs:9428
+
+# With ServiceMonitor for Prometheus scraping
+helm install loki-vl-proxy ./charts/loki-vl-proxy \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set serviceMonitor.enabled=true
+
+# Custom values
+helm install loki-vl-proxy ./charts/loki-vl-proxy -f my-values.yaml
+```
+
+VictoriaMetrics-style: all proxy flags are exposed via `extraArgs`:
+
+```yaml
+extraArgs:
+  listen: ":3100"
+  backend: "http://victorialogs:9428"
+  cache-ttl: "30s"
+  cache-max: "50000"
+  log-level: "debug"
+```
+
+### Docker Compose (dev/test)
+
+```bash
 docker-compose up -d
-# Open Grafana at http://localhost:3000, Loki datasource pre-configured
+# Grafana at http://localhost:3000, Loki datasource pre-configured
+```
+
+### Grafana Datasource Configuration
+
+Point a Loki datasource at the proxy:
+
+```yaml
+apiVersion: 1
+datasources:
+  - name: Loki (via VL proxy)
+    type: loki
+    access: proxy
+    url: http://loki-vl-proxy:3100
+    jsonData:
+      maxLines: 1000
 ```
 
 ## Configuration
+
+All flags follow VictoriaMetrics naming conventions (`-flagName=value`):
 
 | Flag | Env | Default | Description |
 |---|---|---|---|
@@ -194,6 +245,27 @@ docker-compose up -d
 | `-cache-ttl` | — | `60s` | Default cache TTL |
 | `-cache-max` | — | `10000` | Maximum cache entries |
 | `-log-level` | — | `info` | Log level: debug, info, warn, error |
+
+## Structured Metadata Mapping
+
+Loki 3.x has three categories of labels:
+1. **Stream labels** — indexed, low-cardinality (e.g., `app`, `namespace`)
+2. **Structured metadata** — per-entry key-value pairs (e.g., `trace_id`, `span_id`)
+3. **Parsed labels** — extracted at query time via `| json`, `| logfmt`, etc.
+
+VictoriaLogs treats all fields equally — no distinction between stream fields and metadata.
+
+The proxy maps VL fields to Loki's model:
+
+| VL Field | Loki Mapping |
+|---|---|
+| `_stream` fields (declared at ingestion) | Stream labels |
+| Regular fields (all others) | Structured metadata |
+| `_time` | Timestamp |
+| `_msg` | Log line body |
+| Fields from `| unpack_json` / `| unpack_logfmt` | Parsed labels |
+
+In practice, Grafana Explore treats both stream labels and structured metadata as queryable labels, so the distinction is mostly cosmetic.
 
 ## Observability
 

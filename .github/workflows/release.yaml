@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Run tests
+        run: go test ./... -count=1 -race
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:latest
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/loki-vl-proxy-linux-amd64 ./cmd/proxy
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/loki-vl-proxy-linux-arm64 ./cmd/proxy
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/loki-vl-proxy-darwin-amd64 ./cmd/proxy
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o dist/loki-vl-proxy-darwin-arm64 ./cmd/proxy
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/loki-vl-proxy-*
+
+      - name: Update Helm chart version
+        run: |
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" charts/loki-vl-proxy/Chart.yaml
+          echo "Updated Chart.yaml appVersion to ${{ steps.version.outputs.VERSION }}"
