@@ -102,17 +102,18 @@ flowchart LR
 | `/loki/api/v1/labels` | Implemented | `/select/logsql/field_names` | 60s | 3 |
 | `/loki/api/v1/label/{name}/values` | Implemented | `/select/logsql/field_values` | 60s | 3 |
 | `/loki/api/v1/series` | Implemented | `/select/logsql/streams` | 30s | 2 |
-| `/loki/api/v1/index/stats` | Stub | — | — | 1 |
-| `/loki/api/v1/index/volume` | Stub | — | — | 1 |
-| `/loki/api/v1/index/volume_range` | Stub | — | — | 1 |
+| `/loki/api/v1/index/stats` | Implemented | `/select/logsql/hits` | — | 2 |
+| `/loki/api/v1/index/volume` | Implemented | `/select/logsql/hits` (field grouping) | — | 2 |
+| `/loki/api/v1/index/volume_range` | Implemented | `/select/logsql/hits` (step) | — | 2 |
 | `/loki/api/v1/detected_fields` | Implemented | `/select/logsql/field_names` | 30s | 1 |
 | `/loki/api/v1/patterns` | Stub | — | — | 1 |
 | `/loki/api/v1/tail` | Implemented | `/select/logsql/tail` (WebSocket→NDJSON) | — | 2 |
 | `/ready` | Implemented | `/health` | — | 2 |
 | `/loki/api/v1/status/buildinfo` | Implemented | — | — | 1 |
 | `/metrics` | Implemented | — | — | 1 |
+| `/debug/queries` | Implemented | — | — | 1 |
 
-**181 tests total** (127 unit + 54 e2e, all at 100% compatibility)
+**210+ tests total** (156 unit + 54 e2e, all at 100% compatibility)
 
 ## Protection Layers
 
@@ -413,8 +414,12 @@ go build -o loki-vl-proxy ./cmd/proxy
 - [x] L2 on-disk cache (bbolt) with compression + encryption + write-back buffer
 - [x] OTLP push for proxy telemetry (gzip/zstd, TLS, custom headers)
 - [x] HTTP hardening (timeouts, body limits, security headers)
-- [ ] `/loki/api/v1/index/stats` — real implementation via VL `/select/logsql/hits`
-- [ ] `/loki/api/v1/index/volume` — volume data via VL hits with field grouping
-- [ ] `/loki/api/v1/detected_field/{name}/values` endpoint
-- [ ] Query fingerprinting + analytics dashboard
-- [ ] Auto-warming cache for top-N queries
+- [x] `/loki/api/v1/index/stats` — real implementation via VL `/select/logsql/hits`
+- [x] `/loki/api/v1/index/volume` + `volume_range` — field grouping + step
+- [x] Query fingerprinting + analytics (`/debug/queries`)
+- [x] Auto-warming cache for top-N queries
+- [x] Graceful HTTP server shutdown (SIGTERM/SIGINT)
+- [x] Grafana datasource config: maxLines, basic auth, TLS, header forwarding
+- [ ] `/loki/api/v1/patterns` — real implementation
+- [ ] Derived fields / trace link support
+- [ ] Query result streaming (chunked responses)

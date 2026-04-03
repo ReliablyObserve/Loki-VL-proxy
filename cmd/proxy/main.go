@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/szibis/Loki-VL-proxy/internal/cache"
@@ -46,6 +50,12 @@ func main() {
 	idleTimeout := flag.Duration("http-idle-timeout", 120*time.Second, "HTTP server idle timeout")
 	maxHeaderBytes := flag.Int("http-max-header-bytes", 1<<20, "HTTP max header size (default: 1MB)")
 	maxBodyBytes := flag.Int64("http-max-body-bytes", 10<<20, "HTTP max request body size (default: 10MB)")
+
+	// Grafana datasource compatibility
+	maxLines := flag.Int("max-lines", 1000, "Default max lines per query")
+	backendBasicAuth := flag.String("backend-basic-auth", "", "Basic auth for VL backend (user:password)")
+	backendTLSSkip := flag.Bool("backend-tls-skip-verify", false, "Skip TLS verification for VL backend")
+	forwardHeaders := flag.String("forward-headers", "", "Comma-separated list of HTTP headers to forward to VL backend")
 
 	flag.Parse()
 
@@ -103,12 +113,27 @@ func main() {
 			*diskCachePath, *diskCacheCompress, len(encKey) > 0, *diskCacheFlushSize, *diskCacheFlushInterval)
 	}
 
+	// Parse forward headers
+	var fwdHeaders []string
+	if *forwardHeaders != "" {
+		for _, h := range strings.Split(*forwardHeaders, ",") {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				fwdHeaders = append(fwdHeaders, h)
+			}
+		}
+	}
+
 	// Create proxy
 	p, err := proxy.New(proxy.Config{
-		BackendURL: *backendURL,
-		Cache:      c,
-		LogLevel:   *logLevel,
-		TenantMap:  tenantMap,
+		BackendURL:       *backendURL,
+		Cache:            c,
+		LogLevel:         *logLevel,
+		TenantMap:        tenantMap,
+		MaxLines:         *maxLines,
+		BackendBasicAuth: *backendBasicAuth,
+		BackendTLSSkip:   *backendTLSSkip,
+		ForwardHeaders:   fwdHeaders,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
@@ -144,10 +169,27 @@ func main() {
 		MaxHeaderBytes: *maxHeaderBytes,
 	}
 
-	log.Printf("Loki-VL-proxy listening on %s, backend: %s", *listenAddr, *backendURL)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Graceful shutdown on SIGTERM/SIGINT
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		log.Printf("Loki-VL-proxy listening on %s, backend: %s", *listenAddr, *backendURL)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	sig := <-shutdownCh
+	log.Printf("Received %v, shutting down gracefully...", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
 	}
+	log.Println("Shutdown complete")
 }
 
 // maxBodyHandler limits the request body size to prevent resource exhaustion.

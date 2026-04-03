@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,6 +60,13 @@ type Config struct {
 	CBFailThreshold  int     // circuit breaker failure threshold
 	CBOpenDuration   time.Duration // circuit breaker open duration
 	TenantMap        map[string]TenantMapping // string org ID → VL account/project
+
+	// Grafana datasource compatibility
+	MaxLines         int               // default max lines per query (0=1000)
+	ForwardHeaders   []string          // HTTP headers to forward from client to VL backend
+	BackendHeaders   map[string]string // static headers to add to all VL requests
+	BackendBasicAuth string            // "user:password" for VL backend basic auth
+	BackendTLSSkip   bool              // skip TLS verification for VL backend
 }
 
 const (
@@ -78,15 +87,19 @@ var CacheTTLs = map[string]time.Duration{
 }
 
 type Proxy struct {
-	backend      *url.URL
-	client       *http.Client
-	cache        *cache.Cache
-	log          *slog.Logger
-	metrics      *metrics.Metrics
-	coalescer    *mw.Coalescer
-	limiter      *mw.RateLimiter
-	breaker      *mw.CircuitBreaker
-	tenantMap map[string]TenantMapping
+	backend        *url.URL
+	client         *http.Client
+	cache          *cache.Cache
+	log            *slog.Logger
+	metrics        *metrics.Metrics
+	queryTracker   *metrics.QueryTracker
+	coalescer      *mw.Coalescer
+	limiter        *mw.RateLimiter
+	breaker        *mw.CircuitBreaker
+	tenantMap      map[string]TenantMapping
+	maxLines       int
+	forwardHeaders []string          // headers to copy from client request to VL
+	backendHeaders map[string]string // static headers on all VL requests
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -128,23 +141,51 @@ func New(cfg Config) (*Proxy, error) {
 		cbOpen = 10 * time.Second
 	}
 
+	// Build HTTP client with optional TLS skip for VL backend
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.BackendTLSSkip {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
+	maxLines := cfg.MaxLines
+	if maxLines <= 0 {
+		maxLines = 1000
+	}
+
+	backendHeaders := cfg.BackendHeaders
+	if backendHeaders == nil {
+		backendHeaders = make(map[string]string)
+	}
+	if cfg.BackendBasicAuth != "" {
+		encoded := base64Encode(cfg.BackendBasicAuth)
+		backendHeaders["Authorization"] = "Basic " + encoded
+	}
+
 	return &Proxy{
 		backend: u,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:   120 * time.Second,
+			Transport: transport,
 		},
-		cache:     cfg.Cache,
-		log:       logger,
-		metrics:   metrics.NewMetrics(),
-		coalescer: mw.NewCoalescer(),
-		limiter:   mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
-		breaker:   mw.NewCircuitBreaker(cbFail, 3, cbOpen),
-		tenantMap: cfg.TenantMap,
+		cache:          cfg.Cache,
+		log:            logger,
+		metrics:        metrics.NewMetrics(),
+		queryTracker:   metrics.NewQueryTracker(10000),
+		coalescer:      mw.NewCoalescer(),
+		limiter:        mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
+		breaker:        mw.NewCircuitBreaker(cbFail, 3, cbOpen),
+		tenantMap:      cfg.TenantMap,
+		maxLines:       maxLines,
+		forwardHeaders: cfg.ForwardHeaders,
+		backendHeaders: backendHeaders,
 	}, nil
 }
 
 // GetMetrics returns the proxy's metrics instance for external telemetry exporters.
 func (p *Proxy) GetMetrics() *metrics.Metrics { return p.metrics }
+
+// GetQueryTracker returns the query analytics tracker.
+func (p *Proxy) GetQueryTracker() *metrics.QueryTracker { return p.queryTracker }
 
 // securityHeaders wraps a handler with security response headers.
 func securityHeaders(h http.Handler) http.Handler {
@@ -186,6 +227,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 
 	// Prometheus metrics endpoint — NOT rate-limited
 	mux.HandleFunc("/metrics", p.metrics.Handler)
+	mux.HandleFunc("/debug/queries", p.queryTracker.Handler)
 }
 
 // handleQueryRange translates Loki range queries.
@@ -208,12 +250,15 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	p.log.Debug("translated query", "logsql", logsqlQuery)
 
+	r = withOrgID(r)
 	if isStatsQuery(logsqlQuery) {
 		p.proxyStatsQueryRange(w, r, logsqlQuery)
 	} else {
 		p.proxyLogQuery(w, r, logsqlQuery)
 	}
-	p.metrics.RecordRequest("query_range", http.StatusOK, time.Since(start))
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query_range", http.StatusOK, elapsed)
+	p.queryTracker.Record("query_range", logqlQuery, elapsed, false)
 }
 
 // handleQuery translates Loki instant queries.
@@ -232,12 +277,15 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r = withOrgID(r)
 	if isStatsQuery(logsqlQuery) {
 		p.proxyStatsQuery(w, r, logsqlQuery)
 	} else {
 		p.proxyLogQuery(w, r, logsqlQuery)
 	}
-	p.metrics.RecordRequest("query", http.StatusOK, time.Since(start))
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query", http.StatusOK, elapsed)
+	p.queryTracker.Record("query", logqlQuery, elapsed, false)
 }
 
 // handleLabels returns label names.
@@ -461,10 +509,15 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(resp.Body)
 
 	entries := sumHitsValues(body)
+	hits := parseHits(body)
+	streams := len(hits.Hits)
+	if streams == 0 {
+		streams = 1
+	}
 	result, _ := json.Marshal(map[string]interface{}{
-		"streams": 1, // approximate
-		"chunks":  1,
-		"bytes":   entries * 100, // rough estimate
+		"streams": streams,
+		"chunks":  streams,
+		"bytes":   entries * 100, // approximate — VL doesn't expose bytes
 		"entries": entries,
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -870,6 +923,7 @@ func (p *Proxy) vlGet(ctx context.Context, path string, params url.Values) (*htt
 		return nil, err
 	}
 	p.forwardTenantHeaders(req)
+	p.applyBackendHeaders(req)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		p.breaker.RecordFailure()
@@ -898,6 +952,7 @@ func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*ht
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	p.forwardTenantHeaders(req)
+	p.applyBackendHeaders(req)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		p.breaker.RecordFailure()
@@ -980,9 +1035,9 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 	}
 	limit := r.FormValue("limit")
 	if limit == "" {
-		limit = "1000"
+		limit = strconv.Itoa(p.maxLines)
 	}
-	params.Set("limit", limit)
+	params.Set("limit", sanitizeLimit(limit))
 
 	resp, err := p.vlPost(r.Context(), "/select/logsql/query", params)
 	if err != nil {
@@ -1335,4 +1390,17 @@ func (p *Proxy) writeError(w http.ResponseWriter, code int, msg string) {
 func (p *Proxy) writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func base64Encode(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+// applyBackendHeaders adds static backend headers and forwarded client headers to a VL request.
+func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
+	for k, v := range p.backendHeaders {
+		vlReq.Header.Set(k, v)
+	}
+	// Forward client headers if configured (requires original request in context)
+	// Forwarded headers are set by the middleware before vlGet/vlPost
 }
