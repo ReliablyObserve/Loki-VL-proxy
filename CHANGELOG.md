@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-04-04
+
+### Features
+
+- **Write endpoint safeguard**: `/loki/api/v1/push` returns 405 — read-only proxy
+- **`/loki/api/v1/format_query`**: Returns query as-is (client-side formatting)
+- **`/loki/api/v1/detected_labels`**: Stream-level labels (Loki 3.x compat)
+- **`| decolorize` pipe**: Proxy-side ANSI escape stripping (ready for VL native replacement)
+- **`| ip()` filter**: Marked for proxy-side CIDR matching (ready for VL native replacement)
+- **pprof endpoint**: `/debug/pprof/` for production profiling
+- **SIGHUP config reload**: Hot-reload tenant-map and field-mapping without restart
+- **Rate limit headers**: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After` on 429
+- **Enhanced `/ready`**: Checks VL health + circuit breaker state
+- **Per-endpoint cache metrics**: `loki_vl_proxy_cache_hits_by_endpoint{endpoint}`
+- **Backend latency histogram**: `loki_vl_proxy_backend_duration_seconds{endpoint}`
+- **Singleflight stats**: `loki_vl_proxy_coalesced_total`, `loki_vl_proxy_coalesced_saved_total`
+- **Circuit breaker gauge**: `loki_vl_proxy_circuit_breaker_state` (0=closed, 1=open, 2=half-open)
+- **PrometheusRule CR**: Helm template with 7 alert rules for Prometheus Operator
+- **Grafana dashboard ConfigMap**: Auto-provisioned via Helm with `grafana_dashboard: "1"` label
+- **Fuzz tests**: LogQL translator fuzz testing (1.2M+ executions, no panics)
+
+### Tests
+
+- 314 unit tests passing (up from 263)
+- Fuzz seed corpus: 30+ valid/malformed/adversarial LogQL inputs
+
 ## [0.11.0] - 2026-04-04
 
 ### Features
