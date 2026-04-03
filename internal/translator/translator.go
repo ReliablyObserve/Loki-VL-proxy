@@ -145,23 +145,8 @@ func translateLogQuery(logql string) (string, error) {
 func translatePipelineStage(stage string) string {
 	stage = strings.TrimSpace(stage)
 
-	// Line filters
-	if strings.HasPrefix(stage, "= ") || strings.HasPrefix(stage, "=\"") {
-		// |= "text" → "text"
-		return extractQuotedOrWord(stage[1:])
-	}
-	if strings.HasPrefix(stage, "!= ") || strings.HasPrefix(stage, "!=\"") {
-		// != "text" → -"text"
-		return "-" + extractQuotedOrWord(stage[2:])
-	}
-	if strings.HasPrefix(stage, "~ ") || strings.HasPrefix(stage, "~\"") {
-		// |~ "regexp" → ~"regexp"
-		return "~" + extractQuotedOrWord(stage[1:])
-	}
-	if strings.HasPrefix(stage, "!~ ") || strings.HasPrefix(stage, "!~\"") {
-		// !~ "regexp" → NOT ~"regexp"
-		return "NOT ~" + extractQuotedOrWord(stage[2:])
-	}
+	// Note: Line filters (|=, !=, |~, !~) are handled in translateLogQuery
+	// before this function is called. Only pipe stages reach here.
 
 	// Unwrap — VL doesn't need unwrap, stats functions take field names directly.
 	// | unwrap field_name → silently dropped (the field name is used in the stats function)
@@ -537,18 +522,6 @@ func extractQuotedValue(s string) (string, string) {
 		return `"` + s[:end] + `"`, strings.TrimSpace(s[end:])
 	}
 	return `"` + s + `"`, ""
-}
-
-func extractQuotedOrWord(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "\"") {
-		end := strings.Index(s[1:], "\"")
-		if end >= 0 {
-			return s[:end+2]
-		}
-	}
-	// Return as quoted
-	return `"` + s + `"`
 }
 
 // splitStreamMatchers splits stream selector content like `app="x",level="error"`

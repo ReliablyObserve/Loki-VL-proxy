@@ -3,6 +3,7 @@ package middleware
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -231,6 +232,169 @@ func TestCircuitBreaker_SuccessResets(t *testing.T) {
 	cb.RecordFailure()
 	if cb.State() != "closed" {
 		t.Errorf("expected closed (reset after success), got %s", cb.State())
+	}
+}
+
+// TestCoalescer_ErrorPropagation verifies errors are returned to all waiters.
+func TestCoalescer_ErrorPropagation(t *testing.T) {
+	c := NewCoalescer()
+	var wg sync.WaitGroup
+	errCount := atomic.Int32{}
+
+	wg.Add(5)
+	for range 5 {
+		go func() {
+			defer wg.Done()
+			_, _, _, err := c.Do("error-key", func() (*http.Response, error) {
+				time.Sleep(20 * time.Millisecond)
+				return nil, fmt.Errorf("backend error")
+			})
+			if err != nil {
+				errCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if errCount.Load() != 5 {
+		t.Errorf("expected all 5 callers to get error, got %d", errCount.Load())
+	}
+}
+
+// TestRateLimiter_Middleware_Integration verifies HTTP middleware behavior.
+func TestRateLimiter_Middleware_Integration(t *testing.T) {
+	rl := NewRateLimiter(1, 100, 200) // max 1 concurrent
+
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(200)
+	}))
+
+	// First request should succeed
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest("GET", "/test", nil)
+
+	// Hold the slot
+	go handler.ServeHTTP(w1, r1)
+	time.Sleep(10 * time.Millisecond) // let it acquire
+
+	// Second request should be rejected (max 1 concurrent)
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest("GET", "/test", nil)
+	handler.ServeHTTP(w2, r2)
+
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w2.Code)
+	}
+}
+
+// TestRateLimiter_ClientID verifies client ID extraction.
+func TestRateLimiter_ClientID(t *testing.T) {
+	// With X-Forwarded-For
+	r1, _ := http.NewRequest("GET", "/", nil)
+	r1.Header.Set("X-Forwarded-For", "10.0.0.1")
+	if ClientID(r1) != "10.0.0.1" {
+		t.Errorf("expected X-Forwarded-For, got %q", ClientID(r1))
+	}
+
+	// Without — falls back to RemoteAddr
+	r2, _ := http.NewRequest("GET", "/", nil)
+	r2.RemoteAddr = "192.168.1.1:12345"
+	if ClientID(r2) != "192.168.1.1:12345" {
+		t.Errorf("expected RemoteAddr, got %q", ClientID(r2))
+	}
+}
+
+// TestRateLimiter_TokenRefill verifies tokens refill over time.
+func TestRateLimiter_TokenRefill(t *testing.T) {
+	rl := NewRateLimiter(100, 10, 2) // 10 req/s, burst 2
+
+	// Exhaust burst
+	rl.AllowClient("client")
+	rl.AllowClient("client")
+	if rl.AllowClient("client") {
+		t.Error("expected rejection after burst")
+	}
+
+	// Wait for refill
+	time.Sleep(200 * time.Millisecond)
+	if !rl.AllowClient("client") {
+		t.Error("expected token refill after wait")
+	}
+}
+
+// TestCircuitBreaker_State verifies state string output.
+func TestCircuitBreaker_StateStrings(t *testing.T) {
+	cb := NewCircuitBreaker(1, 1, 50*time.Millisecond)
+
+	if cb.State() != "closed" {
+		t.Errorf("expected closed, got %s", cb.State())
+	}
+
+	cb.RecordFailure()
+	if cb.State() != "open" {
+		t.Errorf("expected open, got %s", cb.State())
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	cb.Allow() // transitions to half_open
+	if cb.State() != "half_open" {
+		t.Errorf("expected half_open, got %s", cb.State())
+	}
+
+	cb.RecordSuccess()
+	if cb.State() != "closed" {
+		t.Errorf("expected closed after success, got %s", cb.State())
+	}
+}
+
+// TestRateLimiter_Middleware_RateLimitResponse verifies rate limit 429 response.
+func TestRateLimiter_Middleware_RateLimitResponse(t *testing.T) {
+	rl := NewRateLimiter(100, 1, 1) // 1 req/s, burst 1
+
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+
+	// First request — OK
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, httptest.NewRequest("GET", "/test", nil))
+	if w1.Code != 200 {
+		t.Errorf("expected 200, got %d", w1.Code)
+	}
+
+	// Second request — rate limited
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, httptest.NewRequest("GET", "/test", nil))
+	if w2.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429, got %d", w2.Code)
+	}
+}
+
+// TestRateLimiter_NoLimits verifies zero limits disable limiting.
+func TestRateLimiter_NoLimits(t *testing.T) {
+	rl := NewRateLimiter(0, 0, 0)
+
+	for range 100 {
+		if !rl.AllowClient("x") {
+			t.Fatal("expected no rate limit when ratePerSecond=0")
+		}
+		if !rl.AcquireConcurrent() {
+			t.Fatal("expected no concurrent limit when maxConcurrent=0")
+		}
+	}
+}
+
+// TestCircuitBreaker_AllowOpenTimeout verifies requests rejected while open.
+func TestCircuitBreaker_AllowOpenTimeout(t *testing.T) {
+	cb := NewCircuitBreaker(1, 1, 100*time.Millisecond)
+	cb.RecordFailure() // opens
+
+	// Should be rejected
+	for range 5 {
+		if cb.Allow() {
+			t.Error("expected rejected while open")
+		}
 	}
 }
 

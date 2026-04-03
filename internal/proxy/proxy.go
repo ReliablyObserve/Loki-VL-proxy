@@ -40,14 +40,15 @@ var CacheTTLs = map[string]time.Duration{
 }
 
 type Proxy struct {
-	backend   *url.URL
-	client    *http.Client
-	cache     *cache.Cache
-	log       *slog.Logger
-	metrics   *metrics.Metrics
-	coalescer *mw.Coalescer
-	limiter   *mw.RateLimiter
-	breaker   *mw.CircuitBreaker
+	backend      *url.URL
+	client       *http.Client
+	cache        *cache.Cache
+	log          *slog.Logger
+	metrics      *metrics.Metrics
+	coalescer    *mw.Coalescer
+	limiter      *mw.RateLimiter
+	breaker      *mw.CircuitBreaker
+	currentOrgID string // set per-request from X-Scope-OrgID
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -118,6 +119,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/loki/api/v1/labels", rl(p.handleLabels))
 	mux.Handle("/loki/api/v1/label/", rl(p.handleLabelValues))
 	mux.Handle("/loki/api/v1/detected_fields", rl(p.handleDetectedFields))
+	mux.Handle("/loki/api/v1/detected_field/", rl(p.handleDetectedFieldValues))
 
 	// Lighter endpoints — still rate-limited
 	mux.Handle("/loki/api/v1/index/stats", rl(p.handleIndexStats))
@@ -185,6 +187,7 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 // VL:   GET /select/logsql/field_names?query=*&start=...&end=...
 func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	p.setTenantFromRequest(r)
 	cacheKey := "labels:" + r.URL.RawQuery
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
@@ -369,44 +372,126 @@ func (p *Proxy) handleSeries(w http.ResponseWriter, r *http.Request) {
 	p.metrics.RecordRequest("series", http.StatusOK, time.Since(start))
 }
 
-// handleIndexStats returns basic index statistics.
+// handleIndexStats returns index statistics via VL /select/logsql/hits.
+// Loki: GET /loki/api/v1/index/stats?query={...}&start=...&end=...
+// Response: {"streams":N, "chunks":N, "entries":N, "bytes":N}
 func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	// Return a minimal response — VL doesn't have a direct equivalent
+	query := r.FormValue("query")
+	if query == "" {
+		query = "*"
+	}
+	logsqlQuery, _ := translator.TranslateLogQL(query)
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	if s := r.FormValue("start"); s != "" {
+		params.Set("start", formatVLTimestamp(s))
+	}
+	if e := r.FormValue("end"); e != "" {
+		params.Set("end", formatVLTimestamp(e))
+	}
+
+	resp, err := p.vlGet("/select/logsql/hits", params)
+	if err != nil {
+		// Fallback to zeros on error
+		p.writeJSON(w, map[string]interface{}{"streams": 0, "chunks": 0, "bytes": 0, "entries": 0})
+		p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	entries := sumHitsValues(body)
 	result, _ := json.Marshal(map[string]interface{}{
-		"streams": 0,
-		"chunks":  0,
-		"bytes":   0,
-		"entries": 0,
+		"streams": 1, // approximate
+		"chunks":  1,
+		"bytes":   entries * 100, // rough estimate
+		"entries": entries,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
 }
 
-// handleVolume returns volume data for labels.
+// handleVolume returns volume data via VL /select/logsql/hits with field grouping.
+// Loki: GET /loki/api/v1/index/volume?query={...}&start=...&end=...
+// Response: {"status":"success","data":{"resultType":"vector","result":[{"metric":{...},"value":[ts,"count"]}]}}
 func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	p.writeJSON(w, map[string]interface{}{
-		"status": "success",
-		"data": map[string]interface{}{
-			"resultType": "vector",
-			"result":     []interface{}{},
-		},
-	})
+	query := r.FormValue("query")
+	if query == "" {
+		query = "*"
+	}
+	logsqlQuery, _ := translator.TranslateLogQL(query)
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	if s := r.FormValue("start"); s != "" {
+		params.Set("start", formatVLTimestamp(s))
+	}
+	if e := r.FormValue("end"); e != "" {
+		params.Set("end", formatVLTimestamp(e))
+	}
+	// Request field-level grouping
+	if fields := r.FormValue("targetLabels"); fields != "" {
+		params.Set("field", fields)
+	}
+
+	resp, err := p.vlGet("/select/logsql/hits", params)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{
+			"status": "success",
+			"data":   map[string]interface{}{"resultType": "vector", "result": []interface{}{}},
+		})
+		p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	result := hitsToVolumeVector(body)
+	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
 }
 
-// handleVolumeRange returns volume range data.
+// handleVolumeRange returns volume range data via VL /select/logsql/hits with step.
+// Loki: GET /loki/api/v1/index/volume_range?query={...}&start=...&end=...&step=60
+// Response: {"status":"success","data":{"resultType":"matrix","result":[{"metric":{...},"values":[[ts,"count"],...]}]}}
 func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	p.writeJSON(w, map[string]interface{}{
-		"status": "success",
-		"data": map[string]interface{}{
-			"resultType": "matrix",
-			"result":     []interface{}{},
-		},
-	})
+	query := r.FormValue("query")
+	if query == "" {
+		query = "*"
+	}
+	logsqlQuery, _ := translator.TranslateLogQL(query)
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	if s := r.FormValue("start"); s != "" {
+		params.Set("start", formatVLTimestamp(s))
+	}
+	if e := r.FormValue("end"); e != "" {
+		params.Set("end", formatVLTimestamp(e))
+	}
+	if step := r.FormValue("step"); step != "" {
+		params.Set("step", step)
+	}
+
+	resp, err := p.vlGet("/select/logsql/hits", params)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{
+			"status": "success",
+			"data":   map[string]interface{}{"resultType": "matrix", "result": []interface{}{}},
+		})
+		p.metrics.RecordRequest("volume_range", http.StatusOK, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	result := hitsToVolumeMatrix(body)
+	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume_range", http.StatusOK, time.Since(start))
 }
 
@@ -460,6 +545,71 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
+}
+
+// handleDetectedFieldValues returns values for a detected field.
+// Loki: GET /loki/api/v1/detected_field/{name}/values?query=...
+// Response: {"values":["debug","info","warn","error"],"limit":1000}
+func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	// Extract field name from URL: /loki/api/v1/detected_field/{name}/values
+	path := r.URL.Path
+	parts := strings.Split(path, "/")
+	fieldName := ""
+	for i, part := range parts {
+		if part == "detected_field" && i+1 < len(parts) {
+			fieldName = parts[i+1]
+			break
+		}
+	}
+	if fieldName == "" {
+		p.writeError(w, http.StatusBadRequest, "missing field name in URL")
+		return
+	}
+
+	query := r.FormValue("query")
+	if query == "" {
+		query = "*"
+	}
+	logsqlQuery, _ := translator.TranslateLogQL(query)
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	params.Set("field", fieldName)
+	if s := r.FormValue("start"); s != "" {
+		params.Set("start", s)
+	}
+	if e := r.FormValue("end"); e != "" {
+		params.Set("end", e)
+	}
+
+	resp, err := p.vlGet("/select/logsql/field_values", params)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{"values": []string{}, "limit": 1000})
+		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var vlResp struct {
+		Values []struct {
+			Value string `json:"value"`
+			Hits  int64  `json:"hits"`
+		} `json:"values"`
+	}
+	json.Unmarshal(body, &vlResp)
+
+	values := make([]string, 0, len(vlResp.Values))
+	for _, v := range vlResp.Values {
+		values = append(values, v.Value)
+	}
+
+	p.writeJSON(w, map[string]interface{}{
+		"values": values,
+		"limit":  1000,
+	})
+	p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 }
 
 // handlePatterns returns log patterns (stub).
@@ -522,6 +672,8 @@ func (p *Proxy) vlGet(path string, params url.Values) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Multitenancy: forward X-Scope-OrgID as VL AccountID
+	p.forwardTenantHeaders(req)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		p.breaker.RecordFailure()
@@ -818,6 +970,85 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 	return result
 }
 
+// --- VL hits response conversion helpers ---
+
+type vlHitsResponse struct {
+	Hits []struct {
+		Fields     map[string]string `json:"fields"`
+		Timestamps []int64          `json:"timestamps"`
+		Values     []int            `json:"values"`
+	} `json:"hits"`
+}
+
+func parseHits(body []byte) vlHitsResponse {
+	var resp vlHitsResponse
+	json.Unmarshal(body, &resp)
+	return resp
+}
+
+func sumHitsValues(body []byte) int {
+	hits := parseHits(body)
+	total := 0
+	for _, h := range hits.Hits {
+		for _, v := range h.Values {
+			total += v
+		}
+	}
+	return total
+}
+
+func hitsToVolumeVector(body []byte) map[string]interface{} {
+	hits := parseHits(body)
+	result := make([]map[string]interface{}, 0, len(hits.Hits))
+	for _, h := range hits.Hits {
+		total := 0
+		var lastTS int64
+		for i, v := range h.Values {
+			total += v
+			if i < len(h.Timestamps) {
+				lastTS = h.Timestamps[i]
+			}
+		}
+		result = append(result, map[string]interface{}{
+			"metric": h.Fields,
+			"value":  []interface{}{float64(lastTS) / 1000, strconv.Itoa(total)},
+		})
+	}
+	return map[string]interface{}{
+		"status": "success",
+		"data": map[string]interface{}{
+			"resultType": "vector",
+			"result":     result,
+		},
+	}
+}
+
+func hitsToVolumeMatrix(body []byte) map[string]interface{} {
+	hits := parseHits(body)
+	result := make([]map[string]interface{}, 0, len(hits.Hits))
+	for _, h := range hits.Hits {
+		values := make([][]interface{}, 0, len(h.Timestamps))
+		for i, ts := range h.Timestamps {
+			val := 0
+			if i < len(h.Values) {
+				val = h.Values[i]
+			}
+			values = append(values, []interface{}{float64(ts) / 1000, strconv.Itoa(val)})
+		}
+		result = append(result, map[string]interface{}{
+			"metric": h.Fields,
+			"values": values,
+		})
+	}
+	return map[string]interface{}{
+		"status": "success",
+		"data": map[string]interface{}{
+			"resultType": "matrix",
+			"result":     result,
+		},
+	}
+}
+
 func isStatsQuery(logsqlQuery string) bool {
 	return strings.Contains(logsqlQuery, "| stats ") ||
 		strings.Contains(logsqlQuery, "| rate(") ||
@@ -833,6 +1064,32 @@ func formatVLTimestamp(ts string) string {
 		return ts
 	}
 	return ts
+}
+
+// --- Multitenancy ---
+
+// forwardTenantHeaders maps Loki's X-Scope-OrgID to VL's AccountID/ProjectID.
+// Called by vlGet/vlPost before sending requests to VL backend.
+func (p *Proxy) forwardTenantHeaders(req *http.Request) {
+	orgID := p.currentOrgID
+	if orgID == "" {
+		return
+	}
+
+	// Try numeric mapping: "42" → AccountID: 42
+	if _, err := strconv.Atoi(orgID); err == nil {
+		req.Header.Set("AccountID", orgID)
+		req.Header.Set("ProjectID", "0")
+	} else {
+		// Non-numeric org ID → default tenant
+		req.Header.Set("AccountID", "0")
+		req.Header.Set("ProjectID", "0")
+	}
+}
+
+// setTenantFromRequest extracts X-Scope-OrgID from the incoming request.
+func (p *Proxy) setTenantFromRequest(r *http.Request) {
+	p.currentOrgID = r.Header.Get("X-Scope-OrgID")
 }
 
 // --- Error / JSON helpers ---
