@@ -125,7 +125,7 @@ flowchart LR
 | `/loki/api/v1/index/volume` | Implemented | `/select/logsql/hits` (field grouping) | — | 2 |
 | `/loki/api/v1/index/volume_range` | Implemented | `/select/logsql/hits` (step) | — | 2 |
 | `/loki/api/v1/detected_fields` | Implemented | `/select/logsql/field_names` | 30s | 1 |
-| `/loki/api/v1/patterns` | Stub | — | — | 1 |
+| `/loki/api/v1/patterns` | Implemented | `/select/logsql/query` + drain pattern extraction | — | 3 |
 | `/loki/api/v1/format_query` | Implemented | — (client-side) | — | 1 |
 | `/loki/api/v1/detected_labels` | Implemented | `/select/logsql/field_names` | — | 1 |
 | `/loki/api/v1/push` | **Blocked** (405) | — | — | 1 |
@@ -135,7 +135,7 @@ flowchart LR
 | `/metrics` | Implemented | — | — | 1 |
 | `/debug/queries` | Implemented | — | — | 1 |
 
-**420+ tests total** (340 unit + 80+ e2e, fuzz-tested with 1.2M+ executions)
+**430+ tests total** (349 unit + 80+ e2e, fuzz-tested with 1.2M+ executions)
 
 ## Protection Layers
 
@@ -501,4 +501,4 @@ go build -o loki-vl-proxy ./cmd/proxy
 - [x] Per-endpoint cache metrics, backend latency, singleflight stats, CB state gauge
 - [x] Fuzz testing — 1.2M+ executions, no panics
 - [x] Nested metric queries — `sum(rate(...)) / sum(rate(...))` proxy-side binary evaluation
-- [ ] `/loki/api/v1/patterns` — real implementation
+- [x] `/loki/api/v1/patterns` — proxy-side drain-like pattern extraction

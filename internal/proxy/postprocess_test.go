@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -209,6 +210,71 @@ func TestExtractLineFormatTemplate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTokenizeToPattern(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		{"GET /api/v1/users 200 15ms", "GET <_> <_> <_>"},
+		{"10.0.1.42 - - [2026-04-04] GET /health 200", "<_> - - <_> GET /health <_>"},
+		{"GET /health 200", "GET /health <_>"},
+		{"error connecting to database at 192.168.1.100:5432", "error connecting to database at <_>"},
+		{`{"method":"GET","path":"/api","status":200}`, `{method=<_> path=<_> status=<_>}`},
+		{"simple static text", "simple static text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.line[:min(20, len(tt.line))], func(t *testing.T) {
+			got := tokenizeToPattern(tt.line)
+			if got != tt.want {
+				t.Errorf("tokenizeToPattern(%q)\n  got:  %q\n  want: %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsVariableToken(t *testing.T) {
+	variables := []string{"200", "15.3", "10.0.1.42", "abc123def", "2026-04-04T10:30:00Z", "123456"}
+	for _, v := range variables {
+		if !isVariableToken(v) {
+			t.Errorf("expected %q to be variable", v)
+		}
+	}
+
+	constants := []string{"GET", "POST", "error", "connecting", "to", "database"}
+	for _, c := range constants {
+		if isVariableToken(c) {
+			t.Errorf("expected %q to be constant", c)
+		}
+	}
+}
+
+func TestExtractLogPatterns(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","app":"web"}`,
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 22ms","app":"web"}`,
+		`{"_time":"2026-04-04T10:00:02Z","_msg":"POST /api/orders 201 142ms","app":"web"}`,
+		`{"_time":"2026-04-04T10:00:03Z","_msg":"GET /api/users 404 3ms","app":"web"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody)
+	if len(patterns) == 0 {
+		t.Fatal("expected at least 1 pattern")
+	}
+
+	// Should group similar lines into patterns
+	t.Logf("found %d patterns", len(patterns))
+	for _, p := range patterns {
+		t.Logf("  pattern: %v", p["pattern"])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func cloneStreams(streams []map[string]interface{}) []map[string]interface{} {

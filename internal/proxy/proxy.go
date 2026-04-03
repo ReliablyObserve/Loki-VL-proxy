@@ -823,9 +823,40 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 // handlePatterns returns log patterns (stub).
 func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	query := r.FormValue("query")
+	if query == "" {
+		query = `{}`
+	}
+
+	logsqlQuery, err := p.translateQuery(query)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{"status": "success", "data": []interface{}{}})
+		p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+		return
+	}
+
+	params := url.Values{"query": {logsqlQuery}, "limit": {"1000"}}
+	if s := r.FormValue("start"); s != "" {
+		params.Set("start", formatVLTimestamp(s))
+	}
+	if e := r.FormValue("end"); e != "" {
+		params.Set("end", formatVLTimestamp(e))
+	}
+
+	resp, err := p.vlGet(r.Context(), "/select/logsql/query", params)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{"status": "success", "data": []interface{}{}})
+		p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	patterns := extractLogPatterns(body)
+
 	p.writeJSON(w, map[string]interface{}{
 		"status": "success",
-		"data":   []interface{}{},
+		"data":   patterns,
 	})
 	p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
 }

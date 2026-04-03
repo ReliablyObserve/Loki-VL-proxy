@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"text/template"
+	"unicode"
 )
 
 // ansiEscapeRe matches ANSI escape sequences (color codes, cursor movement, etc.)
@@ -149,4 +152,166 @@ func extractLineFormatTemplate(query string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// extractLogPatterns implements a simplified drain-like pattern extraction.
+// Groups log lines by their structural pattern, replacing variable tokens with <_>.
+// Returns Loki-compatible pattern objects with pattern string and sample count.
+func extractLogPatterns(vlBody []byte) []map[string]interface{} {
+	lines := strings.Split(string(vlBody), "\n")
+	patternCounts := make(map[string]int)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		msg, _ := entry["_msg"].(string)
+		if msg == "" {
+			continue
+		}
+
+		pattern := tokenizeToPattern(msg)
+		patternCounts[pattern]++
+	}
+
+	// Sort by count descending
+	type patternEntry struct {
+		pattern string
+		count   int
+	}
+	entries := make([]patternEntry, 0, len(patternCounts))
+	for p, c := range patternCounts {
+		entries = append(entries, patternEntry{p, c})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].count > entries[j].count
+	})
+
+	// Cap at 50 patterns
+	if len(entries) > 50 {
+		entries = entries[:50]
+	}
+
+	result := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		result = append(result, map[string]interface{}{
+			"pattern": e.pattern,
+			"samples": [][]interface{}{{0, e.pattern}},
+		})
+	}
+	return result
+}
+
+// tokenizeToPattern converts a log line into a pattern by replacing variable parts with <_>.
+// This is a simplified version of the drain log pattern mining algorithm.
+func tokenizeToPattern(line string) string {
+	// Try JSON first
+	if strings.HasPrefix(line, "{") {
+		return tokenizeJSONPattern(line)
+	}
+
+	tokens := strings.Fields(line)
+	result := make([]string, len(tokens))
+	for i, token := range tokens {
+		if isVariableToken(token) {
+			result[i] = "<_>"
+		} else {
+			result[i] = token
+		}
+	}
+	return strings.Join(result, " ")
+}
+
+// isVariableToken returns true if a token is likely a variable value (not a structural constant).
+func isVariableToken(token string) bool {
+	// Numbers (possibly with decimals, units)
+	if len(token) > 0 && (token[0] >= '0' && token[0] <= '9') {
+		return true
+	}
+
+	// UUIDs, hashes, IDs
+	if len(token) >= 8 && isHexLike(token) {
+		return true
+	}
+
+	// IP addresses
+	if isIPLike(token) {
+		return true
+	}
+
+	// Timestamps (ISO, RFC3339)
+	if strings.Contains(token, "T") && strings.Contains(token, ":") {
+		return true
+	}
+
+	// Paths with many segments
+	if strings.HasPrefix(token, "/") && strings.Count(token, "/") > 2 {
+		return true
+	}
+
+	// Contains mostly digits
+	digitCount := 0
+	for _, ch := range token {
+		if unicode.IsDigit(ch) {
+			digitCount++
+		}
+	}
+	if len(token) > 3 && digitCount > len(token)/2 {
+		return true
+	}
+
+	return false
+}
+
+func isHexLike(s string) bool {
+	s = strings.TrimPrefix(s, "0x")
+	for _, ch := range s {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func isIPLike(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) == 0 || len(p) > 3 {
+			return false
+		}
+		for _, ch := range p {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func tokenizeJSONPattern(line string) string {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &data); err != nil {
+		return "<_>"
+	}
+	// Create pattern from JSON keys (sorted)
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"=<_>")
+	}
+	return "{" + strings.Join(parts, " ") + "}"
 }

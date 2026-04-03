@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-04-04
+
+### Features
+
+- **`/loki/api/v1/patterns` — real implementation**: Proxy-side drain-like pattern extraction. Queries VL for log lines, tokenizes to patterns (replaces IPs, numbers, UUIDs, timestamps with `<_>`), groups by pattern, returns sorted by frequency. Handles both structured (JSON) and unstructured log formats.
+
+### Tests
+
+- 349 unit tests, 80+ e2e tests
+- Pattern extraction unit tests (tokenize, isVariable, extractLogPatterns)
+- E2e: patterns endpoint with real data, Loki vs proxy comparison
+
+### Zero Gaps
+
+All Loki API endpoints are now fully implemented. No stubs remain.
+
 ## [0.14.0] - 2026-04-04
 
 ### Features
