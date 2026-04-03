@@ -507,14 +507,18 @@ func extractPipelineStage(s string) (stage, rest string) {
 	return strings.TrimSpace(s), ""
 }
 
-// extractQuotedValue extracts a quoted string and returns (quoted_value, remaining).
+// extractQuotedValue extracts a quoted string (respecting escaped quotes) and returns (quoted_value, remaining).
 func extractQuotedValue(s string) (string, string) {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "\"") {
-		end := strings.Index(s[1:], "\"")
-		if end >= 0 {
-			return s[:end+2], strings.TrimSpace(s[end+2:])
+		// Find the closing quote, skipping escaped quotes (\")
+		for i := 1; i < len(s); i++ {
+			if s[i] == '"' && (i == 1 || s[i-1] != '\\') {
+				return s[:i+1], strings.TrimSpace(s[i+1:])
+			}
 		}
+		// No closing quote found — return everything
+		return s, ""
 	}
 	// Not quoted — take until next space or pipe
 	end := strings.IndexAny(s, " |")

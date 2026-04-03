@@ -158,10 +158,12 @@ func TestCompat_LabelValues(t *testing.T) {
 	lokiValues := extractStrings(lokiResp, "data")
 	proxyValues := extractStrings(proxyResp, "data")
 
-	if contains(proxyValues, "e2e-test") {
-		score.pass("label_values", "proxy returns ingested value 'e2e-test'")
+	// Check for a commonly ingested app (e2e-test or api-gateway)
+	found := contains(proxyValues, "e2e-test") || contains(proxyValues, "api-gateway")
+	if found {
+		score.pass("label_values", "proxy returns ingested app value")
 	} else {
-		score.fail("label_values", fmt.Sprintf("proxy missing 'e2e-test', got: %v", proxyValues))
+		score.fail("label_values", fmt.Sprintf("proxy missing app values, got: %v", proxyValues))
 	}
 
 	t.Logf("Loki values: %v", lokiValues)

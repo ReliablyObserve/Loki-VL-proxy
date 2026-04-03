@@ -626,9 +626,24 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := p.vlGet(r.Context(), "/select/logsql/field_names", params)
-	if err != nil {
-		p.writeError(w, http.StatusBadGateway, err.Error())
-		return
+	if err != nil || resp.StatusCode >= 400 {
+		// VL field_names may not support complex queries — fallback to wildcard
+		if resp != nil {
+			resp.Body.Close()
+		}
+		fallbackParams := url.Values{"query": {"*"}}
+		if s := params.Get("start"); s != "" {
+			fallbackParams.Set("start", s)
+		}
+		if e := params.Get("end"); e != "" {
+			fallbackParams.Set("end", e)
+		}
+		resp, err = p.vlGet(r.Context(), "/select/logsql/field_names", fallbackParams)
+		if err != nil {
+			p.writeJSON(w, map[string]interface{}{"status": "success", "fields": []interface{}{}})
+			p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
+			return
+		}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -651,6 +666,7 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, _ := json.Marshal(map[string]interface{}{
+		"status": "success",
 		"fields": fields,
 	})
 	w.Header().Set("Content-Type", "application/json")

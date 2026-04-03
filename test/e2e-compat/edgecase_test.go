@@ -107,7 +107,16 @@ func TestSetup_IngestEdgeCaseData(t *testing.T) {
 		},
 	})
 
-	// 8. Structured metadata (Loki 3.x feature) — push via Loki with metadata
+	// 8. Structured metadata (Loki 3.x feature) — push to both Loki and VL
+	pushStream(t, now, streamDef{
+		Labels: map[string]string{
+			"app": "edge-structured-meta", "namespace": "edge-tests", "level": "info",
+		},
+		Lines: []string{
+			`{"msg":"log with structured metadata","trace_id":"meta_trace_001","span_id":"meta_span_001"}`,
+		},
+	})
+	// Also push to Loki with actual structured metadata format
 	lokiPayloadWithMetadata := map[string]interface{}{
 		"streams": []map[string]interface{}{
 			{
@@ -115,7 +124,7 @@ func TestSetup_IngestEdgeCaseData(t *testing.T) {
 					"app": "edge-structured-meta", "namespace": "edge-tests",
 				},
 				"values": [][]interface{}{
-					{fmt.Sprintf("%d", now.UnixNano()), "log with structured metadata",
+					{fmt.Sprintf("%d", now.Add(time.Second).UnixNano()), "log with structured metadata",
 						map[string]string{"trace_id": "meta_trace_001", "span_id": "meta_span_001"}},
 				},
 			},
