@@ -262,6 +262,17 @@ extraContainers: []
 extraVolumes: []
 extraVolumeMounts: []
 
+# --- Gateway API HTTPRoute (traffic distribution) ---
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+    # - name: my-gateway
+    #   namespace: gateway-system
+  hostnames: []
+    # - loki-vl-proxy.example.com
+  weight: 100  # for canary/weighted routing
+
 # --- Disk cache persistent volume ---
 persistence:
   enabled: false
