@@ -7,9 +7,7 @@ Last updated: v0.19.0
 | Feature | Status | Impact |
 |---|---|---|
 | Subquery syntax `rate(...)[1h:5m]` | Not supported | No VL equivalent; rare in Grafana |
-| Cache random eviction (not LRU) | Known limitation | Hot entries may be evicted under pressure |
 | `on()`/`ignoring()`/`group_left()`/`group_right()` | Not supported | Complex dashboard joins fail |
-| `unwrap duration()/bytes()` unit conversion | Wrapper stripped | Field value used as-is (no seconds/bytes conversion) |
 
 ## Data Model Differences
 
@@ -54,3 +52,5 @@ These were previously listed as gaps and have been resolved:
 - ~~Field-specific parser `| json f1, f2`~~ -> Fixed: maps to full unpack (v0.19.0)
 - ~~Backslash quotes in selectors~~ -> Fixed: findMatchingBrace handles `\"` (v0.19.0)
 - ~~No system metrics~~ -> Fixed: /proc CPU, mem, IO, net, PSI exposed in /metrics (v0.19.0)
+- ~~Cache random eviction~~ -> Fixed: LRU eviction via container/list (v0.21.0)
+- ~~`unwrap duration()/bytes()` conversion~~ -> Fixed: proxy-side parsers for duration/byte strings (v0.21.0)

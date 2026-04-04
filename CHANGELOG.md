@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-04-04
+
+### Features
+
+- **LRU cache eviction**: Evicts least-recently-used entries instead of random map iteration. O(1) promote on access, O(1) evict from tail. Hot entries survive under cache pressure.
+- **`unwrap duration()/bytes()` unit conversion**: Proxy-side parsers for Loki duration strings (ns/us/ms/s/m/h/d) to seconds and byte strings (B/KB/KiB/MB/MiB/GB/GiB/TB/TiB) to bytes.
+- **System metrics from /proc** (Linux): CPU (user/system/iowait), memory (total/available/free/usage ratio), process RSS/FDs, disk IO, network IO, PSI pressure stall (cpu/memory/io at 10s/60s/300s).
+- **`bool` modifier on comparisons**: Stripped at translation; applyOp returns 1/0 for all comparisons.
+- **Field-specific parser**: `| json f1, f2` / `| logfmt f1, f2` maps to full unpack.
+- **Backslash quote handling**: `findMatchingBrace` handles `\"` in stream selectors.
+
+### Tests
+
+- 583 total tests (31 new: 4 LRU, 26 unit conversion, 1 translator)
+
+## [0.20.0] - 2026-04-04
+
+### Features
+
+- System metrics (/proc CPU, mem, IO, net, PSI), @ modifier, remaining gap tests
+
 ## [0.19.0] - 2026-04-04
 
 ### Performance

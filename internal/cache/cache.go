@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/list"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,10 +25,18 @@ type Cache struct {
 	l2         *DiskCache // optional L2 disk cache
 	done       chan struct{} // signals cleanup goroutine to stop
 
+	// LRU ordering: front = most recently used, back = least recently used
+	lruList  *list.List            // doubly-linked list of *lruEntry
+	lruIndex map[string]*list.Element // key → list element for O(1) lookup
+
 	// Stats
 	Hits   atomic.Int64
 	Misses atomic.Int64
 	Evictions atomic.Int64
+}
+
+type lruEntry struct {
+	key string
 }
 
 // SetL2 attaches an L2 disk cache. On L1 miss, L2 is checked.
@@ -47,6 +56,8 @@ func NewWithMaxBytes(ttl time.Duration, maxEntries, maxBytes int) *Cache {
 		maxEntries: maxEntries,
 		maxBytes:   maxBytes,
 		done:       make(chan struct{}),
+		lruList:    list.New(),
+		lruIndex:   make(map[string]*list.Element),
 	}
 	go c.cleanup()
 	return c
@@ -62,13 +73,18 @@ func (c *Cache) Close() {
 }
 
 func (c *Cache) Get(key string) ([]byte, bool) {
-	c.mu.RLock()
+	c.mu.Lock()
 	e, ok := c.entries[key]
-	c.mu.RUnlock()
 	if ok && !time.Now().After(e.expiresAt) {
+		// Promote to front of LRU list (most recently used)
+		if elem, found := c.lruIndex[key]; found {
+			c.lruList.MoveToFront(elem)
+		}
+		c.mu.Unlock()
 		c.Hits.Add(1)
 		return e.value, true
 	}
+	c.mu.Unlock()
 
 	// L2 fallback
 	if c.l2 != nil {
@@ -100,9 +116,12 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// If replacing existing entry, subtract old size
+	// If replacing existing entry, subtract old size and promote in LRU
 	if old, ok := c.entries[key]; ok {
 		c.curBytes -= old.sizeBytes
+		if elem, found := c.lruIndex[key]; found {
+			c.lruList.MoveToFront(elem)
+		}
 	}
 
 	c.evictIfNeeded(size)
@@ -113,6 +132,12 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 		sizeBytes: size,
 	}
 	c.curBytes += size
+
+	// Add to LRU list if not already there
+	if _, found := c.lruIndex[key]; !found {
+		elem := c.lruList.PushFront(&lruEntry{key: key})
+		c.lruIndex[key] = elem
+	}
 
 	// Write-through to L2
 	if c.l2 != nil {
@@ -127,6 +152,10 @@ func (c *Cache) Invalidate(key string) {
 	if e, ok := c.entries[key]; ok {
 		c.curBytes -= e.sizeBytes
 		delete(c.entries, key)
+		if elem, found := c.lruIndex[key]; found {
+			c.lruList.Remove(elem)
+			delete(c.lruIndex, key)
+		}
 	}
 }
 
@@ -138,6 +167,10 @@ func (c *Cache) InvalidatePrefix(prefix string) {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
 			c.curBytes -= e.sizeBytes
 			delete(c.entries, k)
+			if elem, found := c.lruIndex[k]; found {
+				c.lruList.Remove(elem)
+				delete(c.lruIndex, k)
+			}
 		}
 	}
 }
@@ -151,32 +184,34 @@ func (c *Cache) Size() (entries int, bytes int) {
 
 func (c *Cache) evictIfNeeded(incomingSize int) {
 	now := time.Now()
-	// First pass: remove expired
+	// First pass: remove expired entries
 	if len(c.entries) >= c.maxEntries || c.curBytes+incomingSize > c.maxBytes {
 		for k, v := range c.entries {
 			if now.After(v.expiresAt) {
 				c.curBytes -= v.sizeBytes
 				delete(c.entries, k)
+				if elem, found := c.lruIndex[k]; found {
+					c.lruList.Remove(elem)
+					delete(c.lruIndex, k)
+				}
 				c.Evictions.Add(1)
 			}
 		}
 	}
-	// Second pass: evict ~10% if still over limits
-	if len(c.entries) >= c.maxEntries || c.curBytes+incomingSize > c.maxBytes {
-		target := c.maxEntries / 10
-		if target < 1 {
-			target = 1
+	// Second pass: LRU eviction — remove from back (least recently used)
+	for len(c.entries) >= c.maxEntries || c.curBytes+incomingSize > c.maxBytes {
+		back := c.lruList.Back()
+		if back == nil {
+			break // empty list, nothing to evict
 		}
-		count := 0
-		for k, v := range c.entries {
-			c.curBytes -= v.sizeBytes
-			delete(c.entries, k)
+		lruE := back.Value.(*lruEntry)
+		if e, ok := c.entries[lruE.key]; ok {
+			c.curBytes -= e.sizeBytes
+			delete(c.entries, lruE.key)
 			c.Evictions.Add(1)
-			count++
-			if count >= target && len(c.entries) < c.maxEntries && c.curBytes+incomingSize <= c.maxBytes {
-				break
-			}
 		}
+		c.lruList.Remove(back)
+		delete(c.lruIndex, lruE.key)
 	}
 }
 
@@ -195,6 +230,10 @@ func (c *Cache) cleanup() {
 			if now.After(v.expiresAt) {
 				c.curBytes -= v.sizeBytes
 				delete(c.entries, k)
+				if elem, found := c.lruIndex[k]; found {
+					c.lruList.Remove(elem)
+					delete(c.lruIndex, k)
+				}
 			}
 		}
 		c.mu.Unlock()
