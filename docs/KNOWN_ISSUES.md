@@ -1,6 +1,6 @@
 # Known Issues & VL Compatibility Gaps
 
-Last updated: v0.17.0
+Last updated: v0.19.0
 
 ## Remaining Gaps (P3 -- Rare Edge Cases)
 
@@ -9,9 +9,7 @@ Last updated: v0.17.0
 | Subquery syntax `rate(...)[1h:5m]` | Not supported | No VL equivalent; rare in Grafana |
 | Cache random eviction (not LRU) | Known limitation | Hot entries may be evicted under pressure |
 | `on()`/`ignoring()`/`group_left()`/`group_right()` | Not supported | Complex dashboard joins fail |
-| `offset` and `@` modifiers | Not supported | Week-over-week queries fail |
-| `X-Forwarded-For` spoofable for rate limiting | Known limitation | Security edge case behind trusted proxy |
-| `unwrap duration()/bytes()` unit conversion | Wrapper stripped | Raw field value used (no unit conversion at proxy) |
+| `unwrap duration()/bytes()` unit conversion | Wrapper stripped | Field value used as-is (no seconds/bytes conversion) |
 
 ## Data Model Differences
 
@@ -50,3 +48,9 @@ These were previously listed as gaps and have been resolved:
 - ~~`targetLabels` missing on volume_range~~ -> Fixed: field param forwarded (v0.17.0)
 - ~~`IsScalar` rejects negatives~~ -> Fixed: uses strconv.ParseFloat (v0.17.0)
 - ~~No delete API~~ -> Fixed: `/loki/api/v1/delete` with safeguards (v0.17.0)
+- ~~`X-Forwarded-For` spoofable~~ -> Fixed: ClientID uses RemoteAddr (v0.18.0)
+- ~~`offset` and `@` modifiers~~ -> Fixed: stripped during translation, time range unaffected (v0.19.0)
+- ~~`bool` modifier~~ -> Fixed: stripped at translation, comparisons return 1/0 (v0.19.0)
+- ~~Field-specific parser `| json f1, f2`~~ -> Fixed: maps to full unpack (v0.19.0)
+- ~~Backslash quotes in selectors~~ -> Fixed: findMatchingBrace handles `\"` (v0.19.0)
+- ~~No system metrics~~ -> Fixed: /proc CPU, mem, IO, net, PSI exposed in /metrics (v0.19.0)
