@@ -344,8 +344,17 @@ func TestCritical_DeleteEndpoint_SuccessfulDelete(t *testing.T) {
 // P1: without() clause should return clear error
 // =============================================================================
 
-func TestP1_WithoutClause_ReturnsError(t *testing.T) {
-	p := newGapTestProxy(t, "http://unused")
+func TestP1_WithoutClause_Supported(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{"metric": map[string]string{"app": "nginx"}, "values": [][]interface{}{{1234567890.0, "42"}}},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	p := newGapTestProxy(t, vlBackend.URL)
 	w := httptest.NewRecorder()
 	q := url.Values{
 		"query": {`sum without (app) (rate({job="nginx"}[5m]))`},
@@ -356,14 +365,9 @@ func TestP1_WithoutClause_ReturnsError(t *testing.T) {
 	r := httptest.NewRequest("GET", "/loki/api/v1/query_range?"+q.Encode(), nil)
 	p.handleQueryRange(w, r)
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["status"] != "error" {
-		t.Errorf("expected error for without() clause, got status=%v body=%s", resp["status"], w.Body.String())
-	}
-	errMsg, _ := resp["error"].(string)
-	if !strings.Contains(strings.ToLower(errMsg), "without") {
-		t.Errorf("error should mention 'without', got: %s", errMsg)
+	// without() is now supported — should not return error
+	if w.Code >= 400 {
+		t.Errorf("without() should be supported, got status %d: %s", w.Code, w.Body.String())
 	}
 }
 

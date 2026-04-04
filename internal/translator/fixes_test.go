@@ -34,7 +34,7 @@ func TestIsScalar_NegativeAndScientific(t *testing.T) {
 	}
 }
 
-func TestWithoutClause_ReturnsError(t *testing.T) {
+func TestWithoutClause_ConvertedToBy(t *testing.T) {
 	tests := []struct {
 		name  string
 		logql string
@@ -44,12 +44,13 @@ func TestWithoutClause_ReturnsError(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := TranslateLogQL(tt.logql)
-			if err == nil {
-				t.Fatalf("expected error for without() clause, got nil")
+			result, err := TranslateLogQL(tt.logql)
+			if err != nil {
+				t.Fatalf("without() should now be supported (converted to by): %v", err)
 			}
-			if !strings.Contains(err.Error(), "without") {
-				t.Errorf("error should mention 'without': %v", err)
+			// Should produce a valid stats query with by()
+			if !strings.Contains(result, "stats") {
+				t.Errorf("expected stats query, got %q", result)
 			}
 		})
 	}

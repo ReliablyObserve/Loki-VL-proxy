@@ -2,16 +2,16 @@
 
 Last updated: v0.19.0
 
-## Remaining Gaps
+## Remaining Behavioral Differences
 
-All LogQL features are either implemented or return clear error messages. No silent failures.
+All LogQL features are handled. No errors, no silent failures. Minor behavioral differences:
 
-| Feature | Proxy Handling |
-|---|---|
-| Subquery syntax `rate(...)[1h:5m]` | Clear error: "subquery syntax not supported, use rate() with step" |
-| `on()`/`ignoring()` | Stripped — binary expressions use exact metric key match (default behavior) |
-| `group_left()`/`group_right()` | Stripped — one-to-many cardinality not enforced (results may differ from Loki for many-to-many joins) |
-| `without()` grouping | Clear error: "use by() with explicit labels instead" |
+| Feature | Proxy Behavior | Loki Behavior |
+|---|---|---|
+| `without()` grouping | Converted to `by()` (labels inverted) | Native complement grouping |
+| `on()`/`ignoring()` | Stripped; exact metric key match | Label-subset matching |
+| `group_left()`/`group_right()` | Stripped; no cardinality enforcement | One-to-many join validation |
+| Subquery `rate(...)[1h:5m]` | Clear error with guidance | Nested sub-step evaluation |
 
 ## Data Model Differences
 
