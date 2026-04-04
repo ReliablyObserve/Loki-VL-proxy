@@ -389,6 +389,36 @@ func TestOptimization_NoMemoryLeak_SustainedLoad(t *testing.T) {
 // Test: large NDJSON body doesn't cause OOM or excessive GC
 // =============================================================================
 
+// =============================================================================
+// Test: /metrics exposes Go runtime/GC stats
+// =============================================================================
+
+func TestOptimization_Metrics_ExposesGCStats(t *testing.T) {
+	p := newGapTestProxy(t, "http://unused")
+	p.Init()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	p.GetMetrics().Handler(w, r)
+
+	body := w.Body.String()
+
+	requiredMetrics := []string{
+		"go_memstats_alloc_bytes",
+		"go_memstats_sys_bytes",
+		"go_memstats_heap_inuse_bytes",
+		"go_memstats_heap_idle_bytes",
+		"go_goroutines",
+		"go_gc_cycles_total",
+	}
+
+	for _, metric := range requiredMetrics {
+		if !strings.Contains(body, metric) {
+			t.Errorf("missing Go runtime metric %q in /metrics output", metric)
+		}
+	}
+}
+
 func TestOptimization_LargeBody_GCPressure(t *testing.T) {
 	// Generate 1000-line NDJSON (simulate heavy query result)
 	var body []byte

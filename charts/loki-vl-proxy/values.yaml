@@ -44,6 +44,14 @@ extraArgs:
   # derived-fields: '[{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]'
   # stream-response: "true"  # chunked transfer encoding for large results
 
+# Go runtime tuning — set GOMEMLIMIT to ~90% of memory limit for optimal GC
+# This prevents OOM while minimizing GC overhead. See docs/performance.md.
+# Go runtime tuning:
+# GOMEMLIMIT is auto-calculated as goMemLimitPercent% of resources.limits.memory.
+# Override with goMemLimit to set an explicit value (e.g., "500MiB").
+goMemLimitPercent: 70  # percentage of resources.limits.memory
+goMemLimit: ""         # explicit override; if set, goMemLimitPercent is ignored
+
 # Environment variables (alternative to flags, also for secrets)
 env: []
   # - name: VL_BACKEND_URL
