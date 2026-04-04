@@ -113,32 +113,35 @@ jobs:
           RANGE="${LATEST_TAG}..HEAD"
 
           ENTRY=$(mktemp)
-          echo "## [${VERSION}] - ${DATE}" > "$ENTRY"
-          echo "" >> "$ENTRY"
-
-          # Features
           FEATS=$(git log "$RANGE" --pretty=format:'%s' --grep='^feat' | sed 's/^feat([^)]*): //' | sed 's/^feat: //' || true)
-          if [ -n "$FEATS" ]; then
-            echo "### Features" >> "$ENTRY"
-            echo "" >> "$ENTRY"
-            echo "$FEATS" | while read -r line; do echo "- $line" >> "$ENTRY"; done
-            echo "" >> "$ENTRY"
-          fi
-
-          # Fixes
           FIXES=$(git log "$RANGE" --pretty=format:'%s' --grep='^fix' | sed 's/^fix([^)]*): //' | sed 's/^fix: //' || true)
-          if [ -n "$FIXES" ]; then
-            echo "### Bug Fixes" >> "$ENTRY"
-            echo "" >> "$ENTRY"
-            echo "$FIXES" | while read -r line; do echo "- $line" >> "$ENTRY"; done
-            echo "" >> "$ENTRY"
-          fi
+          {
+            echo "## [${VERSION}] - ${DATE}"
+            echo ""
 
-          # Tests
-          echo "### Tests" >> "$ENTRY"
-          echo "" >> "$ENTRY"
-          echo "- ${{ steps.metrics.outputs.tests }} total tests (${{ steps.metrics.outputs.coverage }} coverage)" >> "$ENTRY"
-          echo "" >> "$ENTRY"
+            if [ -n "$FEATS" ]; then
+              echo "### Features"
+              echo ""
+              printf '%s\n' "$FEATS" | while read -r line; do
+                echo "- $line"
+              done
+              echo ""
+            fi
+
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes"
+              echo ""
+              printf '%s\n' "$FIXES" | while read -r line; do
+                echo "- $line"
+              done
+              echo ""
+            fi
+
+            echo "### Tests"
+            echo ""
+            echo "- ${{ steps.metrics.outputs.tests }} total tests (${{ steps.metrics.outputs.coverage }} coverage)"
+            echo ""
+          } > "$ENTRY"
 
           cat "$ENTRY"
           # Save for PR body
@@ -159,7 +162,6 @@ jobs:
       - name: Update README badges
         run: |
           TESTS="${{ steps.metrics.outputs.tests }}"
-          COV="${{ steps.metrics.outputs.coverage }}"
           VERSION="${{ needs.prepare-release.outputs.next_version }}"
 
           sed -i "s|tests-[0-9]*%20passed|tests-${TESTS}%20passed|g" README.md
@@ -241,7 +243,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   tag-release:
-    if: startsWith(github.event.head_commit.message, 'chore: release v')
+    if: "startsWith(github.event.head_commit.message, 'chore: release v')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -250,9 +252,9 @@ jobs:
 
       - name: Tag merged release commit
         run: |
-          VERSION=$(printf '%s' "${{ github.event.head_commit.message }}" | sed -n 's/^chore: release v\([0-9][0-9.]*\).*/\1/p')
+          VERSION=$(printf '%s' "$HEAD_COMMIT_MESSAGE" | sed -n 's/^chore: release v\([0-9][0-9.]*\).*/\1/p')
           if [ -z "$VERSION" ]; then
-            echo "Could not parse release version from commit message: ${{ github.event.head_commit.message }}"
+            echo "Could not parse release version from commit message: $HEAD_COMMIT_MESSAGE"
             exit 1
           fi
 
@@ -266,4 +268,5 @@ jobs:
           git push origin "v${VERSION}"
           echo "Tagged v${VERSION} from merged release commit ${GITHUB_SHA}"
         env:
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           GH_TOKEN: ${{ github.token }}
