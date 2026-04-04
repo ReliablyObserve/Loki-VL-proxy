@@ -226,6 +226,8 @@ jobs:
             echo "$ERR_MSG"
             exit 1
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Enable auto-merge for release PR
         if: steps.create_release_pr.outputs.pr_created == 'true'
