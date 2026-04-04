@@ -160,10 +160,10 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 		c.l2.Set(key, value, ttl)
 	}
 
-	// Write-through to L3 (owning peer) — ensures the canonical peer has the data
-	// so other fleet members can fetch it via L3 on miss.
+	// L3: gossip "I have this key" to all peers (lightweight, no data transfer).
+	// Other peers record it in their key directory and pull-on-demand when needed.
 	if c.l3 != nil {
-		c.l3.Set(key, value)
+		c.l3.GossipHaveKey(key)
 	}
 }
 

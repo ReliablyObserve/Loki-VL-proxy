@@ -496,6 +496,76 @@ func TestPeerCache_LBScenario(t *testing.T) {
 	}
 }
 
+func TestPeerCache_KeyDirectory(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:      "self:3100",
+		DiscoveryType: "static",
+		StaticPeers:   "self:3100,peer-1:3100,peer-2:3100",
+	})
+	defer pc.Close()
+
+	// Record that peer-1 has a specific key
+	pc.recordKeyFrom("query:rate(nginx)", "peer-1:3100")
+
+	// findPeerWithKey should return peer-1
+	found := pc.findPeerWithKey("query:rate(nginx)")
+	if found != "peer-1:3100" {
+		t.Errorf("expected peer-1:3100 from directory, got %q", found)
+	}
+
+	// Unknown key should return empty
+	found = pc.findPeerWithKey("unknown-key")
+	if found != "" {
+		t.Errorf("expected empty for unknown key, got %q", found)
+	}
+}
+
+func TestPeerCache_KeyDirectory_SkipsSelf(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:      "self:3100",
+		DiscoveryType: "static",
+		StaticPeers:   "self:3100,peer-1:3100",
+	})
+	defer pc.Close()
+
+	// Record that self has the key — should be skipped
+	pc.recordKeyFrom("my-key", "self:3100")
+	found := pc.findPeerWithKey("my-key")
+	if found != "" {
+		t.Errorf("should skip self in directory, got %q", found)
+	}
+
+	// Add another peer — should return that one
+	pc.recordKeyFrom("my-key", "peer-1:3100")
+	found = pc.findPeerWithKey("my-key")
+	if found != "peer-1:3100" {
+		t.Errorf("expected peer-1:3100, got %q", found)
+	}
+}
+
+func TestPeerCache_GossipEndpoint(t *testing.T) {
+	localCache := New(60*time.Second, 1000)
+	defer localCache.Close()
+
+	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost"})
+	defer pc.Close()
+
+	// Simulate gossip: peer-2 announces it has "shared-key"
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/_cache/dir?key=shared-key&from=peer-2:3100", nil)
+	pc.ServeHTTP(w, r, localCache)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", w.Code)
+	}
+
+	// Directory should now know peer-2 has "shared-key"
+	found := pc.findPeerWithKey("shared-key")
+	if found != "peer-2:3100" {
+		t.Errorf("expected peer-2:3100 in directory after gossip, got %q", found)
+	}
+}
+
 func TestParsePeerList(t *testing.T) {
 	tests := []struct {
 		input string

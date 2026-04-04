@@ -365,6 +365,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 		}
 		mux.HandleFunc("/_cache/get", peerHandler)
 		mux.HandleFunc("/_cache/set", peerHandler)
+		mux.HandleFunc("/_cache/dir", peerHandler) // gossip directory
 	}
 }
 

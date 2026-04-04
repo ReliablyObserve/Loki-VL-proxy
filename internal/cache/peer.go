@@ -18,8 +18,17 @@ import (
 )
 
 // PeerCache implements a distributed cache layer (L3) between local cache and VL backend.
-// Uses consistent hashing to route keys to specific peers, minimizing network chatter.
-// On local miss, fetches from the owning peer before hitting VL.
+//
+// Strategy: local-first with gossip directory
+//   - L1 has data and it's fresh → serve immediately (0 hops)
+//   - L1 miss → check key directory: which peers have this key?
+//   - If a peer has it → fetch from that peer (1 hop)
+//   - If no peer has it → fall through to VL
+//   - After VL fetch → gossip "I have key K" to all peers (tiny metadata, no data)
+//   - Other peers pull full data only when they actually need it
+//
+// This minimizes hops: if the LB sends the same query to the same peer twice,
+// it's served from L1 with zero network. Different peer? Check directory first.
 type PeerCache struct {
 	mu           sync.RWMutex
 	ring         *hashRing
@@ -31,6 +40,11 @@ type PeerCache struct {
 	discoveryFn  func() ([]string, error) // returns peer addresses
 	discoveryInt time.Duration
 
+	// Key directory: tracks which peers have which keys (gossip-populated).
+	// key → set of peer addresses that have this key.
+	// Lightweight: only stores key+addr strings, not actual data.
+	keyDir     sync.Map // string → *peerSet
+
 	// Per-peer circuit breakers (address → breaker)
 	breakers   sync.Map // string → *peerBreaker
 
@@ -41,6 +55,13 @@ type PeerCache struct {
 	PeerHits   atomic.Int64
 	PeerMisses atomic.Int64
 	PeerErrors atomic.Int64
+	DirHits    atomic.Int64 // key found in directory (skip hash ring)
+}
+
+// peerSet is a thread-safe set of peer addresses that have a given key.
+type peerSet struct {
+	mu    sync.RWMutex
+	addrs map[string]time.Time // addr → when added (for expiry)
 }
 
 type inflightEntry struct {
@@ -187,25 +208,35 @@ func (pc *PeerCache) Set(key string, value []byte) {
 	}()
 }
 
-// Get fetches a value from the peer that owns this key.
+// Get fetches a value from a peer that has this key.
+// Strategy: check key directory first (who has it?) → fetch from nearest available.
+// Falls back to consistent hash owner if directory is empty.
 // Returns (value, true) on hit, (nil, false) on miss.
-// Skips self (L1/L2 already checked by caller).
 func (pc *PeerCache) Get(key string) ([]byte, bool) {
 	pc.mu.RLock()
 	if len(pc.peers) == 0 {
 		pc.mu.RUnlock()
 		return nil, false
 	}
-	owner := pc.ring.get(key)
 	pc.mu.RUnlock()
 
+	// Phase 1: Check key directory — any peer that already has this key
+	target := pc.findPeerWithKey(key)
+
+	// Phase 2: Fall back to consistent hash owner
+	if target == "" {
+		pc.mu.RLock()
+		target = pc.ring.get(key)
+		pc.mu.RUnlock()
+	}
+
 	// Don't fetch from self — L1/L2 already checked
-	if owner == pc.selfAddr || owner == "" {
+	if target == pc.selfAddr || target == "" {
 		return nil, false
 	}
 
 	// Check per-peer circuit breaker
-	if !pc.peerAllowed(owner) {
+	if !pc.peerAllowed(target) {
 		pc.PeerErrors.Add(1)
 		return nil, false
 	}
@@ -228,14 +259,14 @@ func (pc *PeerCache) Get(key string) ([]byte, bool) {
 		pc.inflight.Delete(key)
 	}()
 
-	// HTTP GET to peer
-	url := fmt.Sprintf("http://%s/_cache/get?key=%s", owner, key)
+	// HTTP GET from target peer
+	url := fmt.Sprintf("http://%s/_cache/get?key=%s", target, key)
 	ctx, cancel := context.WithTimeout(context.Background(), pc.client.Timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		pc.recordPeerFailure(owner)
+		pc.recordPeerFailure(target)
 		inf.ok = false
 		pc.PeerErrors.Add(1)
 		return nil, false
@@ -243,7 +274,7 @@ func (pc *PeerCache) Get(key string) ([]byte, bool) {
 
 	resp, err := pc.client.Do(req)
 	if err != nil {
-		pc.recordPeerFailure(owner)
+		pc.recordPeerFailure(target)
 		inf.ok = false
 		pc.PeerErrors.Add(1)
 		return nil, false
@@ -251,14 +282,14 @@ func (pc *PeerCache) Get(key string) ([]byte, bool) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		pc.recordPeerSuccess(owner)
+		pc.recordPeerSuccess(target)
 		inf.ok = false
 		pc.PeerMisses.Add(1)
 		return nil, false
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		pc.recordPeerFailure(owner)
+		pc.recordPeerFailure(target)
 		inf.ok = false
 		pc.PeerErrors.Add(1)
 		return nil, false
@@ -266,13 +297,13 @@ func (pc *PeerCache) Get(key string) ([]byte, bool) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		pc.recordPeerFailure(owner)
+		pc.recordPeerFailure(target)
 		inf.ok = false
 		pc.PeerErrors.Add(1)
 		return nil, false
 	}
 
-	pc.recordPeerSuccess(owner)
+	pc.recordPeerSuccess(target)
 	inf.result = body
 	inf.ok = true
 	pc.PeerHits.Add(1)
@@ -285,10 +316,23 @@ func (pc *PeerCache) getInflight(key string) *inflightEntry {
 }
 
 // ServeHTTP handles incoming peer cache requests.
-// GET /_cache/get?key=... — return cached value (or 404)
+// GET  /_cache/get?key=... — return cached value (or 404)
 // POST /_cache/set?key=... — store value from peer (write-through)
+// POST /_cache/dir?key=...&from=... — gossip: peer announces it has a key
 func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCache *Cache) {
+	path := r.URL.Path
 	key := r.URL.Query().Get("key")
+
+	// Handle directory gossip (no key validation needed for from param)
+	if path == "/_cache/dir" && r.Method == "POST" {
+		from := r.URL.Query().Get("from")
+		if key != "" && from != "" {
+			pc.recordKeyFrom(key, from)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if key == "" {
 		http.Error(w, "missing key", http.StatusBadRequest)
 		return
@@ -315,6 +359,81 @@ func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCach
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(value)
+}
+
+// findPeerWithKey checks the key directory for a peer that has this key (not self).
+// Returns the peer address, or "" if no peer is known to have it.
+func (pc *PeerCache) findPeerWithKey(key string) string {
+	v, ok := pc.keyDir.Load(key)
+	if !ok {
+		return ""
+	}
+	ps := v.(*peerSet)
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	now := time.Now()
+	for addr, added := range ps.addrs {
+		if addr == pc.selfAddr {
+			continue // skip self
+		}
+		// Expire directory entries after 5 minutes
+		if now.Sub(added) > 5*time.Minute {
+			continue
+		}
+		if pc.peerAllowed(addr) {
+			pc.DirHits.Add(1)
+			return addr
+		}
+	}
+	return ""
+}
+
+// GossipHaveKey announces to all peers that this instance has the given key.
+// Lightweight: only sends key name + self address (no data).
+// Fire-and-forget, non-blocking.
+func (pc *PeerCache) GossipHaveKey(key string) {
+	// Record locally first
+	pc.recordKeyLocal(key)
+
+	pc.mu.RLock()
+	peers := make([]string, len(pc.peers))
+	copy(peers, pc.peers)
+	pc.mu.RUnlock()
+
+	for _, peer := range peers {
+		if peer == pc.selfAddr {
+			continue
+		}
+		go func(addr string) {
+			url := fmt.Sprintf("http://%s/_cache/dir?key=%s&from=%s", addr, key, pc.selfAddr)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+			if err != nil {
+				return
+			}
+			resp, err := pc.client.Do(req)
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+		}(peer)
+	}
+}
+
+// recordKeyLocal records that a peer has a given key in the local directory.
+func (pc *PeerCache) recordKeyLocal(key string) {
+	pc.recordKeyFrom(key, pc.selfAddr)
+}
+
+// recordKeyFrom records that a specific peer has a given key.
+func (pc *PeerCache) recordKeyFrom(key string, fromAddr string) {
+	v, _ := pc.keyDir.LoadOrStore(key, &peerSet{addrs: make(map[string]time.Time)})
+	ps := v.(*peerSet)
+	ps.mu.Lock()
+	ps.addrs[fromAddr] = time.Now()
+	ps.mu.Unlock()
 }
 
 // PeerCount returns the number of active peers (excluding self).
@@ -355,6 +474,7 @@ func (pc *PeerCache) Stats() map[string]interface{} {
 		"peer_hits":   pc.PeerHits.Load(),
 		"peer_misses": pc.PeerMisses.Load(),
 		"peer_errors": pc.PeerErrors.Load(),
+		"dir_hits":    pc.DirHits.Load(),
 	}
 }
 
