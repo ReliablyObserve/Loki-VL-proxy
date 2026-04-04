@@ -1,0 +1,207 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "CHANGELOG.md"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    # Skip if this push is from a release PR merge or badge update
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: release')"
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      next_version: ${{ steps.check.outputs.next_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: check
+        run: |
+          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -1 || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+
+          COMMITS=$(git log "${LATEST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+          REAL=$(echo "$COMMITS" | grep -v "^ci:" | grep -v "\[skip ci\]" | grep -v "^Merge" | grep -v "^chore: release" || true)
+
+          if [ -z "$REAL" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BUMP="patch"
+          echo "$COMMITS" | grep -qE "^feat(\(|:)" && BUMP="minor"
+          echo "$COMMITS" | grep -qE "BREAKING CHANGE|^feat.*!:|^fix.*!:" && BUMP="major"
+
+          CURRENT="${LATEST_TAG#v}"
+          IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+          case "$BUMP" in
+            major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN+1)); PAT=0 ;;
+            patch) PAT=$((PAT+1)) ;;
+          esac
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "next_version=${MAJ}.${MIN}.${PAT}" >> "$GITHUB_OUTPUT"
+          echo "Bump: $BUMP → v${MAJ}.${MIN}.${PAT}"
+
+  create-release-pr:
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      - name: Collect metrics
+        id: metrics
+        run: |
+          TESTS=$(go test ./... -count=1 -json 2>/dev/null | jq -r 'select(.Action=="pass" and .Test != null) | .Test' | wc -l | tr -d ' ')
+          go test ./... -coverprofile=coverage.out -count=1 2>/dev/null
+          COV=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}')
+          echo "tests=${TESTS}" >> "$GITHUB_OUTPUT"
+          echo "coverage=${COV}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog entry
+        id: changelog
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.next_version }}"
+          LATEST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -1 || echo "v0.0.0")
+          DATE=$(date +%Y-%m-%d)
+          RANGE="${LATEST_TAG}..HEAD"
+
+          ENTRY=$(mktemp)
+          echo "## [${VERSION}] - ${DATE}" > "$ENTRY"
+          echo "" >> "$ENTRY"
+
+          # Features
+          FEATS=$(git log "$RANGE" --pretty=format:'%s' --grep='^feat' | sed 's/^feat([^)]*): //' | sed 's/^feat: //' || true)
+          if [ -n "$FEATS" ]; then
+            echo "### Features" >> "$ENTRY"
+            echo "" >> "$ENTRY"
+            echo "$FEATS" | while read -r line; do echo "- $line" >> "$ENTRY"; done
+            echo "" >> "$ENTRY"
+          fi
+
+          # Fixes
+          FIXES=$(git log "$RANGE" --pretty=format:'%s' --grep='^fix' | sed 's/^fix([^)]*): //' | sed 's/^fix: //' || true)
+          if [ -n "$FIXES" ]; then
+            echo "### Bug Fixes" >> "$ENTRY"
+            echo "" >> "$ENTRY"
+            echo "$FIXES" | while read -r line; do echo "- $line" >> "$ENTRY"; done
+            echo "" >> "$ENTRY"
+          fi
+
+          # Tests
+          echo "### Tests" >> "$ENTRY"
+          echo "" >> "$ENTRY"
+          echo "- ${{ steps.metrics.outputs.tests }} total tests (${{ steps.metrics.outputs.coverage }} coverage)" >> "$ENTRY"
+          echo "" >> "$ENTRY"
+
+          cat "$ENTRY"
+          # Save for PR body
+          {
+            echo "ENTRY<<EOF"
+            cat "$ENTRY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          # Insert into CHANGELOG.md after header
+          TEMP=$(mktemp)
+          awk -v entry="$(cat "$ENTRY")" '
+            /^## \[/ && !done { print entry; print ""; done=1 }
+            { print }
+          ' CHANGELOG.md > "$TEMP"
+          mv "$TEMP" CHANGELOG.md
+
+      - name: Update README badges
+        run: |
+          TESTS="${{ steps.metrics.outputs.tests }}"
+          COV="${{ steps.metrics.outputs.coverage }}"
+          VERSION="${{ needs.prepare-release.outputs.next_version }}"
+
+          sed -i "s|tests-[0-9]*%20passed|tests-${TESTS}%20passed|g" README.md
+
+      - name: Create release PR
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.next_version }}"
+          BRANCH="release/v${VERSION}"
+          TESTS="${{ steps.metrics.outputs.tests }}"
+          COV="${{ steps.metrics.outputs.coverage }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add CHANGELOG.md README.md
+          git diff --cached --quiet && { echo "No changes to release"; exit 0; }
+          git commit -m "chore: release v${VERSION} [skip ci]"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --title "chore: release v${VERSION}" \
+            --body "$(cat <<PRBODY
+          ## Release v${VERSION}
+
+          Auto-generated from conventional commits.
+
+          ${{ steps.changelog.outputs.ENTRY }}
+
+          **Stats**: ${TESTS} tests, ${COV} coverage
+
+          > After merge, tag \`v${VERSION}\` will be created and the release workflow will build binaries + Docker images.
+          PRBODY
+          )" \
+            --base main \
+            --head "$BRANCH" \
+            --label "release"
+
+          sleep 5
+          gh pr merge "$BRANCH" --squash --auto --delete-branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  tag-release:
+    needs: [prepare-release, create-release-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for PR merge and tag
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.next_version }}"
+
+          # Wait for the release PR to merge
+          for i in $(seq 1 30); do
+            git fetch origin main 2>/dev/null
+            if git log origin/main --oneline -1 | grep -q "release v${VERSION}"; then
+              echo "Release PR merged"
+              break
+            fi
+            echo "Waiting for PR merge... (${i}/30)"
+            sleep 10
+          done
+
+          git checkout main
+          git pull origin main
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          echo "Tagged v${VERSION} — release workflow triggered"
+        env:
+          GH_TOKEN: ${{ github.token }}
