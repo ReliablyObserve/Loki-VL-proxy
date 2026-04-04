@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   update-badges:
@@ -46,14 +47,25 @@ jobs:
             sed -i "s|coverage-[0-9.]*%25-[a-z]*|coverage-${COV//%/%25}-brightgreen|g" README.md
           fi
 
-      - name: Commit badge updates
+      - name: Create PR if changed
         run: |
+          git diff --quiet README.md && { echo "No changes"; exit 0; }
+
+          BRANCH="ci/update-badges-$(date +%s)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git diff --quiet README.md && exit 0
+          git checkout -b "$BRANCH"
           git add README.md
-          git commit -m "ci: update badges — ${TESTS} tests, ${COV} coverage [skip ci]"
-          git push
+          git commit -m "ci: update badges — ${{ steps.tests.outputs.count }} tests, ${{ steps.coverage.outputs.pct }} coverage"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "ci: update badges — ${{ steps.tests.outputs.count }} tests" \
+            --body "Auto-generated badge update: ${{ steps.tests.outputs.count }} tests, ${{ steps.coverage.outputs.pct }} coverage" \
+            --base main \
+            --head "$BRANCH" \
+            --label "automation"
+          # Auto-merge (0 required reviewers)
+          sleep 5
+          gh pr merge "$BRANCH" --squash --auto --delete-branch
         env:
-          TESTS: ${{ steps.tests.outputs.count }}
-          COV: ${{ steps.coverage.outputs.pct }}
+          GH_TOKEN: ${{ github.token }}
