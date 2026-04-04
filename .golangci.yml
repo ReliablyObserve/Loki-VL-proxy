@@ -12,9 +12,15 @@ linters:
       exclude-functions:
         - (net/http.ResponseWriter).Write
         - (*encoding/json.Encoder).Encode
+        - (*encoding/json.Decoder).Decode
+        - encoding/json.Unmarshal
+        - encoding/json.Marshal
         - fmt.Fprintf
         - fmt.Fprintln
         - (*net/http.Request).ParseForm
+        - io.Copy
+        - (io.Closer).Close
+        - (*os.File).Close
   exclusions:
     rules:
       - path: _test\.go

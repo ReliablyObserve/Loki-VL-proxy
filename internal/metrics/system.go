@@ -119,15 +119,15 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 	for _, resource := range []string{"cpu", "memory", "io"} {
 		some10, some60, some300, full10, full60, full300 := readPSI(resource)
 		if some10 >= 0 {
-			sb.WriteString(fmt.Sprintf("# HELP node_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource))
-			sb.WriteString(fmt.Sprintf("# TYPE node_pressure_%s_some_ratio gauge\n", resource))
+			fmt.Fprintf(sb, "# HELP node_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource)
+			fmt.Fprintf(sb, "# TYPE node_pressure_%s_some_ratio gauge\n", resource)
 			fmt.Fprintf(sb, "node_pressure_%s_some_ratio{window=\"10s\"} %g\n", resource, some10/100)
 			fmt.Fprintf(sb, "node_pressure_%s_some_ratio{window=\"60s\"} %g\n", resource, some60/100)
 			fmt.Fprintf(sb, "node_pressure_%s_some_ratio{window=\"300s\"} %g\n", resource, some300/100)
 		}
 		if full10 >= 0 {
-			sb.WriteString(fmt.Sprintf("# HELP node_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource))
-			sb.WriteString(fmt.Sprintf("# TYPE node_pressure_%s_full_ratio gauge\n", resource))
+			fmt.Fprintf(sb, "# HELP node_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource)
+			fmt.Fprintf(sb, "# TYPE node_pressure_%s_full_ratio gauge\n", resource)
 			fmt.Fprintf(sb, "node_pressure_%s_full_ratio{window=\"10s\"} %g\n", resource, full10/100)
 			fmt.Fprintf(sb, "node_pressure_%s_full_ratio{window=\"60s\"} %g\n", resource, full60/100)
 			fmt.Fprintf(sb, "node_pressure_%s_full_ratio{window=\"300s\"} %g\n", resource, full300/100)

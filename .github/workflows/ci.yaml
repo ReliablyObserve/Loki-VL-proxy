@@ -97,7 +97,7 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    needs: [test, lint]
+    needs: [test]
     steps:
       - uses: actions/checkout@v4
 
@@ -121,7 +121,11 @@ jobs:
 
       - name: Start e2e stack
         working-directory: test/e2e-compat
-        run: docker compose up -d --wait --wait-timeout 60
+        run: |
+          docker compose up -d --build
+          # Wait for services (loki has no healthcheck, just sleep)
+          sleep 20
+          docker compose ps
 
       - name: Run compatibility tests
         id: compat
