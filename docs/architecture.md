@@ -64,12 +64,18 @@ flowchart TD
 
 When 50 Grafana dashboards send `{app="nginx"} |= "error"` simultaneously:
 
-```
-Client 1 ──┐
-Client 2 ──┤
-Client 3 ──┤──→ 1 request to VL ──→ response shared to all 50
-  ...      │
-Client 50 ─┘
+```mermaid
+flowchart LR
+    C1["Client 1"] --> SF["Singleflight<br/>1 request"]
+    C2["Client 2"] --> SF
+    C3["Client 3"] --> SF
+    CN["Client 50"] --> SF
+    SF --> VL["VictoriaLogs"]
+    VL --> R["Response"]
+    R --> C1
+    R --> C2
+    R --> C3
+    R --> CN
 ```
 
 Only **1** request reaches VictoriaLogs. All clients get the same response. Coalescing keys include the tenant header to prevent cross-tenant data leaks.

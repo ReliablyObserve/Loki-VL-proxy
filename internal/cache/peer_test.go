@@ -561,6 +561,299 @@ func FuzzCacheGetSet(f *testing.F) {
 	})
 }
 
+// =============================================================================
+// Stable Consistent Hashing Tests
+// =============================================================================
+
+// TestHashRing_Stability verifies that the same set of peers always produces
+// the same key→peer mapping (deterministic). This is critical: when the headless
+// service returns the same pod IPs, keys must not shuffle.
+func TestHashRing_Stability(t *testing.T) {
+	peers := []string{"10.0.0.1:3100", "10.0.0.2:3100", "10.0.0.3:3100"}
+	keys := make([]string, 100)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("cache:query_range:tenant-%d:%d", i%5, i)
+	}
+
+	// Build ring twice with same peers (different order should not matter after sort)
+	ring1 := newHashRing(150)
+	for _, p := range peers {
+		ring1.add(p)
+	}
+
+	ring2 := newHashRing(150)
+	// Add in reverse order — result must be identical
+	for i := len(peers) - 1; i >= 0; i-- {
+		ring2.add(peers[i])
+	}
+
+	for _, key := range keys {
+		owner1 := ring1.get(key)
+		owner2 := ring2.get(key)
+		if owner1 != owner2 {
+			t.Errorf("key %q: ring1=%s ring2=%s — order of peer addition should not affect mapping",
+				key, owner1, owner2)
+		}
+	}
+}
+
+// TestHashRing_SamePeersNoMovement verifies that when the same peer set is
+// re-applied (e.g., DNS refresh returns same IPs), zero keys move.
+func TestHashRing_SamePeersNoMovement(t *testing.T) {
+	peers := []string{"a:3100", "b:3100", "c:3100"}
+
+	ring1 := newHashRing(150)
+	for _, p := range peers {
+		ring1.add(p)
+	}
+
+	// Simulate DNS refresh returning same peers
+	ring2 := newHashRing(150)
+	for _, p := range peers {
+		ring2.add(p)
+	}
+
+	moved := 0
+	total := 10000
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		if ring1.get(key) != ring2.get(key) {
+			moved++
+		}
+	}
+	if moved != 0 {
+		t.Errorf("%d/%d keys moved when peer set is unchanged — expected 0", moved, total)
+	}
+}
+
+// TestHashRing_RemoveNodeMinimalRebalance verifies that removing a peer
+// only moves the keys that belonged to that peer.
+func TestHashRing_RemoveNodeMinimalRebalance(t *testing.T) {
+	ring3 := newHashRing(150)
+	ring3.add("a")
+	ring3.add("b")
+	ring3.add("c")
+
+	// Record which keys belong to "c"
+	keysOnC := 0
+	total := 10000
+	for i := 0; i < total; i++ {
+		if ring3.get(fmt.Sprintf("key-%d", i)) == "c" {
+			keysOnC++
+		}
+	}
+
+	// Remove "c" — build ring with only a and b
+	ring2 := newHashRing(150)
+	ring2.add("a")
+	ring2.add("b")
+
+	moved := 0
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		if ring3.get(key) != ring2.get(key) {
+			moved++
+		}
+	}
+
+	// Only keys that were on "c" should move (to a or b)
+	if moved != keysOnC {
+		t.Errorf("expected %d keys to move (those on removed node), got %d", keysOnC, moved)
+	}
+	// Each node should own ~33%, so keysOnC should be ~3333
+	pct := float64(keysOnC) / float64(total) * 100
+	t.Logf("Node 'c' owned %.1f%% of keys — %d keys moved on removal", pct, moved)
+}
+
+// TestHashRing_AddNodeOnlyTakesFromExisting verifies that adding a new node
+// only takes keys from existing nodes, not creating new mappings.
+func TestHashRing_AddNodeOnlyTakesFromExisting(t *testing.T) {
+	ring2 := newHashRing(150)
+	ring2.add("a")
+	ring2.add("b")
+
+	ring3 := newHashRing(150)
+	ring3.add("a")
+	ring3.add("b")
+	ring3.add("c") // new node
+
+	movedToC := 0
+	movedFromA := 0
+	movedFromB := 0
+	total := 10000
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		old := ring2.get(key)
+		new := ring3.get(key)
+		if old != new {
+			if new == "c" {
+				movedToC++
+			}
+			if old == "a" {
+				movedFromA++
+			}
+			if old == "b" {
+				movedFromB++
+			}
+		}
+	}
+
+	// All moved keys should go to the new node "c"
+	if movedToC != movedFromA+movedFromB {
+		t.Errorf("moved-to-c=%d but moved-from-a=%d + moved-from-b=%d",
+			movedToC, movedFromA, movedFromB)
+	}
+
+	// ~33% should move to new node
+	pct := float64(movedToC) / float64(total) * 100
+	if pct < 20 || pct > 45 {
+		t.Errorf("expected ~33%% keys to move to new node, got %.1f%%", pct)
+	}
+	t.Logf("%.1f%% keys moved to new node (ideal: ~33%%)", pct)
+}
+
+// TestHashRing_ScaleUpDown verifies that scaling up then back down returns
+// all keys to their original owners.
+func TestHashRing_ScaleUpDown(t *testing.T) {
+	peers := []string{"a", "b", "c"}
+
+	ring := newHashRing(150)
+	for _, p := range peers {
+		ring.add(p)
+	}
+
+	// Record original mappings
+	original := make(map[string]string)
+	total := 5000
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		original[key] = ring.get(key)
+	}
+
+	// Scale up: add "d"
+	ringUp := newHashRing(150)
+	for _, p := range append(peers, "d") {
+		ringUp.add(p)
+	}
+
+	// Scale back down: remove "d"
+	ringDown := newHashRing(150)
+	for _, p := range peers {
+		ringDown.add(p)
+	}
+
+	// After scale down, all keys should return to original owners
+	moved := 0
+	for key, origOwner := range original {
+		if ringDown.get(key) != origOwner {
+			moved++
+		}
+	}
+	if moved != 0 {
+		t.Errorf("%d/%d keys didn't return to original owner after scale up+down", moved, total)
+	}
+}
+
+// TestPeerCache_UpdatePeersRebuildsRing verifies that updatePeers
+// correctly rebuilds the hash ring with new peers.
+func TestPeerCache_UpdatePeersRebuildsRing(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:      "self:3100",
+		DiscoveryType: "static",
+		StaticPeers:   "self:3100,a:3100,b:3100",
+	})
+	defer pc.Close()
+
+	// Record ownership of 100 keys
+	before := make(map[string]string)
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		pc.mu.RLock()
+		before[key] = pc.ring.get(key)
+		pc.mu.RUnlock()
+	}
+
+	// Simulate DNS refresh adding a new peer
+	pc.updatePeers([]string{"self:3100", "a:3100", "b:3100", "c:3100"})
+
+	moved := 0
+	for key, oldOwner := range before {
+		pc.mu.RLock()
+		newOwner := pc.ring.get(key)
+		pc.mu.RUnlock()
+		if oldOwner != newOwner {
+			moved++
+		}
+	}
+
+	pct := float64(moved) / 100 * 100
+	t.Logf("%.0f%% keys moved after adding 4th peer (ideal: ~25%%)", pct)
+	if pct > 50 {
+		t.Errorf("too many keys moved: %.0f%% (consistent hashing should move ~25%%)", pct)
+	}
+}
+
+// TestPeerCache_CoalescingAndCacheIntegration verifies that singleflight
+// in the peer cache prevents duplicate requests to the same owner.
+func TestPeerCache_CoalescingAndCacheIntegration(t *testing.T) {
+	var requestCount atomic.Int64
+	ownerCache := NewWithMaxBytes(60*time.Second, 100, 1024*1024)
+	defer ownerCache.Close()
+
+	peerPC := NewPeerCache(PeerConfig{SelfAddr: "peer"})
+	defer peerPC.Close()
+
+	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		// Simulate slow response
+		time.Sleep(50 * time.Millisecond)
+		peerPC.ServeHTTP(w, r, ownerCache)
+	}))
+	defer peerServer.Close()
+
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:      "self:3100",
+		DiscoveryType: "static",
+		StaticPeers:   peerServer.Listener.Addr().String(),
+		Timeout:       5 * time.Second,
+	})
+	defer pc.Close()
+
+	// Store a key that maps to the remote peer
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("coalesce-%d", i)
+		ownerCache.SetWithTTL(key, []byte("data"), 30*time.Second)
+
+		pc.mu.RLock()
+		owner := pc.ring.get(key)
+		pc.mu.RUnlock()
+
+		if owner == peerServer.Listener.Addr().String() {
+			// Found a key that maps to the peer — fire 10 concurrent requests
+			requestCount.Store(0)
+			var wg sync.WaitGroup
+			for j := 0; j < 10; j++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					pc.Get(key)
+				}()
+			}
+			wg.Wait()
+
+			// Singleflight should collapse 10 requests into 1
+			count := requestCount.Load()
+			if count > 2 { // Allow 2 due to timing races
+				t.Errorf("expected 1-2 requests (singleflight), got %d", count)
+			} else {
+				t.Logf("10 concurrent gets → %d actual peer requests (singleflight working)", count)
+			}
+			return
+		}
+	}
+	t.Log("no key mapped to peer for coalescing test")
+}
+
 func TestParsePeerList(t *testing.T) {
 	tests := []struct {
 		input string

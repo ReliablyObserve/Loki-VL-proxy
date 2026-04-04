@@ -1,190 +1,73 @@
 # Peer Cache Design
 
+> **Note**: This document describes the initial design. For the current implementation, see [Fleet Cache Architecture](fleet-cache.md).
+
 ## Problem
 
-When running multiple proxy replicas, each maintains an independent L1 cache. This means:
+When running multiple proxy replicas behind a load balancer, each maintains an independent cache. This means:
 - Cache hit rate drops proportionally with replica count (N replicas = ~1/N hit rate per replica)
 - VL backend receives N times more identical queries
 - Cold starts after rollouts wipe all caches simultaneously
 
-## Solution: Distributed Peer Cache (L1.5)
+## Solution: Sharded Fleet Cache
 
-A lightweight peer-to-peer cache layer between L1 (in-process) and VL backend:
+A three-tier caching architecture with peer-aware consistent hashing:
 
+```mermaid
+flowchart TD
+    REQ["Client Request"] --> L1["L1: In-Memory Cache<br/>~2us latency"]
+    L1 -->|miss| L2["L2: Disk Cache (bbolt)<br/>~1ms latency"]
+    L2 -->|miss| L3["L3: Peer Cache (HTTP)<br/>~1-5ms latency"]
+    L3 -->|miss| VL["VictoriaLogs<br/>~10-100ms latency"]
 ```
-Client Request
-    ↓
-L1 Cache (in-process, ~2us)
-    ↓ miss
-L1.5 Peer Cache (HTTP to nearby replica, ~1-5ms)
-    ↓ miss
-VL Backend (~10-100ms)
-```
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Consistent hashing (not gossip) | Zero background traffic, deterministic routing |
+| Shadow copies (not write-through) | Non-owner fetches on demand, no push overhead |
+| TTL preservation (not extension) | Never serve stale data beyond original intent |
+| MinUsableTTL = 5s | Don't transfer data that expires in transit |
+| Per-peer circuit breaker | Isolate failures, auto-recover after cooldown |
+| No disk encryption | Delegated to cloud provider (EBS/PD at rest) |
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Proxy1["Replica 1"]
-        L1a["L1 Cache"]
-        H1["Handler"]
-    end
-    subgraph Proxy2["Replica 2"]
-        L1b["L1 Cache"]
-        H2["Handler"]
-    end
-    subgraph Proxy3["Replica 3"]
-        L1c["L1 Cache"]
-        H3["Handler"]
-    end
+flowchart TD
+    LB["Load Balancer"] -->|random| PA["Proxy A"]
+    LB -->|random| PB["Proxy B"]
+    LB -->|random| PC["Proxy C"]
 
-    H1 -->|miss| L1b
-    H1 -->|miss| L1c
-    H2 -->|miss| L1a
-    H2 -->|miss| L1c
-    H3 -->|miss| L1a
-    H3 -->|miss| L1b
+    PA <-->|"/_cache/get"| PB
+    PA <-->|"/_cache/get"| PC
+    PB <-->|"/_cache/get"| PC
 
-    L1a -->|miss| VL
-    L1b -->|miss| VL
-    L1c -->|miss| VL
+    PA --> VL["VictoriaLogs"]
+    PB --> VL
+    PC --> VL
 
-    VL["VictoriaLogs"]
+    HR["Hash Ring<br/>SHA256 · 150 vnodes"]
+
+    style HR fill:#e94560,color:#fff
+    style VL fill:#0f3460,color:#fff
 ```
 
-## Peer Discovery
+## Configuration
 
-### Kubernetes Headless Service (Primary)
+```bash
+# Kubernetes (DNS discovery via headless service)
+./loki-vl-proxy \
+  -peer-self=$(hostname -i):3100 \
+  -peer-discovery=dns \
+  -peer-dns=proxy-headless.ns.svc.cluster.local
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: loki-vl-proxy-peers
-spec:
-  clusterIP: None  # headless
-  selector:
-    app.kubernetes.io/name: loki-vl-proxy
-  ports:
-    - port: 3100
-      name: http
+# Static peer list
+./loki-vl-proxy \
+  -peer-self=10.0.0.1:3100 \
+  -peer-discovery=static \
+  -peer-static=10.0.0.1:3100,10.0.0.2:3100,10.0.0.3:3100
 ```
 
-The proxy resolves `loki-vl-proxy-peers.namespace.svc.cluster.local` via DNS to get all pod IPs. Refreshed every 10s.
-
-### Configuration
-
-```yaml
-# Helm values
-peerCache:
-  enabled: false
-  # Discovery method: "dns" (headless service) or "static" (explicit list)
-  discovery: "dns"
-  # Headless service name for DNS discovery
-  serviceName: ""  # defaults to fullname + "-peers"
-  # Static peer list (if discovery=static)
-  peers: []
-    # - "http://proxy-0:3100"
-    # - "http://proxy-1:3100"
-  # Cache fetch timeout (should be much less than VL query time)
-  timeout: "5ms"
-  # Max peers to query on cache miss (0 = all)
-  maxPeerQueries: 2
-```
-
-## Key Routing (Consistent Hashing)
-
-Instead of querying all peers on every miss, use consistent hashing to route each cache key to a specific peer:
-
-1. Hash the cache key (normalized query + tenant)
-2. Map hash to peer via consistent hash ring (jump hash — zero allocation)
-3. On L1 miss, check only the owning peer
-4. If peer miss → query VL, populate both L1 and tell owning peer
-
-This gives O(1) peer lookups instead of O(N) and ensures each key lives on exactly one peer.
-
-## Protocol
-
-### Internal Peer API
-
-```
-GET /internal/cache?key=<sha256-key>
-→ 200 + body (cache hit)
-→ 404 (cache miss)
-
-PUT /internal/cache?key=<sha256-key>&ttl=<seconds>
-body: cached response bytes
-→ 204 (stored)
-```
-
-These endpoints are NOT exposed externally — only reachable within the cluster via the headless service.
-
-## Cache Miss Flow
-
-```
-1. Client → Proxy A: GET /loki/api/v1/labels
-2. Proxy A: L1 miss
-3. Proxy A: hash("labels:tenant:query") → Proxy B is owner
-4. Proxy A → Proxy B: GET /internal/cache?key=abc123
-5a. Proxy B: L1 hit → 200 + cached bytes → Proxy A stores in L1, returns to client
-5b. Proxy B: L1 miss → 404 → Proxy A queries VL
-6. Proxy A: VL responds → Proxy A stores in L1 + PUT to Proxy B's L1
-```
-
-## Benefits
-
-| Metric | Without Peer Cache | With Peer Cache |
-|---|---|---|
-| Effective cache size | 256MB per replica | 256MB × N replicas |
-| VL query reduction | ~60% (single-replica hit rate) | ~95%+ (fleet-wide dedup) |
-| Cold start recovery | Full cache rebuild | Peers serve warm data |
-| Network overhead | None | ~1KB/miss to peer (internal) |
-
-## Implementation Phases
-
-### Phase 1: DNS Discovery + Simple Peer Fetch
-- Headless service peer discovery
-- On L1 miss, randomly pick one peer and try GET
-- If peer hit, use it; if miss, go to VL
-- No consistent hashing yet
-
-### Phase 2: Consistent Hashing
-- Jump hash for O(1) peer selection
-- Each key has exactly one owner peer
-- Backfill owner on VL fetch
-
-### Phase 3: Gossip Invalidation
-- When a peer's cache entry expires, notify other peers
-- Prevent stale data across the fleet
-
-## Helm Chart Addition
-
-```yaml
-# values.yaml
-peerCache:
-  enabled: false
-  discovery: "dns"
-  timeout: "5ms"
-  maxPeerQueries: 2
-
-# templates/headless-service.yaml (new)
-{{- if .Values.peerCache.enabled }}
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "loki-vl-proxy.fullname" . }}-peers
-spec:
-  clusterIP: None
-  selector:
-    {{- include "loki-vl-proxy.selectorLabels" . | nindent 4 }}
-  ports:
-    - port: {{ .Values.service.port }}
-      name: http
-{{- end }}
-```
-
-## Security
-
-- Peer cache endpoints (`/internal/cache`) are bound to the pod IP, not the external service
-- No authentication between peers (cluster-internal trust model, same as VL connection)
-- NetworkPolicy restricts peer traffic to pods with matching selector labels
+For full details including request flow diagrams, TTL preservation, circuit breaker states, and performance characteristics, see [Fleet Cache Architecture](fleet-cache.md).

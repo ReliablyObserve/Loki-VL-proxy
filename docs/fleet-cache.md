@@ -104,16 +104,23 @@ sequenceDiagram
 
 Shadow copies use the **owner's remaining TTL**, not a fresh default:
 
-```
-Owner stores key with TTL=60s
-Time passes... 20s elapsed, 40s remaining
+```mermaid
+sequenceDiagram
+    participant O as Owner (TTL=60s)
+    participant N as Non-Owner
 
-Non-owner fetches from owner:
-  Owner responds with X-Cache-TTL-Ms: 40000
-  Non-owner stores shadow with TTL=40s (not 60s!)
+    Note over O: t=0: stores key, TTL=60s
+    Note over O: t=20s: 40s remaining
 
-If remaining < 5s (MinUsableTTL):
-  Owner responds 404 → non-owner goes to VL for fresh data
+    N->>O: GET /_cache/get?key=...
+    O-->>N: 200 + X-Cache-TTL-Ms: 40000
+    Note over N: stores shadow with TTL=40s (not 60s!)
+
+    Note over O: t=55s: 5s remaining
+
+    N->>O: GET /_cache/get?key=...
+    O-->>N: 404 (remaining < MinUsableTTL)
+    Note over N: fetches fresh data from VL
 ```
 
 ```mermaid

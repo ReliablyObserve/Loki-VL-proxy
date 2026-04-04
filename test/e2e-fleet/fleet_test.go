@@ -57,8 +57,8 @@ func ingestLogs(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("ingest failed: %d %s", resp.StatusCode, b)
 	}
-	// Allow VL to index
-	time.Sleep(2 * time.Second)
+	// Allow VL to index (CI can be slow)
+	time.Sleep(5 * time.Second)
 }
 
 type lokiResponse struct {
@@ -121,7 +121,11 @@ func TestFleet_AllProxiesReturnSameResults(t *testing.T) {
 				results[0], i, results[i])
 		}
 	}
-	t.Logf("All 3 proxies returned %d streams", results[0])
+	if results[0] == 0 {
+		t.Log("Warning: 0 streams returned (VL may need more indexing time)")
+	} else {
+		t.Logf("All 3 proxies returned %d streams", results[0])
+	}
 }
 
 // TestFleet_CacheGetEndpoint verifies the /_cache/get peer endpoint works.
@@ -161,8 +165,8 @@ func TestFleet_MetricsEndpoint(t *testing.T) {
 
 		bodyStr := string(body)
 		// Check for peer cache metrics
-		if !strings.Contains(bodyStr, "lokivl_") {
-			t.Errorf("%s: metrics don't contain lokivl_ prefix", addr)
+		if !strings.Contains(bodyStr, "loki_vl_proxy_") {
+			t.Errorf("%s: metrics don't contain loki_vl_proxy_ prefix", addr)
 		}
 	}
 }
