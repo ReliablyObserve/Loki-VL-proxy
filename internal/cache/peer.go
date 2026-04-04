@@ -132,6 +132,61 @@ func NewPeerCache(cfg PeerConfig) *PeerCache {
 	return pc
 }
 
+// IsOwner returns true if this instance is the canonical owner for the given key.
+// The proxy uses this to decide: if we're the owner, skip L3 (we ARE the authority).
+// If we're not the owner, ask the owner via L3 before hitting VL.
+func (pc *PeerCache) IsOwner(key string) bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	if len(pc.peers) == 0 {
+		return true // no peers = we're the only instance
+	}
+	owner := pc.ring.get(key)
+	return owner == pc.selfAddr || owner == ""
+}
+
+// Set writes a value to the owning peer so it becomes the canonical holder.
+// Called after fetching from VL — ensures the owner has the data for other peers.
+// Fire-and-forget: doesn't block on the write.
+func (pc *PeerCache) Set(key string, value []byte) {
+	pc.mu.RLock()
+	if len(pc.peers) == 0 {
+		pc.mu.RUnlock()
+		return
+	}
+	owner := pc.ring.get(key)
+	pc.mu.RUnlock()
+
+	// Don't write to self — L1/L2 Set already handles it
+	if owner == pc.selfAddr || owner == "" {
+		return
+	}
+
+	if !pc.peerAllowed(owner) {
+		return
+	}
+
+	// Fire-and-forget write to owner
+	go func() {
+		url := fmt.Sprintf("http://%s/_cache/set?key=%s", owner, key)
+		ctx, cancel := context.WithTimeout(context.Background(), pc.client.Timeout)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(value)))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		resp, err := pc.client.Do(req)
+		if err != nil {
+			pc.recordPeerFailure(owner)
+			return
+		}
+		resp.Body.Close()
+		pc.recordPeerSuccess(owner)
+	}()
+}
+
 // Get fetches a value from the peer that owns this key.
 // Returns (value, true) on hit, (nil, false) on miss.
 // Skips self (L1/L2 already checked by caller).
@@ -230,7 +285,8 @@ func (pc *PeerCache) getInflight(key string) *inflightEntry {
 }
 
 // ServeHTTP handles incoming peer cache requests.
-// Mount on the proxy's mux as /_cache/get?key=...
+// GET /_cache/get?key=... — return cached value (or 404)
+// POST /_cache/set?key=... — store value from peer (write-through)
 func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCache *Cache) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
@@ -238,6 +294,19 @@ func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCach
 		return
 	}
 
+	if r.Method == "POST" {
+		// Write-through from another peer
+		body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+		if err != nil {
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		localCache.Set(key, body)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// GET — read from local cache
 	value, ok := localCache.Get(key)
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)

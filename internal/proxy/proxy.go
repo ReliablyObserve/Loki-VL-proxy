@@ -358,11 +358,13 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/metrics", p.metrics.Handler)
 	mux.HandleFunc("/debug/queries", p.queryTracker.Handler)
 
-	// Peer cache endpoint — internal, for fleet-distributed cache
+	// Peer cache endpoints — internal, for fleet-distributed cache
 	if p.peerCache != nil {
-		mux.HandleFunc("/_cache/get", func(w http.ResponseWriter, r *http.Request) {
+		peerHandler := func(w http.ResponseWriter, r *http.Request) {
 			p.peerCache.ServeHTTP(w, r, p.cache)
-		})
+		}
+		mux.HandleFunc("/_cache/get", peerHandler)
+		mux.HandleFunc("/_cache/set", peerHandler)
 	}
 }
 

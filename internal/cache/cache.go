@@ -155,9 +155,15 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 		c.lruIndex[key] = elem
 	}
 
-	// Write-through to L2
+	// Write-through to L2 (disk)
 	if c.l2 != nil {
 		c.l2.Set(key, value, ttl)
+	}
+
+	// Write-through to L3 (owning peer) — ensures the canonical peer has the data
+	// so other fleet members can fetch it via L3 on miss.
+	if c.l3 != nil {
+		c.l3.Set(key, value)
 	}
 }
 
