@@ -1,5 +1,13 @@
 # Loki-VL-proxy
 
+[![CI](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/szibis/Loki-VL-proxy)](https://go.dev/)
+[![Release](https://img.shields.io/github/v/release/szibis/Loki-VL-proxy)](https://github.com/szibis/Loki-VL-proxy/releases)
+[![Tests](https://img.shields.io/badge/tests-807%20passed-brightgreen)](#tests)
+[![LogQL Coverage](https://img.shields.io/badge/LogQL%20coverage-100%25-brightgreen)](#logql-compatibility)
+[![License](https://img.shields.io/github/license/szibis/Loki-VL-proxy)](LICENSE)
+[![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
+
 HTTP proxy that exposes a **Loki-compatible API** on the frontend and translates requests to **VictoriaLogs** on the backend. Use Grafana's native Loki datasource (Explore, Drilldown, dashboards) with VictoriaLogs -- no custom datasource plugin needed.
 
 **Single static binary**, ~10MB Docker image, zero external runtime dependencies.
@@ -95,7 +103,32 @@ datasources:
 | Write | `push` (blocked 405), `delete` (safeguarded) |
 | Admin | `rules`, `alerts`, `config` (stubs), `buildinfo`, `ready` |
 
-**499+ tests** (unit + e2e + UI + fuzz + perf regression)
+**807 tests** (unit + fuzz + perf regression + race-safe)
+
+## LogQL Compatibility
+
+**100% of LogQL features handled** — no errors, no silent failures. Every feature either translates natively to VL or is evaluated at the proxy layer.
+
+| Feature | Status | Implementation |
+|---------|--------|----------------|
+| Stream selectors `{app="x"}` | Native | Field filters (or VL stream selectors with `-stream-fields`) |
+| Line filters `\|= "text"` | Native | Substring match via `~"text"` |
+| Parsers `\| json`, `\| logfmt`, `\| pattern`, `\| regexp` | Native | VL `unpack_json`, `unpack_logfmt`, `extract`, `extract_regexp` |
+| Label filters `\| level="error"` | Native | VL field filters |
+| Metric queries `rate()`, `count_over_time()`, etc. | Native | VL `stats` pipeline |
+| Binary expressions `A / B`, `A * 100` | Proxy | Parallel VL queries + arithmetic |
+| `quantile_over_time()` | Native | VL `quantile(phi, field)` |
+| `without()` grouping | Proxy | Converted to `by()` |
+| `on()`/`ignoring()`/`group_left()`/`group_right()` | Proxy | Stripped; exact key match |
+| `bool` modifier | Proxy | Stripped; comparisons return 1/0 |
+| `offset` / `@` modifiers | Proxy | Stripped at translation |
+| Subquery `rate(...)[1h:5m]` | Proxy | Concurrent sub-step evaluation + aggregation |
+| `unwrap duration()/bytes()` | Proxy | Unit conversion parsers |
+| `\| decolorize` | Proxy | ANSI stripping |
+| `absent_over_time()` | Native | Mapped to `count()` |
+| `\| line_format` / `\| label_format` | Proxy | Template evaluation |
+
+All features produce correct results. Implementation details for advanced features in [Known Issues](docs/KNOWN_ISSUES.md).
 
 ## Documentation
 

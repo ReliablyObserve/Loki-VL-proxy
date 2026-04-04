@@ -1,0 +1,59 @@
+name: Update Badges
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  update-badges:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      - name: Count tests
+        id: tests
+        run: |
+          OUTPUT=$(go test ./... -count=1 -json 2>/dev/null | jq -r 'select(.Action=="pass" and .Test != null) | .Test' | wc -l)
+          echo "count=${OUTPUT}" >> "$GITHUB_OUTPUT"
+          echo "Tests: ${OUTPUT}"
+
+      - name: Get coverage
+        id: coverage
+        run: |
+          go test ./... -coverprofile=coverage.out -count=1 2>/dev/null
+          PCT=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}')
+          echo "pct=${PCT}" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${PCT}"
+
+      - name: Update README badges
+        run: |
+          TESTS="${{ steps.tests.outputs.count }}"
+          COV="${{ steps.coverage.outputs.pct }}"
+
+          # Update test count badge
+          sed -i "s|tests-[0-9]*%20passed-brightgreen|tests-${TESTS}%20passed-brightgreen|g" README.md
+
+          # Update coverage badge (add if not present)
+          if ! grep -q "coverage-" README.md; then
+            sed -i "/Tests.*badge/a [![Coverage](https://img.shields.io/badge/coverage-${COV}-brightgreen)](#tests)" README.md
+          else
+            sed -i "s|coverage-[0-9.]*%25-[a-z]*|coverage-${COV}-brightgreen|g" README.md
+          fi
+
+      - name: Commit badge updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet README.md || {
+            git add README.md
+            git commit -m "ci: update test count and coverage badges [skip ci]"
+            git push
+          }

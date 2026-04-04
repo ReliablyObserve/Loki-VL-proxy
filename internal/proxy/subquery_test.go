@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,12 +29,11 @@ func TestSubquery_TranslatorReturnsPrefix(t *testing.T) {
 
 func TestSubquery_QueryRange_ProxyEvaluates(t *testing.T) {
 	// Mock VL backend that returns stats_query results
-	callCount := 0
+	var callCount atomic.Int64
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		n := callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		// Return a simple stats result with one data point
-		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"app":"nginx"},"value":[1609459200,"%d"]}]}}`, callCount)
+		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"app":"nginx"},"value":[1609459200,"%d"]}]}}`, n)
 	}))
 	defer vlBackend.Close()
 
@@ -53,18 +53,17 @@ func TestSubquery_QueryRange_ProxyEvaluates(t *testing.T) {
 	if resultType != "matrix" {
 		t.Errorf("expected resultType=matrix, got %q", resultType)
 	}
-	// The proxy should have called VL multiple times (at least 3 sub-steps)
-	if callCount < 3 {
-		t.Errorf("expected at least 3 VL calls for 30m/10m subquery, got %d", callCount)
+	if callCount.Load() < 3 {
+		t.Errorf("expected at least 3 VL calls for 30m/10m subquery, got %d", callCount.Load())
 	}
 }
 
 func TestSubquery_InstantQuery_ProxyEvaluates(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int64
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
+		n := callCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"app":"nginx"},"value":[1609459200,"%d"]}]}}`, callCount)
+		fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"app":"nginx"},"value":[1609459200,"%d"]}]}}`, n)
 	}))
 	defer vlBackend.Close()
 
@@ -74,8 +73,8 @@ func TestSubquery_InstantQuery_ProxyEvaluates(t *testing.T) {
 	if status != "success" {
 		t.Errorf("expected status=success, got %q", status)
 	}
-	if callCount < 3 {
-		t.Errorf("expected at least 3 VL calls, got %d", callCount)
+	if callCount.Load() < 3 {
+		t.Errorf("expected at least 3 VL calls, got %d", callCount.Load())
 	}
 }
 
