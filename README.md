@@ -104,6 +104,8 @@ datasources:
 | [Configuration](docs/configuration.md) | All flags, environment variables, cache, tenancy, TLS, OTLP |
 | [API Reference](docs/api-reference.md) | Endpoint table, delete safeguards, metrics, observability |
 | [Translation Reference](docs/translation-reference.md) | LogQL to LogsQL mapping table, supported/unsupported features |
+| [Performance](docs/performance.md) | Benchmarks, optimization techniques, scaling profile, CI regression gates |
+| [Benchmarks](docs/benchmarks.md) | Raw benchmark numbers, connection pool tuning, hot path analysis |
 | [Operations](docs/operations.md) | Deployment, capacity planning, performance tuning, troubleshooting |
 | [Testing](docs/testing.md) | Test categories, running tests, fuzz testing |
 | [Known Issues](docs/KNOWN_ISSUES.md) | VL compatibility gaps, data model differences |

@@ -1,0 +1,121 @@
+# Performance
+
+## Architecture Optimizations
+
+### Connection Pool Tuning
+
+The proxy's HTTP transport is tuned for high-concurrency single-backend proxying:
+
+| Setting | Value | Why |
+|---|---|---|
+| `MaxIdleConns` | 256 | Total idle connection pool size |
+| `MaxIdleConnsPerHost` | 256 | All slots for VL (single backend) |
+| `MaxConnsPerHost` | 0 (unlimited) | No artificial cap on concurrent VL connections |
+| `IdleConnTimeout` | 90s | Reuse warm connections |
+| `ResponseHeaderTimeout` | 120s | Allow slow VL queries to complete |
+| `DisableCompression` | false | Accept gzip from VL if available |
+
+Go's default `MaxIdleConnsPerHost=2` causes ephemeral port exhaustion at >50 concurrent requests. Our tuning handles 200+ concurrent with 0 errors.
+
+### NDJSON Parsing Optimization
+
+VL returns log results as newline-delimited JSON. The proxy converts this to Loki's streams format. Key optimizations:
+
+| Technique | Effect |
+|---|---|
+| Byte scanning (not `strings.Split`) | Avoids copying entire body to string |
+| `sync.Pool` for JSON entry maps | Reuses maps across NDJSON lines, reducing GC pressure |
+| Pre-allocated slice capacity | Estimates line count from body size |
+| Nanosecond timestamp via `strconv.FormatInt` | Avoids `fmt.Sprintf` allocation |
+
+Result: **49% memory reduction** and **9.6% faster** parsing vs original implementation.
+
+### Request Coalescing
+
+When multiple clients send identical queries simultaneously, only 1 request reaches VL. Others wait for the shared result. Keys include tenant ID to prevent cross-tenant data sharing.
+
+## Benchmark Results
+
+Measured on Apple M3 Max (14 cores), Go 1.25, `-benchmem`.
+
+### Per-Request Latency
+
+| Operation | Latency | Allocs | Bytes/op |
+|---|---|---|---|
+| Labels (cache hit) | 2.0 us | 25 | 6.6 KB |
+| QueryRange (cache hit) | 118 us | 600 | 142 KB |
+| wrapAsLokiResponse | 2.8 us | 58 | 2.6 KB |
+| VL NDJSON to Loki streams (100 lines) | 170 us | 3118 | 70 KB |
+| LogQL translation | ~5 us | ~20 | ~2 KB |
+
+### Throughput
+
+| Scenario | Concurrency | Throughput | Avg Latency | Errors |
+|---|---|---|---|---|
+| Cache hit (labels) | 100 | 175,726 req/s | 6 us | 0 |
+| No cache, 10 concurrent | 10 | 9,823 req/s | 102 us | 0 |
+| No cache, 50 concurrent | 50 | 17,791 req/s | 56 us | 0 |
+| No cache, 200 concurrent | 200 | 33,659 req/s | 30 us | 0 |
+| Cache miss (1ms backend) | 50 | 12,976 req/s | 80 us | 0 |
+
+### Resource Usage at Scale
+
+| Load (req/s) | CPU (est.) | Memory | Notes |
+|---|---|---|---|
+| 100 | <1% | ~10 MB | Idle, mostly cache hits |
+| 1,000 | ~8% | ~20 MB | Mixed cache hit/miss |
+| 10,000 | ~30% | ~50 MB | Backend-bound |
+| 30,000+ | ~100% | ~100 MB | CPU-bound, scale horizontally |
+
+### Memory Stability
+
+Under sustained load (10K requests, no cache):
+- Total allocation: ~70 KB/request (GC reclaims between requests)
+- Live heap growth: **<1 MB** (no leak)
+- GC handles ~200 cycles per 10K requests
+
+1000-line NDJSON body (700 bytes/line, 700 KB input): **1.2 MB allocated** total.
+
+## Test Coverage
+
+| Test | What it verifies |
+|---|---|
+| `TestOptimization_VLLogsToLokiStreams_*` (7 tests) | Correctness of byte-scanned NDJSON parser |
+| `TestOptimization_SyncPool_NoStateLeak` | Pool doesn't leak labels between invocations |
+| `TestOptimization_SyncPool_ConcurrentSafety` | 50 goroutines x 100 iterations, correct results |
+| `TestOptimization_ConnectionPool_HighConcurrency` | 200 concurrent, 0 errors (port exhaustion regression) |
+| `TestOptimization_FormatVLStep` | VL step format conversion (8 cases) |
+| `TestOptimization_VLLogsToLokiStreams_ValidJSON` | 100-line output produces valid parseable JSON |
+| `TestOptimization_NoMemoryLeak_SustainedLoad` | <200 KB/req allocation after 10K requests |
+| `TestOptimization_LargeBody_GCPressure` | 1000-line body within allocation budget |
+| `TestLoad_NoCache_ScalingProfile` | 3 concurrency tiers, 0 errors |
+| `TestLoad_WithCache_ScalingProfile` | Same tiers with cache enabled |
+
+## Running Benchmarks
+
+```bash
+# All proxy benchmarks
+go test ./internal/proxy/ -bench . -benchmem -run "^$" -count=3
+
+# Load tests
+go test ./internal/proxy/ -run "TestLoad" -v -timeout=120s
+
+# Optimization regression tests
+go test ./internal/proxy/ -run "TestOptimization" -v
+
+# CPU profile
+go test ./internal/proxy/ -bench BenchmarkVLLogsToLokiStreams -cpuprofile=cpu.prof
+go tool pprof cpu.prof
+
+# Memory profile
+go test ./internal/proxy/ -bench BenchmarkVLLogsToLokiStreams -memprofile=mem.prof
+go tool pprof mem.prof
+```
+
+## CI Integration
+
+The `bench` job in `.github/workflows/ci.yaml` runs all benchmarks and load tests on every push. It:
+1. Runs benchmarks 3x for stability
+2. Runs load tests at all concurrency tiers
+3. Fails the build if load tests produce errors (regression gate)
+4. Uploads results as CI artifacts for historical tracking
