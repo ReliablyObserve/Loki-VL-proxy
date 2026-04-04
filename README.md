@@ -191,6 +191,7 @@ Proxy-side datasource helpers:
 - `-backend-timeout` for long Grafana queries against VL
 - `-forward-headers` and `-forward-cookies` for backend auth/context passthrough
 - `-metrics.trust-proxy-headers` to trust `X-Grafana-User` and surface per-user client metrics/log context
+- `-metadata-field-mode=hybrid` by default, so field APIs expose both dotted OTel names and Loki-style aliases without changing the label surface
 - `-tenant.allow-global` to let `X-Scope-OrgID: 0` or `*` use VL's default `0:0` tenant during single-tenant migrations
 - `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
 - `-tail.allowed-origins` when Grafana or another browser client must use `/tail`

@@ -21,10 +21,29 @@ const (
 	LabelStyleUnderscores LabelStyle = "underscores"
 )
 
+// MetadataFieldMode controls how VictoriaLogs field-oriented APIs expose
+// non-stream fields such as parsed values and structured metadata.
+type MetadataFieldMode string
+
+const (
+	// MetadataFieldModeNative keeps VictoriaLogs field names as stored.
+	MetadataFieldModeNative MetadataFieldMode = "native"
+	// MetadataFieldModeTranslated exposes only Loki-compatible translated aliases.
+	MetadataFieldModeTranslated MetadataFieldMode = "translated"
+	// MetadataFieldModeHybrid exposes both the native VL field name and the
+	// translated Loki-compatible alias when they differ.
+	MetadataFieldModeHybrid MetadataFieldMode = "hybrid"
+)
+
 // FieldMapping defines a custom field name mapping between VL and Loki.
 type FieldMapping struct {
 	VLField   string `json:"vl_field" yaml:"vl_field"`     // field name as stored in VictoriaLogs
 	LokiLabel string `json:"loki_label" yaml:"loki_label"` // label name exposed via Loki API
+}
+
+type metadataFieldExposure struct {
+	name    string
+	isAlias bool
 }
 
 // labelSanitizeRe matches characters not allowed in Prometheus/Loki label names.
@@ -128,6 +147,54 @@ func (lt *LabelTranslator) TranslateLabelsList(labels []string) []string {
 // IsPassthrough returns true if no translation is needed.
 func (lt *LabelTranslator) IsPassthrough() bool {
 	return lt.style == LabelStylePassthrough && len(lt.vlToLoki) == 0
+}
+
+func normalizeMetadataFieldMode(mode MetadataFieldMode) MetadataFieldMode {
+	switch mode {
+	case MetadataFieldModeNative, MetadataFieldModeTranslated, MetadataFieldModeHybrid:
+		return mode
+	default:
+		return MetadataFieldModeHybrid
+	}
+}
+
+func (lt *LabelTranslator) metadataFieldExposures(vlField string, mode MetadataFieldMode) []metadataFieldExposure {
+	vlField = strings.TrimSpace(vlField)
+	if vlField == "" {
+		return nil
+	}
+
+	mode = normalizeMetadataFieldMode(mode)
+	translated := vlField
+	if lt != nil {
+		translated = lt.ToLoki(vlField)
+	}
+
+	seen := make(map[string]struct{}, 2)
+	result := make([]metadataFieldExposure, 0, 2)
+	add := func(name string, isAlias bool) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		result = append(result, metadataFieldExposure{name: name, isAlias: isAlias})
+	}
+
+	switch mode {
+	case MetadataFieldModeNative:
+		add(vlField, false)
+	case MetadataFieldModeTranslated:
+		add(translated, translated != vlField)
+	default:
+		add(vlField, false)
+		add(translated, translated != vlField)
+	}
+
+	return result
 }
 
 // SanitizeLabelName converts a field name to a valid Prometheus/Loki label name.

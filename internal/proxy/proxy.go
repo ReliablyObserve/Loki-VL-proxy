@@ -119,8 +119,9 @@ type Config struct {
 	StreamResponse   bool              // stream responses via chunked transfer (default: false)
 
 	// Label translation
-	LabelStyle    LabelStyle     // how to translate VL field names to Loki labels
-	FieldMappings []FieldMapping // custom VL↔Loki field name mappings
+	LabelStyle        LabelStyle        // how to translate VL field names to Loki labels
+	MetadataFieldMode MetadataFieldMode // how to expose non-label VL fields through field-oriented APIs
+	FieldMappings     []FieldMapping    // custom VL↔Loki field name mappings
 
 	// Stream optimization
 	StreamFields []string // VL _stream_fields labels — use native stream selectors for these (faster)
@@ -193,6 +194,7 @@ type Proxy struct {
 	derivedFields            []DerivedField
 	streamResponse           bool
 	labelTranslator          *LabelTranslator
+	metadataFieldMode        MetadataFieldMode
 	streamFieldsMap          map[string]bool  // known _stream_fields for VL stream selector optimization
 	peerCache                *cache.PeerCache // L3 fleet peer cache
 	peerAuthToken            string
@@ -295,6 +297,7 @@ func New(cfg Config) (*Proxy, error) {
 		}
 		tailAllowedOrigins[origin] = struct{}{}
 	}
+	metadataFieldMode := normalizeMetadataFieldMode(cfg.MetadataFieldMode)
 
 	return &Proxy{
 		backend: u,
@@ -322,6 +325,7 @@ func New(cfg Config) (*Proxy, error) {
 		derivedFields:            cfg.DerivedFields,
 		streamResponse:           cfg.StreamResponse,
 		labelTranslator:          NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
+		metadataFieldMode:        metadataFieldMode,
 		streamFieldsMap:          buildStreamFieldsMap(cfg.StreamFields),
 		peerCache:                cfg.PeerCache,
 		peerAuthToken:            cfg.PeerAuthToken,
@@ -1066,16 +1070,11 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 		query = "*"
 	}
 	targetLabels := r.FormValue("targetLabels")
+	if targetLabels == "" {
+		targetLabels = inferPrimaryTargetLabel(query)
+	}
 	if usesDerivedVolumeLabels(targetLabels) {
 		result, err := p.volumeByDerivedLabels(r.Context(), query, r.FormValue("start"), r.FormValue("end"), targetLabels, "")
-		if err == nil {
-			p.writeJSON(w, result)
-			p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
-			return
-		}
-	}
-	if targetLabels == "" && strings.Contains(query, "service_name") {
-		result, err := p.volumeByServiceName(r.Context(), query, r.FormValue("start"), r.FormValue("end"))
 		if err == nil {
 			p.writeJSON(w, result)
 			p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
@@ -1117,7 +1116,7 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	result := hitsToVolumeVector(body)
+	result := p.hitsToVolumeVector(body)
 	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
 }
@@ -1133,6 +1132,9 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 		query = "*"
 	}
 	targetLabels := r.FormValue("targetLabels")
+	if targetLabels == "" {
+		targetLabels = inferPrimaryTargetLabel(query)
+	}
 	if usesDerivedVolumeLabels(targetLabels) {
 		result, err := p.volumeByDerivedLabels(r.Context(), query, r.FormValue("start"), r.FormValue("end"), targetLabels, r.FormValue("step"))
 		if err == nil {
@@ -1175,7 +1177,7 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	result := hitsToVolumeMatrix(body)
+	result := p.hitsToVolumeMatrix(body)
 	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume_range", http.StatusOK, time.Since(start))
 }
@@ -2753,21 +2755,22 @@ func (p *Proxy) classifyEntryFields(entry map[string]interface{}, originalQuery 
 		if !ok || strings.TrimSpace(stringValue) == "" {
 			continue
 		}
-		lokiKey := p.labelTranslator.ToLoki(key)
-		if lokiKey == "" {
-			continue
-		}
-		if classifyAsParsed {
-			if parsedFields == nil {
-				parsedFields = make(map[string]string, 4)
+		for _, exposure := range p.metadataFieldExposures(key) {
+			if _, exists := labels[exposure.name]; exists && !exposure.isAlias {
+				continue
 			}
-			parsedFields[lokiKey] = stringValue
-			continue
+			if classifyAsParsed {
+				if parsedFields == nil {
+					parsedFields = make(map[string]string, 4)
+				}
+				parsedFields[exposure.name] = stringValue
+				continue
+			}
+			if structuredMetadataFields == nil {
+				structuredMetadataFields = make(map[string]string, 4)
+			}
+			structuredMetadataFields[exposure.name] = stringValue
 		}
-		if structuredMetadataFields == nil {
-			structuredMetadataFields = make(map[string]string, 4)
-		}
-		structuredMetadataFields[lokiKey] = stringValue
 	}
 
 	metadata := map[string]interface{}{}
@@ -2921,7 +2924,22 @@ func sumHitsValues(body []byte) int {
 	return total
 }
 
-func hitsToVolumeVector(body []byte) map[string]interface{} {
+func (p *Proxy) translateVolumeMetric(fields map[string]string) map[string]string {
+	if fields == nil {
+		return nil
+	}
+	translated := fields
+	if p != nil && p.labelTranslator != nil && !p.labelTranslator.IsPassthrough() {
+		translated = p.labelTranslator.TranslateLabelsMap(fields)
+	}
+	if translated == nil {
+		return nil
+	}
+	ensureSyntheticServiceName(translated)
+	return translated
+}
+
+func (p *Proxy) hitsToVolumeVector(body []byte) map[string]interface{} {
 	hits := parseHits(body)
 	result := make([]map[string]interface{}, 0, len(hits.Hits))
 	for _, h := range hits.Hits {
@@ -2934,7 +2952,7 @@ func hitsToVolumeVector(body []byte) map[string]interface{} {
 			}
 		}
 		result = append(result, map[string]interface{}{
-			"metric": h.Fields,
+			"metric": p.translateVolumeMetric(h.Fields),
 			"value":  []interface{}{lastTS, strconv.Itoa(total)},
 		})
 	}
@@ -2947,7 +2965,7 @@ func hitsToVolumeVector(body []byte) map[string]interface{} {
 	}
 }
 
-func hitsToVolumeMatrix(body []byte) map[string]interface{} {
+func (p *Proxy) hitsToVolumeMatrix(body []byte) map[string]interface{} {
 	hits := parseHits(body)
 	result := make([]map[string]interface{}, 0, len(hits.Hits))
 	for _, h := range hits.Hits {
@@ -2960,7 +2978,7 @@ func hitsToVolumeMatrix(body []byte) map[string]interface{} {
 			values = append(values, []interface{}{parseTimestampToUnix(ts), strconv.Itoa(val)})
 		}
 		result = append(result, map[string]interface{}{
-			"metric": h.Fields,
+			"metric": p.translateVolumeMetric(h.Fields),
 			"values": values,
 		})
 	}

@@ -184,6 +184,20 @@ func TestDrilldownTrackScore(t *testing.T) {
 		}
 	}
 
+	otelFieldsResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+dsUID+"/resources/detected_fields?query=%7Bservice_name%3D%22otel-auth-service%22%7D&start="+url.QueryEscape(start)+"&end="+url.QueryEscape(end))
+	otelFields, _ := otelFieldsResp["fields"].([]interface{})
+	otelSeen := map[string]bool{}
+	for _, field := range otelFields {
+		otelSeen[field.(map[string]interface{})["label"].(string)] = true
+	}
+	for _, want := range []string{"service.name", "service_name"} {
+		if otelSeen[want] {
+			score.pass("detected_fields", fmt.Sprintf("hybrid field %s present", want))
+		} else {
+			score.fail("detected_fields", fmt.Sprintf("hybrid field %s missing", want))
+		}
+	}
+
 	clusterVals := getJSON(t, grafanaURL+"/api/datasources/uid/"+dsUID+"/resources/label/cluster/values?query=%7Bservice_name%3D%22api-gateway%22%7D&start="+url.QueryEscape(start)+"&end="+url.QueryEscape(end))
 	clusterData := extractStrings(clusterVals, "data")
 	if contains(clusterData, "us-east-1") {

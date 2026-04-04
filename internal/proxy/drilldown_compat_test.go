@@ -157,14 +157,14 @@ func TestDrilldown_IndexVolume_ServiceNameBacktickRegexGroupsByDerivedService(t 
 	var receivedQuery string
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/select/logsql/streams":
-			receivedQuery = r.URL.Query().Get("query")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"values": []map[string]interface{}{
-					{"value": `{app="api-gateway",cluster="us-east-1"}`, "hits": 12},
-					{"value": `{service.name="payment-service",cluster="us-east-1"}`, "hits": 3},
-				},
-			})
+		case "/select/logsql/query":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			receivedQuery = r.Form.Get("query")
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Write([]byte(`{"_time":"2026-04-04T17:18:49.000000Z","_msg":"ok","_stream":"{app=\"api-gateway\",cluster=\"us-east-1\"}","app":"api-gateway","cluster":"us-east-1","level":"info"}` + "\n"))
+			w.Write([]byte(`{"_time":"2026-04-04T17:18:50.000000Z","_msg":"ok","_stream":"{service.name=\"payment-service\",cluster=\"us-east-1\"}","service.name":"payment-service","cluster":"us-east-1","level":"error"}` + "\n"))
 		default:
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
 		}
@@ -223,6 +223,124 @@ func TestDrilldown_IndexVolume_TargetLabelsServiceNameUsesDerivedAggregation(t *
 	}
 	if got["api-gateway"] != "2" || got["payment-service"] != "1" {
 		t.Fatalf("expected service_name aggregation to count derived services, got %v", got)
+	}
+}
+
+func TestDrilldown_InferPrimaryTargetLabel(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "empty", query: "", want: ""},
+		{name: "wildcard", query: "*", want: ""},
+		{name: "simple regex", query: `{cluster=~` + "`.+`" + `}`, want: "cluster"},
+		{name: "first matcher wins", query: `{cluster=~` + "`.+`" + `,namespace="prod"}`, want: "cluster"},
+		{name: "translated alias", query: `{k8s_pod_name="api-1",namespace="prod"}`, want: "k8s_pod_name"},
+		{name: "quoted dotted", query: `{service.name="auth"}`, want: "service.name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inferPrimaryTargetLabel(tt.query); got != tt.want {
+				t.Fatalf("inferPrimaryTargetLabel(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDrilldown_IndexVolume_InfersPrimaryTargetLabelForAdditionalTabs(t *testing.T) {
+	var receivedField string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		receivedField = r.URL.Query().Get("field")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"hints": map[string]interface{}{},
+			"hits": []map[string]interface{}{
+				{
+					"fields":     map[string]string{"cluster": "us-east-1"},
+					"timestamps": []string{"2026-04-04T17:18:49Z"},
+					"values":     []int{12},
+				},
+				{
+					"fields":     map[string]string{"cluster": "us-west-2"},
+					"timestamps": []string{"2026-04-04T17:18:49Z"},
+					"values":     []int{8},
+				},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	p := newGapTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume?query=%7Bcluster%3D~%60.%2B%60%7D&start=1&end=2", nil)
+	p.handleVolume(w, r)
+
+	if receivedField != "cluster" {
+		t.Fatalf("expected inferred volume field=cluster, got %q", receivedField)
+	}
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	data := assertDataIsObject(t, resp)
+	result := assertResultIsArray(t, data)
+	if len(result) != 2 {
+		t.Fatalf("expected cluster buckets, got %v", result)
+	}
+}
+
+func TestDrilldown_IndexVolume_TranslatesInferredTargetLabelMetrics(t *testing.T) {
+	var receivedField string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		receivedField = r.URL.Query().Get("field")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"hints": map[string]interface{}{},
+			"hits": []map[string]interface{}{
+				{
+					"fields":     map[string]string{"k8s.pod.name": "api-1"},
+					"timestamps": []string{"2026-04-04T17:18:49Z"},
+					"values":     []int{5},
+				},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL: vlBackend.URL,
+		Cache:      c,
+		LogLevel:   "error",
+		LabelStyle: LabelStyleUnderscores,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume?query=%7Bk8s_pod_name%3D~%60.%2B%60%7D&start=1&end=2", nil)
+	p.handleVolume(w, r)
+
+	if receivedField != "k8s.pod.name" {
+		t.Fatalf("expected translated backend field k8s.pod.name, got %q", receivedField)
+	}
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	data := assertDataIsObject(t, resp)
+	result := assertResultIsArray(t, data)
+	if len(result) != 1 {
+		t.Fatalf("expected one pod bucket, got %v", result)
+	}
+	metric := result[0].(map[string]interface{})["metric"].(map[string]interface{})
+	if metric["k8s_pod_name"] != "api-1" {
+		t.Fatalf("expected translated metric key k8s_pod_name, got %v", metric)
 	}
 }
 
@@ -363,7 +481,17 @@ func TestDrilldown_DetectedFields_ExposeStructuredMetadataWithDottedNames(t *tes
 		got[obj["label"].(string)] = obj
 	}
 
-	for _, want := range []string{"service.name", "service.namespace", "k8s.pod.name", "deployment.environment", "trace_id"} {
+	for _, want := range []string{
+		"service.name",
+		"service_name",
+		"service.namespace",
+		"service_namespace",
+		"k8s.pod.name",
+		"k8s_pod_name",
+		"deployment.environment",
+		"deployment_environment",
+		"trace_id",
+	} {
 		if _, ok := got[want]; !ok {
 			t.Fatalf("expected structured metadata field %q, got %v", want, got)
 		}
@@ -376,6 +504,57 @@ func TestDrilldown_DetectedFields_ExposeStructuredMetadataWithDottedNames(t *tes
 	}
 	if _, ok := got["cluster"]; ok {
 		t.Fatalf("indexed label cluster must not leak into detected_fields: %v", got)
+	}
+}
+
+func TestDrilldown_DetectedFields_TranslatedModeExposesOnlyAliases(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/query" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Write([]byte(`{"_time":"2026-04-04T17:18:49.971082Z","_msg":"token validated","_stream":"{app=\"otel-auth-service\",cluster=\"us-east-1\",service.name=\"otel-auth-service\"}","app":"otel-auth-service","cluster":"us-east-1","service.name":"otel-auth-service","service.namespace":"auth","k8s.pod.name":"auth-svc-123"}` + "\n"))
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL:        vlBackend.URL,
+		Cache:             c,
+		LogLevel:          "error",
+		LabelStyle:        LabelStyleUnderscores,
+		MetadataFieldMode: MetadataFieldModeTranslated,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?query=%7Bservice_name%3D%22otel-auth-service%22%7D", nil)
+	p.handleDetectedFields(w, r)
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	fields, ok := resp["fields"].([]interface{})
+	if !ok {
+		t.Fatalf("expected fields array, got %v", resp)
+	}
+
+	got := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		obj := field.(map[string]interface{})
+		got[obj["label"].(string)] = struct{}{}
+	}
+
+	for _, want := range []string{"service_name", "service_namespace", "k8s_pod_name"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("expected translated-only field %q, got %v", want, got)
+		}
+	}
+	for _, forbidden := range []string{"service.name", "service.namespace", "k8s.pod.name"} {
+		if _, ok := got[forbidden]; ok {
+			t.Fatalf("translated-only mode must not expose native dotted field %q: %v", forbidden, got)
+		}
 	}
 }
 

@@ -225,7 +225,7 @@ func translateLogQuery(logql string, labelFn LabelTranslateFunc, streamFields ..
 		stage, rest := extractPipelineStage(remaining)
 		remaining = rest
 
-		translated := translatePipelineStage(stage)
+		translated := translatePipelineStage(stage, labelFn)
 		if translated != "" {
 			// Track parser state — after a parser, label filters become | filter
 			if isParserStage(translated) {
@@ -258,7 +258,7 @@ func translateLogQuery(logql string, labelFn LabelTranslateFunc, streamFields ..
 }
 
 // translatePipelineStage converts a single LogQL pipeline stage to LogsQL.
-func translatePipelineStage(stage string) string {
+func translatePipelineStage(stage string, labelFn LabelTranslateFunc) string {
 	stage = strings.TrimSpace(stage)
 
 	// Note: Line filters (|=, !=, |~, !~) are handled in translateLogQuery
@@ -325,11 +325,11 @@ func translatePipelineStage(stage string) string {
 	}
 
 	// Label filters: label op value
-	return translateLabelFilter(stage)
+	return translateLabelFilter(stage, labelFn)
 }
 
 // translateLabelFilter handles label comparison filters.
-func translateLabelFilter(stage string) string {
+func translateLabelFilter(stage string, labelFn LabelTranslateFunc) string {
 	// Try: label == "value", label = "value", label != "value",
 	//      label =~ "value", label !~ "value", label > value, etc.
 	ops := []struct {
@@ -354,6 +354,9 @@ func translateLabelFilter(stage string) string {
 			label := strings.TrimSpace(stage[:idx])
 			value := strings.TrimSpace(stage[idx+len(op.logql):])
 			value = strings.Trim(value, "\"`")
+			if labelFn != nil {
+				label = labelFn(label)
+			}
 			label = quoteLogsQLFieldNameIfNeeded(label)
 
 			if op.isRe {

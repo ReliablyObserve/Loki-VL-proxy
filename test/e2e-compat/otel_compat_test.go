@@ -929,16 +929,18 @@ func TestQueryDirection_UnderscoreProxy(t *testing.T) {
 func TestDetectedFields_UnderscoreProxy(t *testing.T) {
 	ensureOTelData(t)
 
-	t.Run("all_fields_underscored", func(t *testing.T) {
+	t.Run("hybrid_fields_expose_aliases_and_native_names", func(t *testing.T) {
 		fields := getDetectedFields(t, proxyUnderscoreURL)
-		for _, f := range fields {
-			if strings.Contains(f, ".") {
-				t.Errorf("detected field %q contains dots — should be underscored", f)
-			}
-		}
-
 		fieldSet := toSet(fields)
-		mustHave := []string{"service_name", "level", "k8s_pod_name", "deployment_environment"}
+		mustHave := []string{
+			"service_name",
+			"service.name",
+			"detected_level",
+			"k8s_pod_name",
+			"k8s.pod.name",
+			"deployment_environment",
+			"deployment.environment",
+		}
 		for _, want := range mustHave {
 			if !fieldSet[want] {
 				t.Errorf("missing expected detected field %q", want)
@@ -964,6 +966,18 @@ func TestDetectedFields_UnderscoreProxy(t *testing.T) {
 			if !valSet["otel-auth-service"] {
 				t.Logf("'otel-auth-service' not yet in detected field values (timing), got: %v", values)
 			}
+		}
+	})
+
+	t.Run("detected_field_values_service_dot_name", func(t *testing.T) {
+		values := getDetectedFieldValues(t, proxyUnderscoreURL, "service.name")
+		if len(values) == 0 {
+			t.Log("note: detected_field values for service.name returned empty")
+			return
+		}
+		valSet := toSet(values)
+		if !valSet["otel-auth-service"] {
+			t.Logf("'otel-auth-service' not yet in detected field values for service.name, got: %v", values)
 		}
 	})
 }

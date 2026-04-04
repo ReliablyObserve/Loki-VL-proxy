@@ -268,10 +268,21 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 			seen[obj["label"].(string)] = obj
 		}
 
-		for _, want := range []string{"service.name", "service.namespace", "k8s.pod.name", "deployment.environment"} {
+		for _, want := range []string{
+			"service.name",
+			"service_name",
+			"service.namespace",
+			"service_namespace",
+			"k8s.pod.name",
+			"k8s_pod_name",
+			"deployment.environment",
+			"deployment_environment",
+		} {
 			if _, ok := seen[want]; !ok {
 				t.Fatalf("expected dotted structured metadata field %q, got %v", want, fieldsResp)
 			}
+		}
+		for _, want := range []string{"service.name", "service.namespace", "k8s.pod.name", "deployment.environment"} {
 			if seen[want]["parsers"] != nil {
 				t.Fatalf("structured metadata field %q must expose parsers as null, got %v", want, seen[want])
 			}
@@ -292,6 +303,12 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		if !found {
 			t.Fatalf("expected structured metadata value otel-auth-service, got %v", valuesResp)
 		}
+
+		aliasValuesResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+dsUID+"/resources/detected_field/service_name/values?"+params.Encode())
+		aliasValues, _ := aliasValuesResp["values"].([]interface{})
+		if len(aliasValues) == 0 {
+			t.Fatalf("expected service_name alias values, got %v", aliasValuesResp)
+		}
 	})
 
 	t.Run("additional_label_values", func(t *testing.T) {
@@ -304,6 +321,34 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		values := extractStrings(resp, "data")
 		if len(values) == 0 || !contains(values, "us-east-1") {
 			t.Fatalf("expected cluster label values for drilldown, got %v", resp)
+		}
+	})
+
+	t.Run("additional_label_tab_volume_buckets", func(t *testing.T) {
+		params := url.Values{}
+		params.Set("query", `{cluster=~`+"`.+`"+`}`)
+		params.Set("start", start)
+		params.Set("end", end)
+
+		resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+dsUID+"/resources/index/volume?"+params.Encode())
+		data := extractMap(resp, "data")
+		if data == nil {
+			t.Fatalf("expected grafana volume data for additional label tab, got %v", resp)
+		}
+		result := extractArray(data, "result")
+		if len(result) == 0 {
+			t.Fatalf("expected cluster buckets for additional label tab, got %v", resp)
+		}
+		found := false
+		for _, item := range result {
+			metric := item.(map[string]interface{})["metric"].(map[string]interface{})
+			if metric["cluster"] == "us-east-1" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected cluster bucket us-east-1, got %v", result)
 		}
 	})
 

@@ -37,7 +37,8 @@ The Drilldown matrix is also a moving window. We support the current app family 
 - `index/volume` must expose real `service_name` buckets
 - `index/volume_range` must expose non-empty `detected_level` series names
 - `detected_fields` must show parsed fields like `method`, `path`, `status`, `duration_ms`
-- `detected_fields` must not leak indexed labels like `app`, `cluster`, `namespace`, or `service_name`
+- `detected_fields` must not leak indexed labels like `app`, `cluster`, or `namespace`
+- In hybrid field mode, `detected_fields` may expose both native dotted fields and translated aliases such as `service.name` and `service_name`
 - Label-value resources for additional filters such as `cluster` must return real values
 - `patterns` must return non-empty grouped pattern payloads with sample buckets for Drilldown
 

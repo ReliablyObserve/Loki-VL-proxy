@@ -80,6 +80,11 @@ func TestTranslateLogQLWithLabels(t *testing.T) {
 			want:  `app:=api | unpack_json | filter path_extracted:!""`,
 		},
 		{
+			name:  "translated field alias after parser maps back to dotted VL field",
+			logql: `{app="api"} | json | service_name="auth"`,
+			want:  `app:=api | unpack_json | filter "service.name":=auth`,
+		},
+		{
 			name:  "dotted structured metadata filter after parser is quoted",
 			logql: `{app="api"} | json | service.name="auth"`,
 			want:  `app:=api | unpack_json | filter "service.name":=auth`,

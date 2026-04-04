@@ -19,6 +19,7 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `-label-style` | `LABEL_STYLE` | `passthrough` | `passthrough` or `underscores` |
+| `-metadata-field-mode` | `METADATA_FIELD_MODE` | `hybrid` | `native`, `translated`, or `hybrid` for `detected_fields` and structured metadata exposure |
 | `-field-mapping` | `FIELD_MAPPING` | — | JSON custom field mappings |
 
 ### Label Style Modes
@@ -34,6 +35,16 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 ./loki-vl-proxy -label-style=underscores \
   -field-mapping='[{"vl_field":"my_trace_id","loki_label":"traceID"}]'
 ```
+
+### Metadata Field Modes
+
+| Mode | When to Use | Field APIs |
+|---|---|---|
+| `native` | You want only raw VictoriaLogs field names | `service.name`, `k8s.pod.name` |
+| `translated` | You want strict Loki-style field names only | `service_name`, `k8s_pod_name` |
+| `hybrid` | Default. You need Loki compatibility plus OTel-native correlation | Both native dotted names and translated aliases |
+
+`-metadata-field-mode=hybrid` keeps the label surface Loki-compatible while making field-oriented APIs like `detected_fields` and `detected_field/{name}/values` expose both `service.name` and `service_name` when they differ.
 
 ## Cache (L1 In-Memory)
 

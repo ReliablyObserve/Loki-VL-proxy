@@ -210,3 +210,65 @@ func TestLabelTranslator_PassthroughNoAllocation(t *testing.T) {
 		t.Error("passthrough should preserve values")
 	}
 }
+
+func TestNormalizeMetadataFieldMode_DefaultsToHybrid(t *testing.T) {
+	if got := normalizeMetadataFieldMode(""); got != MetadataFieldModeHybrid {
+		t.Fatalf("normalizeMetadataFieldMode(\"\") = %q, want %q", got, MetadataFieldModeHybrid)
+	}
+	if got := normalizeMetadataFieldMode("broken"); got != MetadataFieldModeHybrid {
+		t.Fatalf("normalizeMetadataFieldMode(invalid) = %q, want %q", got, MetadataFieldModeHybrid)
+	}
+}
+
+func TestLabelTranslator_MetadataFieldExposures(t *testing.T) {
+	lt := NewLabelTranslator(LabelStyleUnderscores, nil)
+
+	tests := []struct {
+		name  string
+		field string
+		mode  MetadataFieldMode
+		want  []metadataFieldExposure
+	}{
+		{
+			name:  "native dotted field",
+			field: "service.name",
+			mode:  MetadataFieldModeNative,
+			want:  []metadataFieldExposure{{name: "service.name", isAlias: false}},
+		},
+		{
+			name:  "translated dotted field",
+			field: "service.name",
+			mode:  MetadataFieldModeTranslated,
+			want:  []metadataFieldExposure{{name: "service_name", isAlias: true}},
+		},
+		{
+			name:  "hybrid dotted field",
+			field: "service.name",
+			mode:  MetadataFieldModeHybrid,
+			want: []metadataFieldExposure{
+				{name: "service.name", isAlias: false},
+				{name: "service_name", isAlias: true},
+			},
+		},
+		{
+			name:  "hybrid plain field dedupes",
+			field: "trace_id",
+			mode:  MetadataFieldModeHybrid,
+			want:  []metadataFieldExposure{{name: "trace_id", isAlias: false}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lt.metadataFieldExposures(tt.field, tt.mode)
+			if len(got) != len(tt.want) {
+				t.Fatalf("metadataFieldExposures(%q, %q) length = %d, want %d (%v)", tt.field, tt.mode, len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("metadataFieldExposures(%q, %q)[%d] = %+v, want %+v", tt.field, tt.mode, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

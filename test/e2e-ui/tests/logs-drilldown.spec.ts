@@ -129,6 +129,9 @@ test.describe("Grafana Logs Drilldown", () => {
     await expect(page.getByText("cluster", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
+    await expect(page.getByRole("heading", { name: "us-east-1" })).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test("proxy drilldown exposes dotted OTel structured metadata fields", async ({ page }) => {
@@ -143,6 +146,7 @@ test.describe("Grafana Logs Drilldown", () => {
     await expect(page.getByText("service.name", { exact: true })).toBeVisible({
       timeout: 15_000,
     });
+    await expect(page.getByText("service_name", { exact: true })).toBeVisible();
     await expect(page.getByText("service.namespace", { exact: true })).toBeVisible();
     await expect(page.getByText("k8s.pod.name", { exact: true })).toBeVisible();
     await expect(page.getByText("deployment.environment", { exact: true })).toBeVisible();
@@ -152,6 +156,6 @@ test.describe("Grafana Logs Drilldown", () => {
     );
     expect(detectedFieldsResponse).toBeTruthy();
     expect(JSON.stringify(detectedFieldsResponse?.json)).toContain("service.name");
-    expect(JSON.stringify(detectedFieldsResponse?.json)).not.toContain('"label":"service_name"');
+    expect(JSON.stringify(detectedFieldsResponse?.json)).toContain('"label":"service_name"');
   });
 });

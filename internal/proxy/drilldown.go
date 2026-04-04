@@ -136,6 +136,10 @@ func shouldExposeStructuredField(key string, streamLabels map[string]string, lt 
 	return lt.ToLoki(key) != key
 }
 
+func (p *Proxy) metadataFieldExposures(vlField string) []metadataFieldExposure {
+	return p.labelTranslator.metadataFieldExposures(vlField, p.metadataFieldMode)
+}
+
 func addDetectedField(fields map[string]*detectedFieldSummary, label, parser, typ string, jsonPath []string, value string) {
 	if label == "" || strings.TrimSpace(value) == "" {
 		return
@@ -389,6 +393,98 @@ func splitTargetLabels(targetLabels string) []string {
 		labels = append(labels, part)
 	}
 	return labels
+}
+
+func inferPrimaryTargetLabel(query string) string {
+	query = strings.TrimSpace(query)
+	if !strings.HasPrefix(query, "{") {
+		return ""
+	}
+
+	inQuote := byte(0)
+	escape := false
+	braceDepth := 0
+	end := -1
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if inQuote != 0 {
+			if ch == '\\' && inQuote == '"' {
+				escape = true
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '`':
+			inQuote = ch
+		case '{':
+			braceDepth++
+		case '}':
+			braceDepth--
+			if braceDepth == 0 {
+				end = i
+				i = len(query)
+			}
+		}
+	}
+	if end <= 1 {
+		return ""
+	}
+
+	content := query[1:end]
+	inQuote = 0
+	escape = false
+	start := 0
+	firstMatcher := ""
+	for i := 0; i <= len(content); i++ {
+		if i < len(content) {
+			ch := content[i]
+			if escape {
+				escape = false
+				continue
+			}
+			if inQuote != 0 {
+				if ch == '\\' && inQuote == '"' {
+					escape = true
+					continue
+				}
+				if ch == inQuote {
+					inQuote = 0
+				}
+				continue
+			}
+			if ch == '"' || ch == '`' {
+				inQuote = ch
+				continue
+			}
+			if ch != ',' {
+				continue
+			}
+		}
+		part := strings.TrimSpace(content[start:i])
+		if part != "" {
+			firstMatcher = part
+			break
+		}
+		start = i + 1
+	}
+	if firstMatcher == "" {
+		return ""
+	}
+
+	for _, op := range []string{"!~", "=~", "!=", "="} {
+		if idx := strings.Index(firstMatcher, op); idx > 0 {
+			return strings.TrimSpace(firstMatcher[:idx])
+		}
+	}
+	return ""
 }
 
 func usesDerivedVolumeLabels(targetLabels string) bool {
@@ -786,7 +882,12 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 			if !ok {
 				continue
 			}
-			addDetectedField(fields, key, "", inferDetectedType(value), nil, stringValue)
+			for _, exposure := range p.metadataFieldExposures(key) {
+				if _, conflict := labelNames[exposure.name]; conflict && !exposure.isAlias {
+					continue
+				}
+				addDetectedField(fields, exposure.name, "", inferDetectedType(value), nil, stringValue)
+			}
 		}
 
 		msg, _ := entry["_msg"].(string)
@@ -800,11 +901,12 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 				if key == "" {
 					continue
 				}
-				label := p.labelTranslator.ToLoki(key)
-				if _, conflict := labelNames[label]; conflict {
-					label += "_extracted"
+				for _, exposure := range p.metadataFieldExposures(key) {
+					if _, conflict := labelNames[exposure.name]; conflict && !exposure.isAlias {
+						continue
+					}
+					addDetectedField(fields, exposure.name, "json", inferDetectedType(value), []string{key}, formatDetectedValue(value))
 				}
-				addDetectedField(fields, label, "json", inferDetectedType(value), []string{key}, formatDetectedValue(value))
 			}
 		}
 
@@ -816,11 +918,12 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 				addDetectedField(fields, "detected_level", "", "string", nil, value)
 				continue
 			}
-			label := p.labelTranslator.ToLoki(key)
-			if _, conflict := labelNames[label]; conflict {
-				label += "_extracted"
+			for _, exposure := range p.metadataFieldExposures(key) {
+				if _, conflict := labelNames[exposure.name]; conflict && !exposure.isAlias {
+					continue
+				}
+				addDetectedField(fields, exposure.name, "logfmt", inferDetectedType(value), nil, value)
 			}
-			addDetectedField(fields, label, "logfmt", inferDetectedType(value), nil, value)
 		}
 	}
 

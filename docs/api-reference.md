@@ -20,30 +20,15 @@
 | `GET /loki/api/v1/format_query` | Implemented | - (passthrough) | - | 1 |
 | `WS /loki/api/v1/tail` | Implemented | `/select/logsql/tail` (WebSocket->NDJSON) | - | 2 |
 
-### Drilldown Response Shaping
+### Drilldown Field Shaping
 
-For Grafana Logs Drilldown, log query responses keep real stream labels in `stream` and emit per-entry VictoriaLogs fields as Loki-compatible entry metadata:
+For Grafana Logs Drilldown and Explore compatibility:
 
-- Query-time parsed fields are emitted in the third value element under `parsed`.
-- Non-stream entry fields from raw VictoriaLogs queries are emitted under `structuredMetadata`.
-- Synthetic Loki compatibility labels such as `service_name` and `detected_level` stay available on the stream.
-
-Example `query_range` log value:
-
-```json
-[
-  "1775325574231552000",
-  "{\"method\":\"GET\",\"path\":\"/metrics\",\"status\":200,\"duration_ms\":2}",
-  {
-    "parsed": {
-      "duration_ms": "2",
-      "method": "GET",
-      "path": "/metrics",
-      "status": "200"
-    }
-  }
-]
-```
+- Query results still use canonical Loki 2-tuples: `[timestamp, line]`.
+- Stream labels stay Loki-compatible on the `stream` object.
+- Parsed fields and structured metadata are surfaced through `detected_fields` and `detected_field/{name}/values`.
+- With `-metadata-field-mode=hybrid` (the default), field-oriented APIs expose both native VictoriaLogs dotted names and translated Loki aliases when they differ, for example `service.name` and `service_name`.
+- Synthetic compatibility labels such as `service_name` and `detected_level` stay available on the stream and label APIs.
 
 ## Delete Endpoint (Exception)
 

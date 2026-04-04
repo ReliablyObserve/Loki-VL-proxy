@@ -96,6 +96,12 @@ The default local stack is pinned to:
 - Grafana `12.4.2`
 - Logs Drilldown contract `2.0.1` from `grafana/logs-drilldown` commit `4463f56047de75da95251086d1906fb902ad53a7`
 
+Field-surface defaults in the pinned stack:
+
+- Labels remain Loki-compatible when `-label-style=underscores` is used
+- `-metadata-field-mode=hybrid` is the default, so field APIs expose both native dotted names and translated aliases
+- If you need a stricter Loki-only field surface for a focused test, run the proxy with `-metadata-field-mode=translated`
+
 Support window policy:
 
 - Loki: current minor family plus one minor behind

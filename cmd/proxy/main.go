@@ -88,6 +88,10 @@ func main() {
 	labelStyle := flag.String("label-style", "passthrough", `Label name translation mode:
   passthrough  - no translation, pass VL field names as-is (use when VL stores underscores)
   underscores  - convert dots to underscores (use when VL stores OTel-style dotted names like service.name)`)
+	metadataFieldMode := flag.String("metadata-field-mode", "hybrid", `Field exposure mode for detected_fields and structured metadata:
+  native      - expose VictoriaLogs field names as-is
+  translated  - expose only Loki-compatible translated aliases
+  hybrid      - expose both native VL field names and translated aliases when they differ`)
 	fieldMappingJSON := flag.String("field-mapping", "", `JSON custom field mappings: [{"vl_field":"service.name","loki_label":"service_name"}]`)
 	streamFieldsCSV := flag.String("stream-fields", "", `Comma-separated VL _stream_fields labels for stream selector optimization (e.g., "app,env,namespace")`)
 	allowGlobalTenant := flag.Bool("tenant.allow-global", false, `Allow X-Scope-OrgID "*" or "0" to bypass AccountID/ProjectID scoping and use the backend default tenant`)
@@ -122,6 +126,9 @@ func main() {
 	}
 	if v := os.Getenv("FIELD_MAPPING"); v != "" && *fieldMappingJSON == "" {
 		*fieldMappingJSON = v
+	}
+	if v := os.Getenv("METADATA_FIELD_MODE"); v != "" && *metadataFieldMode == "hybrid" {
+		*metadataFieldMode = v
 	}
 
 	// Parse tenant map
@@ -184,6 +191,12 @@ func main() {
 	if ls == proxy.LabelStyleUnderscores {
 		log.Printf("Label style: underscores (VL dotted field names → Loki underscore labels)")
 	}
+	mfm := proxy.MetadataFieldMode(*metadataFieldMode)
+	switch mfm {
+	case proxy.MetadataFieldModeNative, proxy.MetadataFieldModeTranslated, proxy.MetadataFieldModeHybrid:
+	default:
+		log.Fatalf("Invalid -metadata-field-mode: %q (must be 'native', 'translated', or 'hybrid')", *metadataFieldMode)
+	}
 
 	// Parse derived fields
 	var derivedFields []proxy.DerivedField
@@ -233,6 +246,7 @@ func main() {
 		MetricsMaxClients:        *metricsMaxClients,
 		MetricsTrustProxyHeaders: *metricsTrustProxyHeaders,
 		LabelStyle:               ls,
+		MetadataFieldMode:        mfm,
 		FieldMappings:            fieldMappings,
 		StreamFields:             parseCSV(*streamFieldsCSV),
 		PeerCache:                peerCache,
