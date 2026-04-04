@@ -372,24 +372,41 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
 		return
 	}
-	p.log.Debug("translated query", "logsql", logsqlQuery)
+	// Extract without() labels for post-processing
+	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
+	p.log.Debug("translated query", "logsql", logsqlQuery, "without", withoutLabels)
 
 	r = withOrgID(r)
 
 	// Wrap writer to capture actual status code for metrics
 	sc := &statusCapture{ResponseWriter: w, code: 200}
 
+	// If without() labels present, use a buffered writer for post-processing
+	var bw *bufferedResponseWriter
+	if len(withoutLabels) > 0 {
+		bw = &bufferedResponseWriter{header: w.Header()}
+		sc = &statusCapture{ResponseWriter: bw, code: 200}
+	}
+
 	// Check for subquery expression (e.g., max_over_time(rate(...)[1h:5m]))
 	if outerFunc, innerQL, rng, step, ok := translator.ParseSubqueryExpr(logsqlQuery); ok {
 		p.proxySubqueryRange(sc, r, outerFunc, innerQL, rng, step)
-	} else if op, left, right, ok := translator.ParseBinaryMetricExpr(logsqlQuery); ok {
+	} else if op, left, right, vm, ok := translator.ParseBinaryMetricExprFull(logsqlQuery); ok {
 		// Binary metric expression (e.g., sum(rate(...)) / sum(rate(...)))
-		p.proxyBinaryMetricQueryRange(sc, r, op, left, right)
+		p.proxyBinaryMetricQueryRangeVM(sc, r, op, left, right, vm)
 	} else if isStatsQuery(logsqlQuery) {
 		p.proxyStatsQueryRange(sc, r, logsqlQuery)
 	} else {
 		p.proxyLogQuery(sc, r, logsqlQuery)
 	}
+
+	// Apply without() post-processing: strip excluded labels from metric results
+	if bw != nil && len(withoutLabels) > 0 {
+		result := applyWithoutGrouping(bw.body, withoutLabels)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(result)
+	}
+
 	elapsed := time.Since(start)
 	p.metrics.RecordRequest("query_range", sc.code, elapsed)
 	p.queryTracker.Record("query_range", logqlQuery, elapsed, false)
@@ -411,20 +428,36 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract without() labels for post-processing
+	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
+
 	r = withOrgID(r)
 
 	// Wrap writer to capture actual status code for metrics
 	sc := &statusCapture{ResponseWriter: w, code: 200}
 
+	var bw *bufferedResponseWriter
+	if len(withoutLabels) > 0 {
+		bw = &bufferedResponseWriter{header: w.Header()}
+		sc = &statusCapture{ResponseWriter: bw, code: 200}
+	}
+
 	if outerFunc, innerQL, rng, step, ok := translator.ParseSubqueryExpr(logsqlQuery); ok {
 		p.proxySubquery(sc, r, outerFunc, innerQL, rng, step)
-	} else if op, left, right, ok := translator.ParseBinaryMetricExpr(logsqlQuery); ok {
-		p.proxyBinaryMetricQuery(sc, r, op, left, right)
+	} else if op, left, right, vm, ok := translator.ParseBinaryMetricExprFull(logsqlQuery); ok {
+		p.proxyBinaryMetricQueryVM(sc, r, op, left, right, vm)
 	} else if isStatsQuery(logsqlQuery) {
 		p.proxyStatsQuery(sc, r, logsqlQuery)
 	} else {
 		p.proxyLogQuery(sc, r, logsqlQuery)
 	}
+
+	if bw != nil && len(withoutLabels) > 0 {
+		result := applyWithoutGrouping(bw.body, withoutLabels)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(result)
+	}
+
 	elapsed := time.Since(start)
 	p.metrics.RecordRequest("query", sc.code, elapsed)
 	p.queryTracker.Record("query", logqlQuery, elapsed, false)
@@ -1547,6 +1580,86 @@ func (p *Proxy) proxyBinaryMetricQueryRange(w http.ResponseWriter, r *http.Reque
 // proxyBinaryMetricQuery evaluates binary metric expressions for instant queries.
 func (p *Proxy) proxyBinaryMetricQuery(w http.ResponseWriter, r *http.Request, op, leftQL, rightQL string) {
 	p.proxyBinaryMetric(w, r, op, leftQL, rightQL, "stats_query", "vector")
+}
+
+// proxyBinaryMetricQueryRangeVM evaluates with vector matching (on/ignoring/group_left/group_right).
+func (p *Proxy) proxyBinaryMetricQueryRangeVM(w http.ResponseWriter, r *http.Request, op, leftQL, rightQL string, vm *translator.VectorMatchInfo) {
+	p.proxyBinaryMetricVM(w, r, op, leftQL, rightQL, "stats_query_range", "matrix", vm)
+}
+
+func (p *Proxy) proxyBinaryMetricQueryVM(w http.ResponseWriter, r *http.Request, op, leftQL, rightQL string, vm *translator.VectorMatchInfo) {
+	p.proxyBinaryMetricVM(w, r, op, leftQL, rightQL, "stats_query", "vector", vm)
+}
+
+func (p *Proxy) proxyBinaryMetricVM(w http.ResponseWriter, r *http.Request, op, leftQL, rightQL, vlEndpoint, resultType string, vm *translator.VectorMatchInfo) {
+	// If no vector matching, fall back to default behavior
+	if vm == nil || (len(vm.On) == 0 && len(vm.Ignoring) == 0 && len(vm.GroupLeft) == 0 && len(vm.GroupRight) == 0) {
+		p.proxyBinaryMetric(w, r, op, leftQL, rightQL, vlEndpoint, resultType)
+		return
+	}
+
+	isRange := vlEndpoint == "stats_query_range"
+	buildParams := func(query string) url.Values {
+		params := url.Values{"query": {query}}
+		if isRange {
+			if s := r.FormValue("start"); s != "" {
+				params.Set("start", formatVLTimestamp(s))
+			}
+			if e := r.FormValue("end"); e != "" {
+				params.Set("end", formatVLTimestamp(e))
+			}
+			if step := r.FormValue("step"); step != "" {
+				params.Set("step", formatVLStep(step))
+			}
+		} else {
+			if t := r.FormValue("time"); t != "" {
+				params.Set("time", formatVLTimestamp(t))
+			}
+		}
+		return params
+	}
+
+	leftIsScalar := translator.IsScalar(leftQL)
+	rightIsScalar := translator.IsScalar(rightQL)
+
+	var leftBody, rightBody []byte
+	if leftIsScalar {
+		leftBody = []byte(`{"status":"success","data":{"resultType":"scalar","result":[0,"` + leftQL + `"]}}`)
+	} else {
+		resp, e := p.vlPost(r.Context(), "/select/logsql/"+vlEndpoint, buildParams(leftQL))
+		if e != nil {
+			p.writeError(w, http.StatusBadGateway, "left query: "+e.Error())
+			return
+		}
+		defer resp.Body.Close()
+		leftBody, _ = io.ReadAll(resp.Body)
+	}
+
+	if rightIsScalar {
+		rightBody = []byte(`{"status":"success","data":{"resultType":"scalar","result":[0,"` + rightQL + `"]}}`)
+	} else {
+		resp, e := p.vlPost(r.Context(), "/select/logsql/"+vlEndpoint, buildParams(rightQL))
+		if e != nil {
+			p.writeError(w, http.StatusBadGateway, "right query: "+e.Error())
+			return
+		}
+		defer resp.Body.Close()
+		rightBody, _ = io.ReadAll(resp.Body)
+	}
+
+	// Apply vector matching: on(), ignoring(), group_left(), group_right()
+	var result []byte
+	if len(vm.On) > 0 {
+		result = applyOnMatching(leftBody, rightBody, op, vm.On, resultType)
+	} else if len(vm.Ignoring) > 0 {
+		result = applyIgnoringMatching(leftBody, rightBody, op, vm.Ignoring, resultType)
+	} else {
+		// group_left/group_right without on/ignoring — use default matching
+		result = combineBinaryMetricResults(leftBody, rightBody, op, resultType, leftIsScalar, rightIsScalar, leftQL, rightQL)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
 }
 
 func (p *Proxy) proxyBinaryMetric(w http.ResponseWriter, r *http.Request, op, leftQL, rightQL, vlEndpoint, resultType string) {

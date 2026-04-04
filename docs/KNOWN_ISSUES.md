@@ -8,9 +8,9 @@ All LogQL features are handled. No errors, no silent failures. Minor behavioral 
 
 | Feature | Proxy Behavior | Loki Behavior |
 |---|---|---|
-| `without()` grouping | Converted to `by()` (labels inverted) | Native complement grouping |
-| `on()`/`ignoring()` | Stripped; exact metric key match | Label-subset matching |
-| `group_left()`/`group_right()` | Stripped; no cardinality enforcement | One-to-many join validation |
+| `without()` grouping | Proxy strips excluded labels from VL results | Native complement grouping |
+| `on()`/`ignoring()` | Proxy-side label-subset matching | Native label-subset matching |
+| `group_left()`/`group_right()` | Proxy-side one-to-many join via on() | Native one-to-many join validation |
 | Subquery `rate(...)[1h:5m]` | Proxy-side: runs inner query at sub-steps, aggregates | Native nested sub-step evaluation |
 
 ## Data Model Differences

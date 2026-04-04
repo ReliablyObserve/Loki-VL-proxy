@@ -571,13 +571,18 @@ func tryTranslateBinaryMetricExpr(logql string) (string, bool) {
 	boolRe := regexp.MustCompile(`\s+bool\s+`)
 	logql = boolRe.ReplaceAllString(logql, " ")
 
-	// Strip vector matching modifiers: on(labels), ignoring(labels), group_left(labels), group_right(labels).
-	// These control how binary expression sides are joined by label.
-	// The proxy joins by exact metric key match (equivalent to default behavior).
-	// Stripping allows the binary expression to be parsed and evaluated.
-	vectorMatchRe := regexp.MustCompile(`\s+(on|ignoring|group_left|group_right)\s*\([^)]*\)`)
+	// Extract vector matching modifiers before stripping them.
+	// on(labels), ignoring(labels) control join behavior.
+	// group_left(labels), group_right(labels) control one-to-many cardinality.
+	// We pass them through the binary expression format so the proxy can use them.
+	vectorMatchRe := regexp.MustCompile(`\s+(on|ignoring|group_left|group_right)\s*\(([^)]*)\)`)
+	var vectorMatchMeta []string
+	for _, m := range vectorMatchRe.FindAllStringSubmatch(logql, -1) {
+		if len(m) >= 3 {
+			vectorMatchMeta = append(vectorMatchMeta, m[1]+":"+strings.TrimSpace(m[2]))
+		}
+	}
 	logql = vectorMatchRe.ReplaceAllString(logql, "")
-	// Normalize multiple spaces left by stripping
 	for strings.Contains(logql, "  ") {
 		logql = strings.ReplaceAll(logql, "  ", " ")
 	}
@@ -604,18 +609,23 @@ func tryTranslateBinaryMetricExpr(logql string) (string, bool) {
 					leftQL, leftOK := tryTranslateMetricQuery(left)
 					rightQL, rightOK := tryTranslateMetricQuery(right)
 
+					vmSuffix := ""
+					if len(vectorMatchMeta) > 0 {
+						vmSuffix = "@@@" + strings.Join(vectorMatchMeta, "@@@")
+					}
+
 					if !leftOK || !rightOK {
 						// One side might be a scalar (e.g., `rate(...) * 100`)
 						if leftOK && IsScalar(right) {
-							return fmt.Sprintf("%s%s:%s|||%s", BinaryMetricPrefix, operator, leftQL, right), true
+							return fmt.Sprintf("%s%s:%s|||%s%s", BinaryMetricPrefix, operator, leftQL, right, vmSuffix), true
 						}
 						if rightOK && IsScalar(left) {
-							return fmt.Sprintf("%s%s:%s|||%s", BinaryMetricPrefix, operator, left, rightQL), true
+							return fmt.Sprintf("%s%s:%s|||%s%s", BinaryMetricPrefix, operator, left, rightQL, vmSuffix), true
 						}
 						continue
 					}
 
-					return fmt.Sprintf("%s%s:%s|||%s", BinaryMetricPrefix, operator, leftQL, rightQL), true
+					return fmt.Sprintf("%s%s:%s|||%s%s", BinaryMetricPrefix, operator, leftQL, rightQL, vmSuffix), true
 				}
 			}
 		}
@@ -635,27 +645,79 @@ func IsScalar(s string) bool {
 	return err == nil
 }
 
-// ParseBinaryMetricExpr parses a "__binary__:op:left|||right" string.
-// Returns the operator, left query, right query, and whether it's a binary expression.
+// VectorMatchInfo holds vector matching modifiers for binary expressions.
+type VectorMatchInfo struct {
+	On           []string // on(labels) — match on these labels only
+	Ignoring     []string // ignoring(labels) — match ignoring these labels
+	GroupLeft    []string // group_left(extra_labels) — one-to-many, left side is "many"
+	GroupRight   []string // group_right(extra_labels) — one-to-many, right side is "many"
+}
+
+// ParseBinaryMetricExpr parses a "__binary__:op:left|||right[@@@modifier:labels...]" string.
+// Returns the operator, left query, right query, vector matching info, and whether it's valid.
 func ParseBinaryMetricExpr(s string) (op, left, right string, ok bool) {
+	vm := &VectorMatchInfo{}
+	op, left, right, vm, ok = ParseBinaryMetricExprFull(s)
+	_ = vm
+	return op, left, right, ok
+}
+
+// ParseBinaryMetricExprFull parses binary expression with vector matching metadata.
+func ParseBinaryMetricExprFull(s string) (op, left, right string, vm *VectorMatchInfo, ok bool) {
 	if !strings.HasPrefix(s, BinaryMetricPrefix) {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	rest := s[len(BinaryMetricPrefix):]
-	// Format: "op:left|||right"
 	colonIdx := strings.Index(rest, ":")
 	if colonIdx < 0 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	op = rest[:colonIdx]
 	body := rest[colonIdx+1:]
+
+	// Split off vector matching metadata at @@@
+	vm = &VectorMatchInfo{}
+	if atIdx := strings.Index(body, "@@@"); atIdx >= 0 {
+		metaPart := body[atIdx+3:]
+		body = body[:atIdx]
+		for _, segment := range strings.Split(metaPart, "@@@") {
+			parts := strings.SplitN(segment, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			modifier := parts[0]
+			labels := splitLabels(parts[1])
+			switch modifier {
+			case "on":
+				vm.On = labels
+			case "ignoring":
+				vm.Ignoring = labels
+			case "group_left":
+				vm.GroupLeft = labels
+			case "group_right":
+				vm.GroupRight = labels
+			}
+		}
+	}
+
 	sepIdx := strings.Index(body, "|||")
 	if sepIdx < 0 {
-		return "", "", "", false
+		return "", "", "", nil, false
 	}
 	left = body[:sepIdx]
 	right = body[sepIdx+3:]
-	return op, left, right, true
+	return op, left, right, vm, true
+}
+
+func splitLabels(s string) []string {
+	var labels []string
+	for _, l := range strings.Split(s, ",") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			labels = append(labels, l)
+		}
+	}
+	return labels
 }
 
 func isUnwrapFunc(name string) bool {
