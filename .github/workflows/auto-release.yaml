@@ -241,33 +241,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   tag-release:
-    needs: [prepare-release, create-release-pr]
-    if: needs.prepare-release.outputs.should_release == 'true' && needs.create-release-pr.outputs.pr_created == 'true'
+    if: startsWith(github.event.head_commit.message, 'chore: release v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Wait for PR merge and tag
+      - name: Tag merged release commit
         run: |
-          VERSION="${{ needs.prepare-release.outputs.next_version }}"
+          VERSION=$(printf '%s' "${{ github.event.head_commit.message }}" | sed -n 's/^chore: release v\([0-9][0-9.]*\).*/\1/p')
+          if [ -z "$VERSION" ]; then
+            echo "Could not parse release version from commit message: ${{ github.event.head_commit.message }}"
+            exit 1
+          fi
 
-          # Wait for the release PR to merge
-          for i in $(seq 1 30); do
-            git fetch origin main 2>/dev/null
-            if git log origin/main --oneline -1 | grep -q "release v${VERSION}"; then
-              echo "Release PR merged"
-              break
-            fi
-            echo "Waiting for PR merge... (${i}/30)"
-            sleep 10
-          done
+          git fetch origin --tags
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists; nothing to do."
+            exit 0
+          fi
 
-          git checkout main
-          git pull origin main
-          git tag "v${VERSION}"
+          git tag "v${VERSION}" "${GITHUB_SHA}"
           git push origin "v${VERSION}"
-          echo "Tagged v${VERSION} — release workflow triggered"
+          echo "Tagged v${VERSION} from merged release commit ${GITHUB_SHA}"
         env:
           GH_TOKEN: ${{ github.token }}

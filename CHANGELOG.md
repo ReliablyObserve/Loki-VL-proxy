@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- **Single-tenant VictoriaLogs migration mode**: `X-Scope-OrgID: "0"` and `X-Scope-OrgID: "*"` now use VictoriaLogs' default tenant (`AccountID=0`, `ProjectID=0`) when no tenant map is configured. This keeps Grafana Loki datasources simple for single-tenant backends while preserving strict mapped multitenancy.
+- **Optional global bypass in mapped mode**: New `-tenant.allow-global` flag allows `0` and `*` to keep using the backend default tenant even when a tenant map is configured, making staged migrations from Loki string tenants to VictoriaLogs numeric tenants easier.
+- **Client identity propagation**: The proxy now derives client identity from trusted Grafana headers, tenant, basic auth, or remote address and forwards `X-Loki-VL-Client-ID` and `X-Loki-VL-Client-Source` to the backend. When `-metrics.trust-proxy-headers=true`, `X-Grafana-User` is also forwarded.
+- **Client-centric observability**: `/metrics` now exports per-client request counters, per-client status breakdowns, in-flight request gauges, response bytes, and LogQL query length histograms to identify the real users driving load.
+- **Fleet peer-cache observability**: Added peer-cache metrics for remote peers, total ring members, peer hits, misses, and errors so fleet behavior can be diagnosed without relying only on logs.
+
+### Security
+
+- **Fail-closed multitenancy preserved**: Unknown non-numeric tenant strings still return `403 Forbidden` instead of silently falling back to the global VictoriaLogs tenant.
+- **Global tenant bypass is explicit**: In mapped deployments, `0` and `*` only bypass tenant scoping when `-tenant.allow-global=true`.
+- **Trusted-header handling tightened**: Grafana user identity is only used for metrics and backend context forwarding when `-metrics.trust-proxy-headers=true`.
+
+### Operations
+
+- **Pinned build and CI toolchain versions**: Workflows now use Go `1.26.1`, `golangci-lint` `v2.11.4`, Docker builder image `golang:1.26.1-alpine3.22`, and runtime image `alpine:3.22.2`.
+- **Updated local/dev runtime images**: The dev/test Compose stack now uses `victoriametrics/victoria-logs:v1.49.0`.
+- **Release workflow improvements**: Release builds now package the Helm chart as a versioned `.tgz` asset, update chart metadata during auto-release PR creation, and stop publishing a floating Docker `latest` tag.
+
+### Documentation
+
+- Added the full request-flow diagram to the top-level README.
+- Updated configuration, API reference, fleet cache, and scaling docs for tenant defaults, client metrics, fleet metrics, pinned versions, and Grafana datasource behavior.
+
+### Tests
+
+- Added unit coverage for global tenant fallback, mapped-mode global bypass, trusted Grafana user forwarding, client-centric metrics, and peer-cache metrics exposure.
+- Updated Loki e2e compatibility tests to cover the single-tenant default-tenant flow for `X-Scope-OrgID: 0` and `*`.
+- Verified locally with `go test ./...`, `go test ./... -race`, `golangci-lint run --timeout=5m`, `helm lint charts/loki-vl-proxy/`, `go test -v -tags=e2e -timeout=180s ./test/e2e-compat/...`, and `go test -v -tags=e2e -timeout=180s ./test/e2e-fleet/...`.
+
+## [0.24.0] - 2026-04-04
+
+### Features
+
+- per-client identity metrics, scaling/capacity docs
+- secret redaction, encryption removal, lint fixes, fleet e2e
+- TTL-preserving shadow copies — never extend original expiry
+- gossip key directory for local-first cache — minimize hops behind LB
+- owner-affinity write-through, LB-aware fleet cache design
+- fleet-distributed peer cache with consistent hashing and circuit breakers
+- group_left/group_right one-to-many join, vector matching metadata passthrough
+- proper without() label exclusion and on()/ignoring() label-subset matching
+- smart PR labeling + scope-aware version bumping
+- auto-release pipeline — version bump, changelog, badges, tag via PRs
+
+### Bug Fixes
+
+- pass gh token to release pr step
+- remove unused websocket helper
+- harden proxy and release workflow
+- fix compat flakes, add disk cache e2e, cache sizing tests
+- badge workflow creates PR instead of direct push (respects branch rules)
+- re-enable badge auto-push, ruleset allows GHA bot
+- badges workflow read-only (no push), e2e continue-on-error
+- mark e2e-compat as continue-on-error (data ingestion timing flakes)
+- remove unused functions, fix staticcheck SA9003/QF1001
+- lint errcheck exclusions, staticcheck fix, e2e docker compose startup
+- move errcheck test exclusion to linters.exclusions.rules (golangci-lint v2)
+- simplify golangci-lint v2 config, add Apache 2.0 license
+- race detector fix, golangci-lint v2 config, fuzz tests, README badges
+
+### Tests
+
+- 920 total tests (82.2% coverage)
+
 ## [0.23.0] - 2026-04-04
 
 ### Features
