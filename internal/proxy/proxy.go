@@ -1979,23 +1979,51 @@ func lokiLabelsResponse(labels []string) []byte {
 	return result
 }
 
+// vlEntryPool pools map[string]interface{} to reduce GC pressure in NDJSON parsing.
+var vlEntryPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]interface{}, 8)
+	},
+}
+
 // vlLogsToLokiStreams converts VL newline-delimited JSON logs to Loki streams format.
+// Optimized: byte scanning, pooled maps, pre-allocated slices.
 func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 	type streamEntry struct {
 		Labels map[string]string
 		Values [][]string // [[timestamp_ns, line], ...]
 	}
-	streamMap := make(map[string]*streamEntry)
+	// Estimate line count from body size (~200 bytes/line average)
+	estimatedLines := len(body)/200 + 1
+	streamMap := make(map[string]*streamEntry, estimatedLines/10+1)
 
-	lines := strings.Split(string(body), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	// Scan lines without copying the entire body to a string
+	start := 0
+	for i := 0; i <= len(body); i++ {
+		if i < len(body) && body[i] != '\n' {
+			continue
+		}
+		line := body[start:i]
+		start = i + 1
+
+		// Trim whitespace (avoid bytes.TrimSpace allocation)
+		for len(line) > 0 && (line[0] == ' ' || line[0] == '\t' || line[0] == '\r') {
+			line = line[1:]
+		}
+		for len(line) > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '\t' || line[len(line)-1] == '\r') {
+			line = line[:len(line)-1]
+		}
+		if len(line) == 0 {
 			continue
 		}
 
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		// Use pooled map to reduce allocations
+		entry := vlEntryPool.Get().(map[string]interface{})
+		for k := range entry {
+			delete(entry, k) // clear reused map
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			vlEntryPool.Put(entry)
 			continue
 		}
 
@@ -2005,12 +2033,14 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 		streamStr, _ := entry["_stream"].(string)
 
 		if timeStr == "" {
+			vlEntryPool.Put(entry)
 			continue
 		}
 
 		// Parse time to nanoseconds
 		ts, err := time.Parse(time.RFC3339Nano, timeStr)
 		if err != nil {
+			vlEntryPool.Put(entry)
 			continue
 		}
 		tsNanos := strconv.FormatInt(ts.UnixNano(), 10)
@@ -2039,6 +2069,9 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 			}
 			streamMap[streamKey] = se
 		}
+
+		// Return pooled entry after extracting all needed data
+		vlEntryPool.Put(entry)
 
 		se.Values = append(se.Values, []string{tsNanos, msg})
 	}

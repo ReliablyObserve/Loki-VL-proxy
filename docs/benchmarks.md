@@ -9,7 +9,7 @@ Measured on Apple M3 Max (14 cores), Go 1.25, `-benchmem`.
 | Labels (cache hit) | 2.0 us | 25 | 6.6 KB | Serve from in-memory cache |
 | QueryRange (cache hit) | 118 us | 600 | 142 KB | Query translation + cache lookup |
 | wrapAsLokiResponse | 2.8 us | 58 | 2.6 KB | JSON re-envelope |
-| VL NDJSON to Loki streams (100 lines) | 188 us | 3417 | 139 KB | Parse + group + convert |
+| VL NDJSON to Loki streams (100 lines) | 170 us | 3118 | 70 KB | Parse + group + convert (pooled) |
 | LogQL translation | ~5 us | ~20 | ~2 KB | String manipulation (no AST) |
 
 ## Throughput
@@ -73,7 +73,7 @@ Go's defaults (`MaxIdleConnsPerHost=2`) cause ephemeral port exhaustion at >50 c
 
 ## Known Hot Paths
 
-1. **VL NDJSON to Loki streams** (3417 allocs/100 lines): Each JSON line is unmarshaled into a `map[string]interface{}`, creating many small allocations. A streaming JSON decoder with pre-allocated buffers would reduce this.
+1. **VL NDJSON to Loki streams** (3118 allocs/100 lines, down from 3417): Optimized with byte scanning (no `strings.Split`), `sync.Pool` for JSON entry maps, pre-allocated slice estimates. **49% memory reduction** from original. Remaining allocs are from `json.Unmarshal` internals — further gains need a custom tokenizer.
 
 2. **QueryRange cache hit** (600 allocs/request): Even on cache hit, response bytes are re-parsed and re-serialized. Serving raw cached bytes would eliminate this overhead.
 
