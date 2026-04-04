@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -27,6 +28,50 @@ import (
 	mw "github.com/szibis/Loki-VL-proxy/internal/middleware"
 	"github.com/szibis/Loki-VL-proxy/internal/translator"
 )
+
+// jsonBufPool pools bytes.Buffer for JSON encoding to reduce allocations.
+// Capped at 64KB before returning to prevent pool bloat from large responses.
+const maxPooledBufSize = 64 * 1024
+
+var jsonBufPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 4096))
+	},
+}
+
+// readBodyPooled reads an HTTP response body using a pooled buffer for the initial allocation.
+// Returns a new []byte (safe to cache) but reduces the initial allocation growth.
+func readBodyPooled(body io.Reader) ([]byte, error) {
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	_, err := buf.ReadFrom(body)
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	if buf.Cap() <= maxPooledBufSize {
+		jsonBufPool.Put(buf)
+	}
+	return result, err
+}
+
+// marshalJSON encodes v to JSON using a pooled buffer, then writes to w.
+// Reduces allocations vs json.NewEncoder(w).Encode() by reusing buffers.
+func marshalJSON(w http.ResponseWriter, v interface{}) {
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(buf).Encode(v); err != nil {
+		// Fallback: encode directly (shouldn't happen for our types)
+		json.NewEncoder(w).Encode(v)
+	} else {
+		w.Write(buf.Bytes())
+	}
+
+	if buf.Cap() <= maxPooledBufSize {
+		jsonBufPool.Put(buf)
+	}
+	// Oversized buffers are left for GC (prevents pool bloat)
+}
 
 type ctxKey int
 
@@ -2416,8 +2461,7 @@ func (p *Proxy) writeError(w http.ResponseWriter, code int, msg string) {
 }
 
 func (p *Proxy) writeJSON(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(data)
+	marshalJSON(w, data)
 }
 
 func base64Encode(s string) string {
