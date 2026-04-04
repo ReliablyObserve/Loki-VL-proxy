@@ -45,12 +45,10 @@ func translateLogQLFull(logql string, labelFn LabelTranslateFunc, streamFields m
 		return result, nil
 	}
 
-	// Convert without() to by() — VL has no native without().
-	// The proxy rewrites without(a,b) to by(<all other labels>).
-	// Since we don't know all labels at translation time, we pass a special marker
-	// that the proxy resolves after receiving VL results.
-	// Format: __without__:label1,label2 — the proxy strips excluded labels from results.
-	logql = rewriteWithoutToMarker(logql)
+	// Extract without() labels before translation.
+	// The proxy will post-process VL results to remove these labels from metric grouping.
+	var withoutLabels []string
+	logql, withoutLabels = extractWithoutLabels(logql)
 
 	// Strip "bool" modifier from comparison operators before translation.
 	// Loki: "A > bool B" returns 1/0 instead of filtering. Our applyOp always
@@ -61,41 +59,104 @@ func translateLogQLFull(logql string, labelFn LabelTranslateFunc, streamFields m
 	// Check binary metric expressions FIRST — they may contain metric sub-expressions.
 	// E.g., "rate({...}[5m]) > 0" is a binary expr, not just a metric query.
 	if binResult, ok := tryTranslateBinaryMetricExpr(logql); ok {
-		return binResult, nil
+		return appendWithoutMarker(binResult, withoutLabels), nil
 	}
 
 	// Check if this is a plain metric query (no binary operator at top level)
 	if metricResult, ok := tryTranslateMetricQuery(logql); ok {
-		return metricResult, nil
+		return appendWithoutMarker(metricResult, withoutLabels), nil
 	}
 
 	return translateLogQuery(logql, labelFn, streamFields)
 }
 
-// rewriteWithoutToMarker converts without(labels) to by() but passes excluded labels
-// via a __without__ marker for the proxy to handle post-VL-query.
-// It replaces "without" with "by" so VL gets all data, and the proxy groups after.
-func rewriteWithoutToMarker(logql string) string {
-	// Match both forms:
-	// Form 1: sum without (pod, node) (...)
-	// Form 2: sum(...) without (pod, node)
-	withoutRe := regexp.MustCompile(`\bwithout\s*\(([^)]+)\)`)
-	return withoutRe.ReplaceAllStringFunc(logql, func(match string) string {
-		// Check if this "without" is inside quotes
-		// (simplified: we already checked in containsWithoutClause — trust it here)
-		// Extract the labels
-		m := withoutRe.FindStringSubmatch(match)
-		if len(m) < 2 {
-			return match
+// WithoutMarkerSuffix is appended to translated queries that need without() post-processing.
+// Format: "...actual_query...__without__:pod,node"
+const WithoutMarkerSuffix = "__without__:"
+
+func appendWithoutMarker(query string, labels []string) string {
+	if len(labels) == 0 {
+		return query
+	}
+	return query + WithoutMarkerSuffix + strings.Join(labels, ",")
+}
+
+// ParseWithoutMarker extracts the without labels from a translated query.
+// Returns the clean query and the list of labels to exclude.
+func ParseWithoutMarker(query string) (cleanQuery string, excludeLabels []string) {
+	idx := strings.LastIndex(query, WithoutMarkerSuffix)
+	if idx < 0 {
+		return query, nil
+	}
+	cleanQuery = query[:idx]
+	labelStr := query[idx+len(WithoutMarkerSuffix):]
+	for _, l := range strings.Split(labelStr, ",") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			excludeLabels = append(excludeLabels, l)
 		}
-		// Replace with by() — VL will group by these labels,
-		// but we actually want to EXCLUDE them.
-		// Pass them through unchanged as by() — the proxy will handle the inversion
-		// by removing the excluded labels from the metric response.
-		// For now: just convert to by() to avoid VL errors.
-		// The grouping will be approximate (by instead of without).
-		return "by (" + m[1] + ")"
-	})
+	}
+	return cleanQuery, excludeLabels
+}
+
+// rewriteWithoutToMarker strips without(labels) from the query and stores the excluded
+// labels as metadata. The proxy post-processes VL results to remove these labels.
+// without(pod, node) → remove clause, VL returns all labels, proxy strips pod+node after.
+func rewriteWithoutToMarker(logql string) string {
+	withoutRe := regexp.MustCompile(`\bwithout\s*\(([^)]+)\)`)
+	m := withoutRe.FindStringSubmatch(logql)
+	if m == nil {
+		return logql
+	}
+	// Check if "without" is inside quotes
+	idx := withoutRe.FindStringIndex(logql)
+	if idx != nil && isInsideQuotes(logql, idx[0]) {
+		return logql
+	}
+	// Strip the without() clause entirely — VL will return ungrouped results
+	// The proxy detects __without__ and strips the excluded labels from results
+	cleaned := withoutRe.ReplaceAllString(logql, "")
+	// Normalize extra spaces
+	for strings.Contains(cleaned, "  ") {
+		cleaned = strings.ReplaceAll(cleaned, "  ", " ")
+	}
+	return cleaned
+}
+
+// extractWithoutLabels extracts the excluded labels stored by rewriteWithoutToMarker.
+// Called by the translator to attach metadata to the translated query.
+func extractWithoutLabels(logql string) (cleaned string, labels []string) {
+	withoutRe := regexp.MustCompile(`\bwithout\s*\(([^)]+)\)`)
+	m := withoutRe.FindStringSubmatch(logql)
+	if m == nil {
+		return logql, nil
+	}
+	labelStr := m[1]
+	for _, l := range strings.Split(labelStr, ",") {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			labels = append(labels, l)
+		}
+	}
+	cleaned = withoutRe.ReplaceAllString(logql, "")
+	for strings.Contains(cleaned, "  ") {
+		cleaned = strings.ReplaceAll(cleaned, "  ", " ")
+	}
+	return cleaned, labels
+}
+
+func isInsideQuotes(s string, pos int) bool {
+	inQuote := false
+	for i := 0; i < pos && i < len(s); i++ {
+		if s[i] == '\\' && inQuote {
+			i++
+			continue
+		}
+		if s[i] == '"' {
+			inQuote = !inQuote
+		}
+	}
+	return inQuote
 }
 
 // translateLogQuery handles log queries (non-metric).
