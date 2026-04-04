@@ -224,16 +224,7 @@ func TestMetricQueryTranslation(t *testing.T) {
 			logql: `stdvar(rate({app="nginx"}[5m])) by (host)`,
 			want:  `app:=nginx | stats by (host) rate()`,
 		},
-		{
-			name:  "without clause treated as by",
-			logql: `sum(rate({app="nginx"}[5m])) without (pod)`,
-			want:  `app:=nginx | stats by (pod) rate()`,
-		},
-		{
-			name:  "without before inner",
-			logql: `sum without (pod) (rate({app="nginx"}[5m]))`,
-			want:  `app:=nginx | stats by (pod) rate()`,
-		},
+		// without() clause tests moved to fixes_test.go — now correctly returns error
 		{
 			name:  "quantile_over_time",
 			logql: `quantile_over_time(0.95, {app="nginx"} | unwrap duration [5m])`,

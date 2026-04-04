@@ -4,20 +4,21 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"sync"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
-	"regexp"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -273,6 +274,9 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 
 	// Write endpoints — blocked (this is a read-only proxy)
 	mux.HandleFunc("/loki/api/v1/push", p.handleWriteBlocked)
+
+	// Delete endpoint — exception to read-only with strict safeguards
+	mux.Handle("/loki/api/v1/delete", rl("delete", p.handleDelete))
 
 	// Admin endpoints — stubs for Grafana Alerting ruler mode compatibility
 	mux.HandleFunc("/loki/api/v1/rules", p.handleRulesStub)
@@ -689,6 +693,10 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	if step := r.FormValue("step"); step != "" {
 		params.Set("step", step)
 	}
+	// Forward targetLabels for field-level grouping (same as /volume)
+	if fields := r.FormValue("targetLabels"); fields != "" {
+		params.Set("field", fields)
+	}
 
 	resp, err := p.vlGet(r.Context(), "/select/logsql/hits", params)
 	if err != nil {
@@ -957,6 +965,147 @@ func (p *Proxy) handleWriteBlocked(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"error": "write operations are not supported — this is a read-only proxy. Send logs directly to VictoriaLogs.",
 	})
+}
+
+const (
+	// maxDeleteTimeRange limits delete operations to 30 days for safety.
+	maxDeleteTimeRange = 30 * 24 * time.Hour
+)
+
+// handleDelete is the sole write exception — proxies Loki delete requests to VL
+// with strict safeguards: confirmation header, query validation, time range limits,
+// tenant scoping, and audit logging.
+//
+// Loki: POST /loki/api/v1/delete?query={...}&start=...&end=...
+// VL:   POST /select/logsql/delete?query=...&start=...&end=...
+func (p *Proxy) handleDelete(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	// Only POST allowed
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "DELETE endpoint requires POST method",
+		})
+		return
+	}
+
+	// Safeguard 1: Require explicit confirmation header
+	if r.Header.Get("X-Delete-Confirmation") != "true" {
+		p.writeError(w, http.StatusBadRequest,
+			"delete requires X-Delete-Confirmation: true header for safety")
+		p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	// Safeguard 2: Require non-empty, non-wildcard query
+	query := r.FormValue("query")
+	if query == "" {
+		p.writeError(w, http.StatusBadRequest, "query parameter required for delete")
+		p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "{}" || trimmed == "*" || trimmed == "" {
+		p.writeError(w, http.StatusBadRequest,
+			"wildcard delete rejected — query must target specific streams (e.g., {app=\"nginx\"})")
+		p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	// Safeguard 3: Require time range
+	startTS := r.FormValue("start")
+	endTS := r.FormValue("end")
+	if startTS == "" || endTS == "" {
+		p.writeError(w, http.StatusBadRequest,
+			"both start and end parameters required for delete")
+		p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	// Safeguard 4: Limit time range to maxDeleteTimeRange (30 days)
+	startSec, err1 := strconv.ParseFloat(startTS, 64)
+	endSec, err2 := strconv.ParseFloat(endTS, 64)
+	if err1 == nil && err2 == nil {
+		// Handle nanosecond timestamps (>1e15 is clearly nanoseconds)
+		if startSec > 1e15 {
+			startSec = startSec / 1e9
+		}
+		if endSec > 1e15 {
+			endSec = endSec / 1e9
+		}
+		rangeDur := time.Duration(int64(endSec-startSec)) * time.Second
+		if rangeDur > maxDeleteTimeRange {
+			p.writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("delete time range too wide: %s exceeds maximum %s",
+					rangeDur.Round(time.Hour), maxDeleteTimeRange))
+			p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+			return
+		}
+		if rangeDur < 0 {
+			p.writeError(w, http.StatusBadRequest, "end must be after start")
+			p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+			return
+		}
+	}
+
+	// Translate query
+	logsqlQuery, err := p.translateQuery(query)
+	if err != nil {
+		p.writeError(w, http.StatusBadRequest, "failed to translate query: "+err.Error())
+		p.metrics.RecordRequest("delete", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	// Safeguard 5: Tenant scoping
+	r = withOrgID(r)
+	tenant := r.Header.Get("X-Scope-OrgID")
+
+	// Audit log BEFORE executing delete
+	p.log.Warn("DELETE request",
+		"tenant", tenant,
+		"query", query,
+		"logsql", logsqlQuery,
+		"start", startTS,
+		"end", endTS,
+		"client", r.RemoteAddr,
+	)
+
+	// Forward to VL delete endpoint
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	params.Set("start", formatVLTimestamp(startTS))
+	params.Set("end", formatVLTimestamp(endTS))
+
+	resp, err := p.vlPost(r.Context(), "/select/logsql/delete", params)
+	if err != nil {
+		p.writeError(w, http.StatusBadGateway, "VL delete failed: "+err.Error())
+		p.metrics.RecordRequest("delete", http.StatusBadGateway, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+
+	// Propagate VL response
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		p.writeError(w, resp.StatusCode, string(body))
+		p.metrics.RecordRequest("delete", resp.StatusCode, time.Since(start))
+		return
+	}
+
+	// Audit log AFTER successful delete
+	p.log.Warn("DELETE completed",
+		"tenant", tenant,
+		"query", query,
+		"start", startTS,
+		"end", endTS,
+		"vl_status", resp.StatusCode,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
+
+	w.WriteHeader(http.StatusNoContent)
+	p.metrics.RecordRequest("delete", http.StatusNoContent, time.Since(start))
 }
 
 // wsUpgrader is the WebSocket upgrader for tail connections.
@@ -1523,6 +1672,43 @@ func applyOp(a, b float64, op string) float64 {
 		return a + b
 	case "-":
 		return a - b
+	case "%":
+		if b == 0 {
+			return 0
+		}
+		return math.Mod(a, b)
+	case "^":
+		return math.Pow(a, b)
+	case "==":
+		if a == b {
+			return 1
+		}
+		return 0
+	case "!=":
+		if a != b {
+			return 1
+		}
+		return 0
+	case ">":
+		if a > b {
+			return 1
+		}
+		return 0
+	case "<":
+		if a < b {
+			return 1
+		}
+		return 0
+	case ">=":
+		if a >= b {
+			return 1
+		}
+		return 0
+	case "<=":
+		if a <= b {
+			return 1
+		}
+		return 0
 	}
 	return a
 }
@@ -2063,7 +2249,8 @@ func formatVLTimestamp(ts string) string {
 // --- Multitenancy ---
 
 // forwardTenantHeaders maps Loki's X-Scope-OrgID to VL's AccountID/ProjectID.
-// Reads orgID from the request context (set by withOrgID) — no shared mutable state.
+// Reads orgID from the request context (set by withOrgID).
+// tenantMap is protected by configMu (written by ReloadTenantMap on SIGHUP).
 func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 	orgID := getOrgID(req.Context())
 	if orgID == "" {
@@ -2076,9 +2263,13 @@ func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 		return
 	}
 
-	// Check tenant map first for string→int mapping
-	if p.tenantMap != nil {
-		if mapping, ok := p.tenantMap[orgID]; ok {
+	// Check tenant map first for string→int mapping (read-lock for SIGHUP safety)
+	p.configMu.RLock()
+	tm := p.tenantMap
+	p.configMu.RUnlock()
+
+	if tm != nil {
+		if mapping, ok := tm[orgID]; ok {
 			req.Header.Set("AccountID", mapping.AccountID)
 			req.Header.Set("ProjectID", mapping.ProjectID)
 			return

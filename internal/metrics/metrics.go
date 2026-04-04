@@ -427,7 +427,7 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 			cbVal = 0
 		case "open":
 			cbVal = 1
-		case "half-open":
+		case "half_open", "half-open":
 			cbVal = 2
 		}
 		sb.WriteString("# HELP loki_vl_proxy_circuit_breaker_state Circuit breaker state (0=closed, 1=open, 2=half-open).\n")

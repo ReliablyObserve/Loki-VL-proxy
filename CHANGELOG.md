@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-04-04
+
+### Security Fixes
+
+- **P0: Tenant map reload data race**: `forwardTenantHeaders` now holds `configMu.RLock` when reading `tenantMap`, preventing data race on SIGHUP reload
+- **P0: `without()` clause silent wrong behavior**: `without()` was silently treated as `by()` producing incorrect aggregation results. Now returns a clear error directing users to use `by()` with explicit labels
+
+### Bug Fixes
+
+- **Binary operators**: `applyOp` now handles `%` (modulo), `^` (power), and comparison operators (`==`, `!=`, `>`, `<`, `>=`, `<=`) — previously these silently returned the left operand
+- **CB metrics mismatch**: Circuit breaker `State()` returns `"half_open"` but metrics matched `"half-open"` — half-open gauge never showed value 2. Now accepts both forms
+- **`targetLabels` on volume_range**: `handleVolumeRange` now forwards the `targetLabels` param as VL `field` (was missing, only `/volume` had it)
+- **`IsScalar` negative/scientific**: `IsScalar` now uses `strconv.ParseFloat` — supports `-1`, `1e5`, `1.5e-3` (previously only digits and dots)
+
+### Features
+
+- **Delete API endpoint**: `/loki/api/v1/delete` added as exception to read-only proxy with 7 safeguards: POST-only, `X-Delete-Confirmation` header, non-wildcard query, time range required, 30-day max range, tenant scoping, audit logging at WARN level
+
+### Documentation
+
+- **Restructured docs**: README slimmed to project summary + architecture, content moved to categorized files:
+  - `docs/architecture.md` — component design, data flow, protection layers
+  - `docs/configuration.md` — all flags, env vars, cache, tenancy, TLS, OTLP
+  - `docs/api-reference.md` — endpoint table, delete safeguards, metrics
+  - `docs/translation-reference.md` — LogQL to LogsQL mapping, supported/unsupported
+  - `docs/testing.md` — test categories, running tests, fuzz testing
+  - `docs/roadmap.md` — completed and planned features
+- **Updated KNOWN_ISSUES.md** with v0.17.0 fixes
+
+### Tests
+
+- 50+ new tests: concurrent tenant reload (race detector), all binary operators (18 cases), delete safeguards (8 cases), CB metrics, `IsScalar`, `without()` clause detection
+
 ## [0.16.0] - 2026-04-04
 
 ### Security Fixes

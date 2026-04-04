@@ -6,6 +6,7 @@ package translator
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +28,12 @@ func TranslateLogQLWithLabels(logql string, labelFn LabelTranslateFunc) (string,
 		return "*", nil
 	}
 
+	// Reject without() clause — VL has no equivalent (it cannot compute the complement label set).
+	// Detect both forms: "sum without (...) (...)" and "sum(...) without (...)"
+	if containsWithoutClause(logql) {
+		return "", fmt.Errorf("without() grouping clause is not supported; use by() with explicit labels instead")
+	}
+
 	// Check if this is a metric query (wrapping function like rate, count_over_time, etc.)
 	if metricResult, ok := tryTranslateMetricQuery(logql); ok {
 		return metricResult, nil
@@ -38,6 +45,32 @@ func TranslateLogQLWithLabels(logql string, labelFn LabelTranslateFunc) (string,
 	}
 
 	return translateLogQuery(logql, labelFn)
+}
+
+// containsWithoutClause detects the without() grouping clause in metric queries.
+// Only matches top-level "without" keyword, not the word inside quoted strings.
+func containsWithoutClause(logql string) bool {
+	withoutRe := regexp.MustCompile(`\bwithout\s*\(`)
+	// Quick check — if the word isn't there at all, skip deeper analysis
+	if !withoutRe.MatchString(logql) {
+		return false
+	}
+	// Walk the string to ensure "without" is not inside quotes
+	inQuote := false
+	for i := 0; i < len(logql); i++ {
+		if logql[i] == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		rest := logql[i:]
+		if withoutRe.MatchString(rest) && strings.HasPrefix(rest, "without") {
+			return true
+		}
+	}
+	return false
 }
 
 // translateLogQuery handles log queries (non-metric).
@@ -465,19 +498,16 @@ func tryTranslateBinaryMetricExpr(logql string) (string, bool) {
 	return "", false
 }
 
-// isScalar returns true if the string is a numeric constant.
 // IsScalar returns true if the string is a numeric constant.
+// Handles integers, floats, negatives, and scientific notation (e.g., 1e5, 1.5e-3, -42).
 func IsScalar(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
 	}
-	for _, ch := range s {
-		if ch != '.' && (ch < '0' || ch > '9') {
-			return false
-		}
-	}
-	return true
+	// Use strconv.ParseFloat which handles all numeric formats
+	_, err := strconv.ParseFloat(s, 64)
+	return err == nil
 }
 
 // ParseBinaryMetricExpr parses a "__binary__:op:left|||right" string.

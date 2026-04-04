@@ -1,0 +1,112 @@
+# API Reference
+
+## Loki-Compatible Endpoints
+
+| Loki Endpoint | Status | VL Backend | Cached | Tests |
+|---|---|---|---|---|
+| `POST /loki/api/v1/query_range` (logs) | Implemented | `/select/logsql/query` | 10s | 6 |
+| `POST /loki/api/v1/query_range` (metrics) | Implemented | `/select/logsql/stats_query_range` | 10s | 1 |
+| `GET /loki/api/v1/query` | Implemented | `/select/logsql/query` or `stats_query` | 10s | 1 |
+| `GET /loki/api/v1/labels` | Implemented | `/select/logsql/field_names` | 60s | 3 |
+| `GET /loki/api/v1/label/{name}/values` | Implemented | `/select/logsql/field_values` | 60s | 3 |
+| `GET /loki/api/v1/series` | Implemented | `/select/logsql/streams` | 30s | 2 |
+| `GET /loki/api/v1/index/stats` | Implemented | `/select/logsql/hits` | - | 2 |
+| `GET /loki/api/v1/index/volume` | Implemented | `/select/logsql/hits` (field grouping) | - | 2 |
+| `GET /loki/api/v1/index/volume_range` | Implemented | `/select/logsql/hits` (step) | - | 2 |
+| `GET /loki/api/v1/detected_fields` | Implemented | `/select/logsql/field_names` | 30s | 1 |
+| `GET /loki/api/v1/detected_field/{name}/values` | Implemented | `/select/logsql/field_values` | - | 1 |
+| `GET /loki/api/v1/detected_labels` | Implemented | `/select/logsql/field_names` | - | 1 |
+| `GET /loki/api/v1/patterns` | Implemented | `/select/logsql/query` + pattern extraction | - | 3 |
+| `GET /loki/api/v1/format_query` | Implemented | - (passthrough) | - | 1 |
+| `WS /loki/api/v1/tail` | Implemented | `/select/logsql/tail` (WebSocket->NDJSON) | - | 2 |
+
+## Delete Endpoint (Exception)
+
+| Endpoint | Method | VL Backend |
+|---|---|---|
+| `/loki/api/v1/delete` | POST | `/select/logsql/delete` |
+
+The delete endpoint is the only write operation exposed. It includes strict safeguards:
+
+- **Confirmation header**: Requires `X-Delete-Confirmation: true`
+- **Query required**: Must target specific streams (no wildcards `{}` or `*`)
+- **Time range required**: Both `start` and `end` parameters mandatory
+- **Time range limit**: Maximum 30 days per delete operation
+- **Tenant scoping**: Deletes scoped to the requesting tenant's data
+- **Audit logging**: All delete operations logged at WARN level with tenant, query, time range, client IP
+
+### Example
+
+```bash
+curl -X POST 'http://proxy:3100/loki/api/v1/delete' \
+  -H 'X-Delete-Confirmation: true' \
+  -H 'X-Scope-OrgID: team-alpha' \
+  -d 'query={app="nginx",env="staging"}&start=1704067200&end=1704153600'
+```
+
+## Write Endpoint (Blocked)
+
+| Endpoint | Response |
+|---|---|
+| `POST /loki/api/v1/push` | 405 Method Not Allowed |
+
+This is a read-only proxy. Log ingestion should go directly to VictoriaLogs.
+
+## Admin Stubs
+
+| Endpoint | Response | Purpose |
+|---|---|---|
+| `GET /loki/api/v1/rules` | Empty rules | Grafana Alerting compatibility |
+| `GET /api/prom/rules` | Empty rules | Grafana Alerting compatibility |
+| `GET /loki/api/v1/alerts` | Empty alerts | Grafana Alerting compatibility |
+| `GET /api/prom/alerts` | Empty alerts | Grafana Alerting compatibility |
+| `GET /config` | YAML stub | Configuration endpoint |
+
+## Infrastructure Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /ready` | Readiness probe (checks VL `/health` + circuit breaker) |
+| `GET /loki/api/v1/status/buildinfo` | Fake Loki 2.9.0 build info for Grafana detection |
+| `GET /metrics` | Prometheus text exposition |
+| `GET /debug/queries` | Query analytics (top queries, slow queries) |
+| `GET /debug/pprof/` | Go profiling |
+
+## Observability
+
+### Metrics (Prometheus)
+
+```
+# Request tracking
+loki_vl_proxy_requests_total{endpoint, status}
+loki_vl_proxy_request_duration_seconds{endpoint}  (histogram)
+
+# Per-tenant tracking
+loki_vl_proxy_tenant_requests_total{tenant, endpoint, status}
+loki_vl_proxy_tenant_request_duration_seconds{tenant, endpoint}  (histogram)
+
+# Client error breakdown
+loki_vl_proxy_client_errors_total{endpoint, reason}
+
+# Cache efficiency
+loki_vl_proxy_cache_hits_total
+loki_vl_proxy_cache_misses_total
+
+# Translation tracking
+loki_vl_proxy_translations_total
+loki_vl_proxy_translation_errors_total
+
+# Circuit breaker
+loki_vl_proxy_circuit_breaker_state  (0=closed, 1=open, 2=half-open)
+
+# System
+loki_vl_proxy_uptime_seconds
+```
+
+### Request Logs
+
+Structured JSON to stdout:
+
+```json
+{"time":"2026-04-04T10:30:00Z","level":"INFO","msg":"request","endpoint":"query_range","method":"GET","status":200,"duration_ms":42,"tenant":"team-alpha","query":"{app=\"nginx\"} |= \"error\"","client":"10.0.1.42:5678"}
+```
