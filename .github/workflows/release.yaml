@@ -16,8 +16,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: "1.26.1"
           cache: true
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
       - name: Run tests with race detector
         run: go test ./... -count=1 -race
 
@@ -30,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: "1.26.1"
           cache: true
 
       - name: Start e2e stack
@@ -80,7 +83,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: "1.26.1"
           cache: true
 
       - name: Extract version
@@ -188,6 +191,9 @@ jobs:
             echo ""
             echo "# Binary"
             echo "# Download from release assets below"
+            echo ""
+            echo "# Helm chart package"
+            echo "# Download loki-vl-proxy-${VERSION}.tgz from release assets below"
             echo '```'
 
             echo "CHANGELOG_EOF"
@@ -211,6 +217,14 @@ jobs:
           # Create checksums
           cd dist && sha256sum loki-vl-proxy-* > checksums.txt
 
+      - name: Package Helm chart
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          helm package charts/loki-vl-proxy \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination dist
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -229,7 +243,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:latest
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -242,3 +255,4 @@ jobs:
           files: |
             dist/loki-vl-proxy-*
             dist/checksums.txt
+            dist/loki-vl-proxy-*.tgz

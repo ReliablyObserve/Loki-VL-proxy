@@ -47,9 +47,12 @@ type Metrics struct {
 	clientErrors map[string]*atomic.Int64 // "endpoint:reason" → count
 
 	// Per-client identity metrics
-	clientRequests  map[string]*atomic.Int64 // "client:endpoint" → count
-	clientDurations map[string]*histogram    // "client:endpoint" → duration histogram
-	clientBytes     map[string]*atomic.Int64 // "client" → response bytes
+	clientRequests     map[string]*atomic.Int64 // "client:endpoint" → count
+	clientDurations    map[string]*histogram    // "client:endpoint" → duration histogram
+	clientBytes        map[string]*atomic.Int64 // "client" → response bytes
+	clientStatuses     map[string]*atomic.Int64 // "client:endpoint:status" → count
+	clientInflight     map[string]*atomic.Int64 // "client" → in-flight requests
+	clientQueryLengths map[string]*histogram    // "client:endpoint" → query length histogram
 
 	// Active connections
 	activeRequests atomic.Int64
@@ -128,6 +131,9 @@ func NewMetricsWithLimits(maxTenantLabels, maxClientLabels int) *Metrics {
 		clientRequests:      make(map[string]*atomic.Int64),
 		clientDurations:     make(map[string]*histogram),
 		clientBytes:         make(map[string]*atomic.Int64),
+		clientStatuses:      make(map[string]*atomic.Int64),
+		clientInflight:      make(map[string]*atomic.Int64),
+		clientQueryLengths:  make(map[string]*histogram),
 		system:              NewSystemMetrics(),
 		startTime:           time.Now(),
 		maxTenantLabels:     maxTenantLabels,
@@ -254,40 +260,46 @@ func (m *Metrics) RecordClientIdentity(clientID, endpoint string, duration time.
 	bytesCounter.Add(responseBytes)
 }
 
-// ResolveClientID extracts the client identity from an HTTP request.
+// ResolveClientContext extracts the client identity from an HTTP request and describes its source.
 // Priority with trusted proxy headers: X-Grafana-User > X-Scope-OrgID > basic auth user > X-Forwarded-For > remote IP.
 // Priority without trusted proxy headers: X-Scope-OrgID > basic auth user > remote IP.
-func ResolveClientID(r *http.Request, trustProxyHeaders bool) string {
+func ResolveClientContext(r *http.Request, trustProxyHeaders bool) (string, string) {
 	// Grafana sets this header when proxying datasource requests
 	if trustProxyHeaders {
 		if user := strings.TrimSpace(r.Header.Get("X-Grafana-User")); user != "" {
-			return user
+			return user, "grafana_user"
 		}
 	}
 	// Tenant ID (X-Scope-OrgID)
 	if tenant := strings.TrimSpace(r.Header.Get("X-Scope-OrgID")); tenant != "" {
-		return tenant
+		return tenant, "tenant"
 	}
 	// Basic auth username
 	if user, _, ok := r.BasicAuth(); ok && user != "" {
-		return user
+		return user, "basic_auth"
 	}
 	// Forwarded client IP
 	if trustProxyHeaders {
 		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
 			// Take first IP (original client)
 			if idx := strings.IndexByte(fwd, ','); idx > 0 {
-				return strings.TrimSpace(fwd[:idx])
+				return strings.TrimSpace(fwd[:idx]), "forwarded_for"
 			}
-			return strings.TrimSpace(fwd)
+			return strings.TrimSpace(fwd), "forwarded_for"
 		}
 	}
 	// Remote address (IP:port → strip port)
 	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err == nil && host != "" {
-		return host
+		return host, "remote_addr"
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	return strings.TrimSpace(r.RemoteAddr), "remote_addr"
+}
+
+// ResolveClientID extracts the client identity from an HTTP request.
+func ResolveClientID(r *http.Request, trustProxyHeaders bool) string {
+	clientID, _ := ResolveClientContext(r, trustProxyHeaders)
+	return clientID
 }
 
 func sanitizeMetricIdentity(v string, emptyFallback string) string {
@@ -347,6 +359,64 @@ func (m *Metrics) RecordClientError(endpoint, reason string) {
 		m.mu.Unlock()
 	}
 	counter.Add(1)
+}
+
+// RecordClientStatus records the final HTTP status observed for a client request.
+func (m *Metrics) RecordClientStatus(clientID, endpoint string, statusCode int) {
+	clientID = m.canonicalClientLabel(clientID)
+	key := fmt.Sprintf("%s:%s:%d", clientID, endpoint, statusCode)
+	m.mu.RLock()
+	counter, ok := m.clientStatuses[key]
+	m.mu.RUnlock()
+	if !ok {
+		m.mu.Lock()
+		counter, ok = m.clientStatuses[key]
+		if !ok {
+			counter = &atomic.Int64{}
+			m.clientStatuses[key] = counter
+		}
+		m.mu.Unlock()
+	}
+	counter.Add(1)
+}
+
+// RecordClientInflight tracks currently active requests for a client.
+func (m *Metrics) RecordClientInflight(clientID string, delta int64) {
+	clientID = m.canonicalClientLabel(clientID)
+	m.mu.RLock()
+	gauge, ok := m.clientInflight[clientID]
+	m.mu.RUnlock()
+	if !ok {
+		m.mu.Lock()
+		gauge, ok = m.clientInflight[clientID]
+		if !ok {
+			gauge = &atomic.Int64{}
+			m.clientInflight[clientID] = gauge
+		}
+		m.mu.Unlock()
+	}
+	if gauge.Add(delta) < 0 {
+		gauge.Store(0)
+	}
+}
+
+// RecordClientQueryLength records the LogQL query length seen for a client and endpoint.
+func (m *Metrics) RecordClientQueryLength(clientID, endpoint string, queryLength int) {
+	clientID = m.canonicalClientLabel(clientID)
+	key := fmt.Sprintf("%s:%s", clientID, endpoint)
+	m.mu.RLock()
+	hist, ok := m.clientQueryLengths[key]
+	m.mu.RUnlock()
+	if !ok {
+		m.mu.Lock()
+		hist, ok = m.clientQueryLengths[key]
+		if !ok {
+			hist = newHistogram()
+			m.clientQueryLengths[key] = hist
+		}
+		m.mu.Unlock()
+	}
+	hist.observe(float64(queryLength))
 }
 
 func (m *Metrics) RecordCacheHit()         { m.cacheHits.Add(1) }
@@ -638,6 +708,34 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 			client, m.clientBytes[client].Load())
 	}
 
+	sb.WriteString("# HELP loki_vl_proxy_client_status_total Requests by client identity and final HTTP status.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_client_status_total counter\n")
+	csKeys := make([]string, 0, len(m.clientStatuses))
+	for k := range m.clientStatuses {
+		csKeys = append(csKeys, k)
+	}
+	sort.Strings(csKeys)
+	for _, key := range csKeys {
+		parts := strings.SplitN(key, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_status_total{client=%q,endpoint=%q,status=%q} %d\n",
+			parts[0], parts[1], parts[2], m.clientStatuses[key].Load())
+	}
+
+	sb.WriteString("# HELP loki_vl_proxy_client_inflight_requests In-flight requests by client identity.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_client_inflight_requests gauge\n")
+	ciKeys := make([]string, 0, len(m.clientInflight))
+	for k := range m.clientInflight {
+		ciKeys = append(ciKeys, k)
+	}
+	sort.Strings(ciKeys)
+	for _, client := range ciKeys {
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_inflight_requests{client=%q} %d\n",
+			client, m.clientInflight[client].Load())
+	}
+
 	sb.WriteString("# HELP loki_vl_proxy_client_request_duration_seconds Per-client request duration.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_client_request_duration_seconds histogram\n")
 	cdKeys := make([]string, 0, len(m.clientDurations))
@@ -662,6 +760,34 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&sb, "loki_vl_proxy_client_request_duration_seconds_sum{client=%q,endpoint=%q} %g\n",
 			client, ep, h.sum)
 		fmt.Fprintf(&sb, "loki_vl_proxy_client_request_duration_seconds_count{client=%q,endpoint=%q} %d\n",
+			client, ep, h.count)
+		h.mu.Unlock()
+	}
+
+	sb.WriteString("# HELP loki_vl_proxy_client_query_length_chars LogQL query length by client identity.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_client_query_length_chars histogram\n")
+	cqKeys := make([]string, 0, len(m.clientQueryLengths))
+	for k := range m.clientQueryLengths {
+		cqKeys = append(cqKeys, k)
+	}
+	sort.Strings(cqKeys)
+	for _, key := range cqKeys {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		client, ep := parts[0], parts[1]
+		h := m.clientQueryLengths[key]
+		h.mu.Lock()
+		for i, b := range h.buckets {
+			fmt.Fprintf(&sb, "loki_vl_proxy_client_query_length_chars_bucket{client=%q,endpoint=%q,le=\"%g\"} %d\n",
+				client, ep, b, h.counts[i])
+		}
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_query_length_chars_bucket{client=%q,endpoint=%q,le=\"+Inf\"} %d\n",
+			client, ep, h.count)
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_query_length_chars_sum{client=%q,endpoint=%q} %g\n",
+			client, ep, h.sum)
+		fmt.Fprintf(&sb, "loki_vl_proxy_client_query_length_chars_count{client=%q,endpoint=%q} %d\n",
 			client, ep, h.count)
 		h.mu.Unlock()
 	}

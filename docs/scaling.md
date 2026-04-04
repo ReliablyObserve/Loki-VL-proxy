@@ -210,10 +210,10 @@ sum(rate(loki_vl_proxy_tenant_requests_total{status=~"4..|5.."}[5m])) by (tenant
 ### Per-Client (User Identity)
 
 Client identity is resolved from (priority order):
-1. `X-Grafana-User` header (Grafana sets this when proxying)
+1. `X-Grafana-User` header when `-metrics.trust-proxy-headers=true`
 2. `X-Scope-OrgID` header (tenant)
 3. Basic auth username
-4. `X-Forwarded-For` (original client IP)
+4. `X-Forwarded-For` when `-metrics.trust-proxy-headers=true`
 5. Remote IP (fallback)
 
 ```promql
@@ -228,6 +228,30 @@ histogram_quantile(0.95, rate(loki_vl_proxy_client_request_duration_seconds_buck
 
 # Top 10 clients by request count
 topk(10, sum(rate(loki_vl_proxy_client_requests_total[5m])) by (client))
+
+# Clients generating the most 429s
+topk(10, sum(rate(loki_vl_proxy_client_status_total{status="429"}[5m])) by (client))
+
+# Clients issuing the largest queries
+topk(10, histogram_quantile(0.95, rate(loki_vl_proxy_client_query_length_chars_bucket[5m])))
+```
+
+### Fleet Peer-Cache
+
+```promql
+# Current remote peers per proxy
+loki_vl_proxy_peer_cache_peers
+
+# Total fleet members in the hash ring
+loki_vl_proxy_peer_cache_cluster_members
+
+# Peer cache effectiveness
+rate(loki_vl_proxy_peer_cache_hits_total[5m])
+/
+(rate(loki_vl_proxy_peer_cache_hits_total[5m]) + rate(loki_vl_proxy_peer_cache_misses_total[5m]))
+
+# Peer fetch failure rate
+rate(loki_vl_proxy_peer_cache_errors_total[5m])
 ```
 
 ### Cache Efficiency

@@ -109,6 +109,47 @@ func TestResolveClientID_IgnoresUntrustedProxyHeadersByDefault(t *testing.T) {
 	}
 }
 
+func TestResolveClientID_UsesTrustedGrafanaUser(t *testing.T) {
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	req.Header.Set("X-Grafana-User", "grafana-user")
+	req.Header.Set("X-Scope-OrgID", "tenant-a")
+	req.RemoteAddr = "198.51.100.20:1234"
+
+	got := ResolveClientID(req, true)
+	if got != "grafana-user" {
+		t.Fatalf("expected trusted grafana user to win, got %q", got)
+	}
+}
+
+func TestMetrics_Handler_ExportsClientCentricBreakdowns(t *testing.T) {
+	m := NewMetrics()
+	m.RecordClientIdentity("grafana-user", "query_range", 20*time.Millisecond, 512)
+	m.RecordClientStatus("grafana-user", "query_range", http.StatusTooManyRequests)
+	m.RecordClientInflight("grafana-user", 1)
+	m.RecordClientQueryLength("grafana-user", "query_range", len(`{app="api"}`))
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	m.Handler(w, r)
+
+	body := w.Body.String()
+	for _, metric := range []string{
+		"loki_vl_proxy_client_status_total",
+		"loki_vl_proxy_client_inflight_requests",
+		"loki_vl_proxy_client_query_length_chars_bucket",
+	} {
+		if !strings.Contains(body, metric) {
+			t.Fatalf("expected %s in metrics output", metric)
+		}
+	}
+	if !strings.Contains(body, `client="grafana-user"`) {
+		t.Fatal("expected client label in client-centric metrics")
+	}
+	if !strings.Contains(body, `status="429"`) {
+		t.Fatal("expected per-client status metric for 429")
+	}
+}
+
 func TestMetrics_Handler_BoundsTenantAndClientCardinality(t *testing.T) {
 	m := NewMetricsWithLimits(1, 1)
 	m.RecordTenantRequest("team-a", "query_range", 200, 10*time.Millisecond)

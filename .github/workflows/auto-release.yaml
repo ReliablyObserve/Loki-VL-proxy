@@ -92,7 +92,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: "1.26.1"
           cache: true
 
       - name: Collect metrics
@@ -163,6 +163,8 @@ jobs:
           VERSION="${{ needs.prepare-release.outputs.next_version }}"
 
           sed -i "s|tests-[0-9]*%20passed|tests-${TESTS}%20passed|g" README.md
+          sed -i "s/^version: .*/version: ${VERSION}/" charts/loki-vl-proxy/Chart.yaml
+          sed -i "s/^appVersion: .*/appVersion: \"${VERSION}\"/" charts/loki-vl-proxy/Chart.yaml
 
       - name: Create release PR
         id: create_release_pr
@@ -179,7 +181,7 @@ jobs:
           # Delete stale release branch if it exists from a previous run
           git push origin --delete "$BRANCH" 2>/dev/null || true
           git checkout -b "$BRANCH"
-          git add CHANGELOG.md README.md
+          git add CHANGELOG.md README.md charts/loki-vl-proxy/Chart.yaml
           git diff --cached --quiet && { echo "No changes to release"; exit 0; }
           git commit -m "chore: release v${VERSION} [skip ci]"
           git push origin "$BRANCH"

@@ -60,3 +60,43 @@ func TestDatasourceCompat_BackendTimeoutIsConfigurable(t *testing.T) {
 		t.Fatalf("expected backend timeout to be configurable, got %s", p.client.Timeout)
 	}
 }
+
+func TestDatasourceCompat_ForwardsTrustedGrafanaUserContext(t *testing.T) {
+	var gotGrafanaUser, gotClientID, gotClientSource string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotGrafanaUser = r.Header.Get("X-Grafana-User")
+		gotClientID = r.Header.Get("X-Loki-VL-Client-ID")
+		gotClientSource = r.Header.Get("X-Loki-VL-Client-Source")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"values": []map[string]interface{}{},
+		})
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL:               vlBackend.URL,
+		Cache:                    c,
+		LogLevel:                 "error",
+		MetricsTrustProxyHeaders: true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+	req.Header.Set("X-Grafana-User", "grafana-user@example.com")
+	req.RemoteAddr = "198.51.100.20:1234"
+	w := httptest.NewRecorder()
+	p.handleLabels(w, req)
+
+	if gotGrafanaUser != "grafana-user@example.com" {
+		t.Fatalf("expected trusted X-Grafana-User to be forwarded, got %q", gotGrafanaUser)
+	}
+	if gotClientID != "grafana-user@example.com" {
+		t.Fatalf("expected resolved client id header, got %q", gotClientID)
+	}
+	if gotClientSource != "grafana_user" {
+		t.Fatalf("expected client source to describe trusted grafana user, got %q", gotClientSource)
+	}
+}

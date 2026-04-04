@@ -163,14 +163,19 @@ func TestTenant_AuthEnabledRequiresHeader(t *testing.T) {
 	}
 }
 
-func TestTenant_GlobalBypassDisabledByDefault(t *testing.T) {
+func TestTenant_GlobalBypassDisabledWhenMappingsConfigured(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("backend should not be called when global tenant bypass is disabled")
 	}))
 	defer vlBackend.Close()
 
 	c := cache.New(60*time.Second, 1000)
-	p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+	p, _ := New(Config{
+		BackendURL: vlBackend.URL,
+		Cache:      c,
+		LogLevel:   "error",
+		TenantMap:  map[string]TenantMapping{"known": {AccountID: "1", ProjectID: "0"}},
+	})
 
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
@@ -182,6 +187,125 @@ func TestTenant_GlobalBypassDisabledByDefault(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for wildcard tenant bypass, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTenant_GlobalBypassAllowedWithoutMappings(t *testing.T) {
+	tests := []struct {
+		name  string
+		orgID string
+	}{
+		{name: "wildcard", orgID: "*"},
+		{name: "zero", orgID: "0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedAccountID, receivedProjectID string
+			vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedAccountID = r.Header.Get("AccountID")
+				receivedProjectID = r.Header.Get("ProjectID")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"values": []map[string]interface{}{},
+				})
+			}))
+			defer vlBackend.Close()
+
+			c := cache.New(60*time.Second, 1000)
+			p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+
+			mux := http.NewServeMux()
+			p.RegisterRoutes(mux)
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+			r.Header.Set("X-Scope-OrgID", tc.orgID)
+			mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 for OrgID=%q without tenant mappings, got %d body=%s", tc.orgID, w.Code, w.Body.String())
+			}
+			if receivedAccountID != "" || receivedProjectID != "" {
+				t.Fatalf("expected OrgID=%q to use backend default tenant, got AccountID=%q ProjectID=%q", tc.orgID, receivedAccountID, receivedProjectID)
+			}
+		})
+	}
+}
+
+func TestTenant_GlobalBypassRequiresOptInWhenMappingsConfigured(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("backend should not be called when tenant mappings are configured and global bypass is disabled")
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{
+		BackendURL: vlBackend.URL,
+		Cache:      c,
+		LogLevel:   "error",
+		TenantMap:  map[string]TenantMapping{"known": {AccountID: "1", ProjectID: "0"}},
+	})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	for _, orgID := range []string{"*", "0"} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+		r.Header.Set("X-Scope-OrgID", orgID)
+		mux.ServeHTTP(w, r)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for OrgID=%q when tenant mappings are configured, got %d body=%s", orgID, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestTenant_GlobalBypassAllowedWhenMappingsConfiguredAndOptedIn(t *testing.T) {
+	tests := []struct {
+		name  string
+		orgID string
+	}{
+		{name: "wildcard", orgID: "*"},
+		{name: "zero", orgID: "0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedAccountID, receivedProjectID string
+			vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedAccountID = r.Header.Get("AccountID")
+				receivedProjectID = r.Header.Get("ProjectID")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"values": []map[string]interface{}{},
+				})
+			}))
+			defer vlBackend.Close()
+
+			c := cache.New(60*time.Second, 1000)
+			p, _ := New(Config{
+				BackendURL:        vlBackend.URL,
+				Cache:             c,
+				LogLevel:          "error",
+				TenantMap:         map[string]TenantMapping{"known": {AccountID: "1", ProjectID: "0"}},
+				AllowGlobalTenant: true,
+			})
+
+			mux := http.NewServeMux()
+			p.RegisterRoutes(mux)
+
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+			r.Header.Set("X-Scope-OrgID", tc.orgID)
+			mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200 for OrgID=%q when global bypass is enabled, got %d body=%s", tc.orgID, w.Code, w.Body.String())
+			}
+			if receivedAccountID != "" || receivedProjectID != "" {
+				t.Fatalf("expected OrgID=%q to use backend default tenant, got AccountID=%q ProjectID=%q", tc.orgID, receivedAccountID, receivedProjectID)
+			}
+		})
 	}
 }
 

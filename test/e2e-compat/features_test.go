@@ -138,10 +138,9 @@ func TestFeature_IndexVolumeRange_ReturnsMatrix(t *testing.T) {
 // Multitenancy (X-Scope-OrgID → AccountID/ProjectID)
 // =============================================================================
 
-func TestFeature_Multitenancy_DefaultTenantBypassDisabled(t *testing.T) {
+func TestFeature_Multitenancy_DefaultTenantBypassUsesVLGlobalTenantWithoutMappings(t *testing.T) {
 	score := &CompatScore{}
 
-	// Global/default-tenant bypass is intentionally disabled unless explicitly enabled.
 	now := time.Now()
 	params := url.Values{}
 	params.Set("query", `{app="api-gateway"}`)
@@ -149,17 +148,19 @@ func TestFeature_Multitenancy_DefaultTenantBypassDisabled(t *testing.T) {
 	params.Set("end", fmt.Sprintf("%d", now.UnixNano()))
 	params.Set("limit", "10")
 
-	req, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/query_range?"+params.Encode(), nil)
-	req.Header.Set("X-Scope-OrgID", "0")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		score.fail("multitenancy", "request failed: "+err.Error())
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusForbidden {
-			score.pass("multitenancy", "OrgID=0 rejected by default")
+	for _, orgID := range []string{"0", "*"} {
+		req, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/query_range?"+params.Encode(), nil)
+		req.Header.Set("X-Scope-OrgID", orgID)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			score.fail("multitenancy", fmt.Sprintf("request with OrgID=%s failed: %v", orgID, err))
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			score.pass("multitenancy", fmt.Sprintf("OrgID=%s uses VL default tenant when no tenant map is configured", orgID))
 		} else {
-			score.fail("multitenancy", fmt.Sprintf("expected OrgID=0 to be rejected, got %d", resp.StatusCode))
+			score.fail("multitenancy", fmt.Sprintf("expected OrgID=%s to use VL default tenant, got %d", orgID, resp.StatusCode))
 		}
 	}
 

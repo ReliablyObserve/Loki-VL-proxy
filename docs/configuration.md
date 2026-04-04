@@ -66,14 +66,16 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 |---|---|---|---|
 | `-tenant-map` | `TENANT_MAP` | — | JSON string→int tenant mapping |
 | `-auth.enabled` | — | `false` | Require `X-Scope-OrgID` on query requests |
-| `-tenant.allow-global` | — | `false` | Allow `X-Scope-OrgID` of `0` or `*` to use the backend default tenant |
+| `-tenant.allow-global` | — | `false` | Allow `X-Scope-OrgID` of `0` or `*` to use the backend default tenant even when a tenant map is configured |
 
 ### Tenant Resolution Order
 
-1. **Tenant map lookup** — if `-tenant-map` is configured and the org ID matches a key, use the mapped `AccountID`/`ProjectID`
-2. **Numeric passthrough** — if the org ID is a number (e.g., `"42"`), pass it directly as `AccountID` with `ProjectID: 0`
-3. **Fail closed** — unmapped non-numeric org IDs are rejected with `403 Forbidden`
-4. **Optional global bypass** — `X-Scope-OrgID` values `0` and `*` are rejected unless `-tenant.allow-global=true`
+1. **No header** — when `-auth.enabled=false`, requests without `X-Scope-OrgID` use VictoriaLogs' backend default tenant, which is `AccountID=0` and `ProjectID=0`
+2. **Tenant map lookup** — if `-tenant-map` is configured and the org ID matches a key, use the mapped `AccountID`/`ProjectID`
+3. **Single-tenant global bypass** — if no tenant map is configured, `X-Scope-OrgID` values `0` and `*` also use the backend default tenant without rewriting headers
+4. **Numeric passthrough** — if the org ID is a number other than the global-bypass cases (e.g., `"42"`), pass it directly as `AccountID` with `ProjectID: 0`
+5. **Fail closed** — unmapped non-numeric org IDs are rejected with `403 Forbidden`
+6. **Optional mapped-mode global bypass** — when a tenant map is configured, `0` and `*` stay rejected unless `-tenant.allow-global=true`
 
 ### Configuration Examples
 
@@ -98,6 +100,23 @@ datasources:
     secureJsonData:
       httpHeaderValue1: team-alpha
 ```
+
+### Grafana Datasource for Single-Tenant VictoriaLogs
+
+If the backend only uses VictoriaLogs' default tenant, you can keep Grafana simple:
+
+```yaml
+datasources:
+  - name: Logs (global tenant)
+    type: loki
+    url: http://loki-vl-proxy:3100
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: "0"
+```
+
+`X-Scope-OrgID: "0"` and `X-Scope-OrgID: "*"` both resolve to VL's default `0:0` tenant when no tenant map is configured. If you later introduce a tenant map, keep that behavior only by explicitly setting `-tenant.allow-global=true`.
 
 ### Hot Reload
 
@@ -151,7 +170,7 @@ kill -HUP $(pidof loki-vl-proxy)
 | `-server.admin-auth-token` | — | — | Bearer token accepted on admin/debug endpoints |
 | `-metrics.max-tenants` | — | `256` | Max unique tenant labels retained in `/metrics` before using `__overflow__` |
 | `-metrics.max-clients` | — | `256` | Max unique client labels retained in `/metrics` before using `__overflow__` |
-| `-metrics.trust-proxy-headers` | — | `false` | Trust `X-Grafana-User` and `X-Forwarded-For` for client metrics |
+| `-metrics.trust-proxy-headers` | — | `false` | Trust `X-Grafana-User` and `X-Forwarded-For` for client metrics, logs, and backend client-context forwarding |
 
 ## Grafana Datasource Mapping
 
@@ -168,5 +187,7 @@ These Grafana Loki datasource settings now have a direct proxy-side mapping:
 | Allowed cookies | `-forward-cookies` |
 | Timeout | `-backend-timeout` for proxy→VL, Grafana datasource timeout for Grafana→proxy |
 | Maximum lines | `-max-lines` |
+
+When `-metrics.trust-proxy-headers=true`, the proxy also forwards `X-Grafana-User` plus derived `X-Loki-VL-Client-ID` and `X-Loki-VL-Client-Source` headers to the backend so downstream logs and stats can attribute expensive queries to real Grafana users instead of only source IPs.
 
 Alerting datasource integration is still partial: the proxy exposes empty rules/alerts stubs for datasource compatibility, but it does not implement a full Loki ruler API.

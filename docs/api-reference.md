@@ -87,12 +87,27 @@ loki_vl_proxy_request_duration_seconds{endpoint}  (histogram)
 loki_vl_proxy_tenant_requests_total{tenant, endpoint, status}
 loki_vl_proxy_tenant_request_duration_seconds{tenant, endpoint}  (histogram)
 
+# Per-client tracking
+loki_vl_proxy_client_requests_total{client, endpoint}
+loki_vl_proxy_client_response_bytes_total{client}
+loki_vl_proxy_client_status_total{client, endpoint, status}
+loki_vl_proxy_client_inflight_requests{client}
+loki_vl_proxy_client_request_duration_seconds{client, endpoint}  (histogram)
+loki_vl_proxy_client_query_length_chars{client, endpoint}  (histogram)
+
 # Client error breakdown
 loki_vl_proxy_client_errors_total{endpoint, reason}
 
 # Cache efficiency
 loki_vl_proxy_cache_hits_total
 loki_vl_proxy_cache_misses_total
+
+# Fleet peer-cache visibility
+loki_vl_proxy_peer_cache_peers
+loki_vl_proxy_peer_cache_cluster_members
+loki_vl_proxy_peer_cache_hits_total
+loki_vl_proxy_peer_cache_misses_total
+loki_vl_proxy_peer_cache_errors_total
 
 # Translation tracking
 loki_vl_proxy_translations_total
@@ -110,5 +125,5 @@ loki_vl_proxy_uptime_seconds
 Structured JSON to stdout:
 
 ```json
-{"time":"2026-04-04T10:30:00Z","level":"INFO","msg":"request","endpoint":"query_range","method":"GET","status":200,"duration_ms":42,"tenant":"team-alpha","query":"{app=\"nginx\"} |= \"error\"","client":"10.0.1.42:5678"}
+{"time":"2026-04-04T10:30:00Z","level":"INFO","msg":"request","endpoint":"query_range","method":"GET","status":200,"duration_ms":42,"tenant":"team-alpha","query":"{app=\"nginx\"} |= \"error\"","client":"10.0.1.42:5678","client_id":"alice@example.com","client_source":"grafana_user"}
 ```

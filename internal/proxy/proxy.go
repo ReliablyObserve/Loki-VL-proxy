@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	_ "net/http/pprof"
 	"net/url"
 	"os"
@@ -406,7 +407,7 @@ func (p *Proxy) validateTenantHeader(r *http.Request) error {
 		}
 	}
 	if orgID == "*" || orgID == "0" {
-		if p.allowGlobalTenant {
+		if p.globalTenantAllowed() {
 			return nil
 		}
 		return &requestPolicyError{
@@ -429,6 +430,15 @@ func (p *Proxy) validateTenantHeader(r *http.Request) error {
 		status: http.StatusForbidden,
 		msg:    fmt.Sprintf("unknown tenant %q", orgID),
 	}
+}
+
+func (p *Proxy) globalTenantAllowed() bool {
+	if p.allowGlobalTenant {
+		return true
+	}
+	p.configMu.RLock()
+	defer p.configMu.RUnlock()
+	return len(p.tenantMap) == 0
 }
 
 func (p *Proxy) tenantMiddleware(next http.Handler) http.Handler {
@@ -569,7 +579,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 
 	if p.registerInstrumentation {
 		// Prometheus metrics endpoint — NOT rate-limited
-		mux.HandleFunc("/metrics", p.metrics.Handler)
+		mux.HandleFunc("/metrics", p.handleMetrics)
 		if p.enablePprof {
 			mux.Handle("/debug/pprof/cmdline", p.adminMiddleware(http.NotFoundHandler()))
 			mux.Handle("/debug/pprof/", p.adminMiddleware(http.DefaultServeMux))
@@ -586,6 +596,51 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 			p.peerCache.ServeHTTP(w, r, p.cache)
 		}))))
 	}
+}
+
+func (p *Proxy) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	rec := httptest.NewRecorder()
+	p.metrics.Handler(rec, r)
+
+	for k, vals := range rec.Header() {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	if p.peerCache != nil {
+		_, _ = rec.Body.WriteString(p.peerCacheMetrics())
+	}
+
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(rec.Body.Bytes())
+}
+
+func (p *Proxy) peerCacheMetrics() string {
+	stats := p.peerCache.Stats()
+	remotePeers, _ := stats["peers"].(int)
+	hits, _ := stats["peer_hits"].(int64)
+	misses, _ := stats["peer_misses"].(int64)
+	errors, _ := stats["peer_errors"].(int64)
+	clusterMembers := len(p.peerCache.Peers())
+
+	return fmt.Sprintf(
+		"# HELP loki_vl_proxy_peer_cache_peers Number of remote peers currently in the fleet cache ring.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_peers gauge\n"+
+			"loki_vl_proxy_peer_cache_peers %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_cluster_members Number of total cache ring members including this proxy instance.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_cluster_members gauge\n"+
+			"loki_vl_proxy_peer_cache_cluster_members %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_hits_total Successful peer-cache fetches.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_hits_total counter\n"+
+			"loki_vl_proxy_peer_cache_hits_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_misses_total Peer-cache lookups that missed on the owner.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_misses_total counter\n"+
+			"loki_vl_proxy_peer_cache_misses_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_errors_total Peer-cache fetch errors.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_errors_total counter\n"+
+			"loki_vl_proxy_peer_cache_errors_total %d\n",
+		remotePeers, clusterMembers, hits, misses, errors,
+	)
 }
 
 // handleQueryRange translates Loki range queries.
@@ -2769,7 +2824,7 @@ func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 
 	// Wildcard: "*" or "0" → skip tenant headers, let VL serve all data
 	if orgID == "*" || orgID == "0" {
-		if p.allowGlobalTenant {
+		if p.globalTenantAllowed() {
 			return
 		}
 		return
@@ -2884,6 +2939,14 @@ func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 		vlReq.Header.Set(k, v)
 	}
 	if origReq, ok := vlReq.Context().Value(origRequestKey).(*http.Request); ok && origReq != nil {
+		clientID, clientSource := metrics.ResolveClientContext(origReq, p.metricsTrustProxyHeaders)
+		vlReq.Header.Set("X-Loki-VL-Client-ID", clientID)
+		vlReq.Header.Set("X-Loki-VL-Client-Source", clientSource)
+		if p.metricsTrustProxyHeaders {
+			if grafanaUser := strings.TrimSpace(origReq.Header.Get("X-Grafana-User")); grafanaUser != "" {
+				vlReq.Header.Set("X-Grafana-User", grafanaUser)
+			}
+		}
 		// Forward configured client headers from the original request
 		if len(p.forwardHeaders) > 0 {
 			for _, hdr := range p.forwardHeaders {
@@ -2939,6 +3002,9 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 		start := time.Now()
 		tenant := r.Header.Get("X-Scope-OrgID")
 		query := r.FormValue("query")
+		clientID, clientSource := metrics.ResolveClientContext(r, p.metricsTrustProxyHeaders)
+		p.metrics.RecordClientInflight(clientID, 1)
+		defer p.metrics.RecordClientInflight(clientID, -1)
 
 		sc := &statusCapture{ResponseWriter: w, code: 200}
 		next.ServeHTTP(sc, r)
@@ -2949,8 +3015,9 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 		p.metrics.RecordTenantRequest(tenant, endpoint, sc.code, elapsed)
 
 		// Per-client identity metrics (Grafana user > tenant > IP)
-		clientID := metrics.ResolveClientID(r, p.metricsTrustProxyHeaders)
 		p.metrics.RecordClientIdentity(clientID, endpoint, elapsed, int64(sc.bytesWritten))
+		p.metrics.RecordClientStatus(clientID, endpoint, sc.code)
+		p.metrics.RecordClientQueryLength(clientID, endpoint, len(query))
 
 		// Client error categorization
 		if sc.code >= 400 && sc.code < 500 {
@@ -2983,6 +3050,8 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 			"tenant", tenant,
 			"query", truncateQuery(query, 200),
 			"client", r.RemoteAddr,
+			"client_id", clientID,
+			"client_source", clientSource,
 		)
 	})
 }

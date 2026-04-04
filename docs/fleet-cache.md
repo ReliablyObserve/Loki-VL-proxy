@@ -204,6 +204,23 @@ extraArgs:
 | Hash ring lookup | O(log N) |
 | Discovery refresh | Every 15s (DNS only) |
 
+## Fleet Metrics
+
+The `/metrics` endpoint exports fleet-specific visibility for peer-cache behavior:
+
+```text
+loki_vl_proxy_peer_cache_peers                 # remote peers, excluding self
+loki_vl_proxy_peer_cache_cluster_members       # total ring members, including self
+loki_vl_proxy_peer_cache_hits_total            # successful peer fetches
+loki_vl_proxy_peer_cache_misses_total          # owner returned miss / near-expiry miss
+loki_vl_proxy_peer_cache_errors_total          # peer fetch failures
+```
+
+Use these together with the normal client metrics to tell apart:
+- backend pain caused by specific Grafana users or tenants
+- cache-ring imbalance or shrinking fleets
+- peer-to-peer failures that are forcing traffic back to VictoriaLogs
+
 ## Design Decisions
 
 | Decision | Why |
