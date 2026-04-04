@@ -711,7 +711,7 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 		params.Set("end", formatVLTimestamp(e))
 	}
 	if step := r.FormValue("step"); step != "" {
-		params.Set("step", step)
+		params.Set("step", formatVLStep(step))
 	}
 	// Forward targetLabels for field-level grouping (same as /volume)
 	if fields := r.FormValue("targetLabels"); fields != "" {
@@ -1426,7 +1426,7 @@ func (p *Proxy) proxyStatsQueryRange(w http.ResponseWriter, r *http.Request, log
 		params.Set("end", formatVLTimestamp(e))
 	}
 	if step := r.FormValue("step"); step != "" {
-		params.Set("step", step)
+		params.Set("step", formatVLStep(step))
 	}
 
 	resp, err := p.vlPost(r.Context(), "/select/logsql/stats_query_range", params)
@@ -1503,7 +1503,7 @@ func (p *Proxy) proxyBinaryMetric(w http.ResponseWriter, r *http.Request, op, le
 				params.Set("end", formatVLTimestamp(e))
 			}
 			if step := r.FormValue("step"); step != "" {
-				params.Set("step", step)
+				params.Set("step", formatVLStep(step))
 			}
 		} else {
 			if t := r.FormValue("time"); t != "" {
@@ -2272,6 +2272,27 @@ func formatVLTimestamp(ts string) string {
 		return ts
 	}
 	return ts
+}
+
+// formatVLStep converts Loki's step parameter to VL duration format.
+// Loki/Prometheus sends step as seconds (numeric string like "60") or duration ("1m").
+// VL requires duration strings (e.g., "60s", "1m", "1h").
+func formatVLStep(step string) string {
+	step = strings.TrimSpace(step)
+	if step == "" {
+		return step
+	}
+	// If it's already a duration string (contains letter), pass through
+	for _, ch := range step {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			return step
+		}
+	}
+	// Numeric-only: treat as seconds, append "s"
+	if _, err := strconv.ParseFloat(step, 64); err == nil {
+		return step + "s"
+	}
+	return step
 }
 
 // --- Multitenancy ---

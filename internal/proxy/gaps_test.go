@@ -163,8 +163,8 @@ func TestGap_VolumeRange_QueriesVLHits(t *testing.T) {
 	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume_range?query=%7B%7D&start=1705312200000000000&end=1705312800000000000&step=60", nil)
 	p.handleVolumeRange(w, r)
 
-	if receivedStep != "60" {
-		t.Errorf("expected step=60 forwarded, got %q", receivedStep)
+	if receivedStep != "60s" {
+		t.Errorf("expected step=60s forwarded, got %q", receivedStep)
 	}
 
 	var resp map[string]interface{}
