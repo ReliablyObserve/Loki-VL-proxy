@@ -103,10 +103,16 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 		}
 	}
 
-	// L3 fallback (peer fleet)
+	// L3 fallback (peer fleet — sharded)
 	if c.l3 != nil {
 		if v, ok := c.l3.Get(key); ok {
-			c.Set(key, v) // promote to L1
+			// Store shadow copy with reduced TTL (don't extend original expiry).
+			// Shadow TTL = min(defaultTTL, 30s) to keep local copies short-lived.
+			shadowTTL := c.defaultTTL
+			if shadowTTL > 30*time.Second {
+				shadowTTL = 30 * time.Second
+			}
+			c.SetWithTTL(key, v, shadowTTL)
 			c.Hits.Add(1)
 			return v, true
 		}
@@ -160,11 +166,8 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 		c.l2.Set(key, value, ttl)
 	}
 
-	// L3: gossip "I have this key" to all peers (lightweight, no data transfer).
-	// Other peers record it in their key directory and pull-on-demand when needed.
-	if c.l3 != nil {
-		c.l3.GossipHaveKey(key)
-	}
+	// L3: no write-through in sharded model. Owner populates via VL fetch.
+	// Non-owners get data via L3 Get → shadow copy stored above.
 }
 
 // Invalidate removes a specific key.
