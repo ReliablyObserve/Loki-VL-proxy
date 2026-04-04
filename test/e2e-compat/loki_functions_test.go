@@ -6,6 +6,7 @@ package e2e_compat
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -225,9 +226,11 @@ func TestLokiFunctions_Metrics(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	body := make([]byte, 8192)
-	n, _ := resp.Body.Read(body)
-	content := string(body[:n])
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read /metrics body: %v", err)
+	}
+	content := string(body)
 
 	// Verify key metrics exist
 	requiredMetrics := []string{

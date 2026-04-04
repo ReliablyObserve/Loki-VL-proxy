@@ -120,6 +120,10 @@ datasources:
     url: http://loki-vl-proxy:3100
     jsonData:
       maxLines: 5000
+      timeout: 600
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: team-alpha
 ```
 
 ### Grafana Datasource with OTel Label Translation
@@ -133,6 +137,19 @@ datasources:
     # Use with: loki-vl-proxy -label-style=underscores
     # Queries like {service_name="api"} auto-translate to VL's service.name
 ```
+
+Proxy-side datasource helpers:
+
+- `-backend-timeout` for long Grafana queries against VL
+- `-forward-headers` and `-forward-cookies` for backend auth/context passthrough
+- `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
+- `-tail.allowed-origins` when Grafana or another browser client must use `/tail`
+
+## Release Automation
+
+The `Auto Release` workflow opens a release PR from a generated `release/vX.Y.Z` branch. Full automation requires the repository setting `Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests`.
+
+If that setting is disabled, the workflow now keeps the run green, pushes the release branch, and writes a manual PR link into the job summary instead of failing.
 
 ## API Coverage
 

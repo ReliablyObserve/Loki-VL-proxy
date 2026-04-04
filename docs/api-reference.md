@@ -56,11 +56,13 @@ This is a read-only proxy. Log ingestion should go directly to VictoriaLogs.
 
 | Endpoint | Response | Purpose |
 |---|---|---|
-| `GET /loki/api/v1/rules` | Empty rules | Grafana Alerting compatibility |
-| `GET /api/prom/rules` | Empty rules | Grafana Alerting compatibility |
-| `GET /loki/api/v1/alerts` | Empty alerts | Grafana Alerting compatibility |
-| `GET /api/prom/alerts` | Empty alerts | Grafana Alerting compatibility |
+| `GET /loki/api/v1/rules` | Empty rules | Grafana datasource compatibility stub |
+| `GET /api/prom/rules` | Empty rules | Grafana datasource compatibility stub |
+| `GET /loki/api/v1/alerts` | Empty alerts | Grafana datasource compatibility stub |
+| `GET /api/prom/alerts` | Empty alerts | Grafana datasource compatibility stub |
 | `GET /config` | YAML stub | Configuration endpoint |
+
+These endpoints are placeholders for Grafana compatibility. They are not a full Loki ruler or alertmanager API.
 
 ## Infrastructure Endpoints
 
@@ -68,9 +70,9 @@ This is a read-only proxy. Log ingestion should go directly to VictoriaLogs.
 |---|---|
 | `GET /ready` | Readiness probe (checks VL `/health` + circuit breaker) |
 | `GET /loki/api/v1/status/buildinfo` | Fake Loki 2.9.0 build info for Grafana detection |
-| `GET /metrics` | Prometheus text exposition |
-| `GET /debug/queries` | Query analytics (top queries, slow queries) |
-| `GET /debug/pprof/` | Go profiling |
+| `GET /metrics` | Prometheus text exposition (`-server.register-instrumentation`) |
+| `GET /debug/queries` | Query analytics, disabled by default (`-server.enable-query-analytics`) |
+| `GET /debug/pprof/` | Go profiling, disabled by default (`-server.enable-pprof`) |
 
 ## Observability
 

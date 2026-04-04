@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"regexp"
@@ -93,21 +94,25 @@ type TenantMapping struct {
 }
 
 type Config struct {
-	BackendURL       string
-	Cache            *cache.Cache
-	LogLevel         string
-	MaxConcurrent    int     // max concurrent backend queries (0=unlimited)
-	RatePerSecond    float64 // per-client rate limit (0=unlimited)
-	RateBurst        int     // per-client burst size
-	CBFailThreshold  int     // circuit breaker failure threshold
-	CBOpenDuration   time.Duration // circuit breaker open duration
-	TenantMap        map[string]TenantMapping // string org ID → VL account/project
+	BackendURL        string
+	Cache             *cache.Cache
+	LogLevel          string
+	MaxConcurrent     int                      // max concurrent backend queries (0=unlimited)
+	RatePerSecond     float64                  // per-client rate limit (0=unlimited)
+	RateBurst         int                      // per-client burst size
+	CBFailThreshold   int                      // circuit breaker failure threshold
+	CBOpenDuration    time.Duration            // circuit breaker open duration
+	TenantMap         map[string]TenantMapping // string org ID → VL account/project
+	AuthEnabled       bool
+	AllowGlobalTenant bool
 
 	// Grafana datasource compatibility
 	MaxLines         int               // default max lines per query (0=1000)
 	ForwardHeaders   []string          // HTTP headers to forward from client to VL backend
+	ForwardCookies   []string          // Cookie names to forward from client to VL backend
 	BackendHeaders   map[string]string // static headers to add to all VL requests
 	BackendBasicAuth string            // "user:password" for VL backend basic auth
+	BackendTimeout   time.Duration     // bounded timeout for non-streaming backend requests
 	BackendTLSSkip   bool              // skip TLS verification for VL backend
 	DerivedFields    []DerivedField    // derived fields for trace/link extraction
 	StreamResponse   bool              // stream responses via chunked transfer (default: false)
@@ -120,17 +125,32 @@ type Config struct {
 	StreamFields []string // VL _stream_fields labels — use native stream selectors for these (faster)
 
 	// Peer cache (fleet distribution)
-	PeerCache *cache.PeerCache // optional peer cache for distributed fleet
+	PeerCache     *cache.PeerCache // optional peer cache for distributed fleet
+	PeerAuthToken string
+
+	// Admin/debug endpoints
+	RegisterInstrumentation *bool
+	EnablePprof             bool
+	EnableQueryAnalytics    bool
+	AdminAuthToken          string
+
+	// Tail/WebSocket hardening
+	TailAllowedOrigins []string
+
+	// Metrics/export hardening
+	MetricsMaxTenants        int
+	MetricsMaxClients        int
+	MetricsTrustProxyHeaders bool
 }
 
 // DerivedField extracts a value from log lines and creates a link (e.g., to a trace backend).
 // Matches Grafana Loki datasource "Derived fields" config.
 type DerivedField struct {
-	Name          string `json:"name" yaml:"name"`                       // field name (e.g., "traceID")
-	MatcherRegex  string `json:"matcherRegex" yaml:"matcherRegex"`       // regex to extract value from log line
-	URL           string `json:"url" yaml:"url"`                         // link template (e.g., "http://tempo:3200/trace/${__value.raw}")
+	Name            string `json:"name" yaml:"name"`                       // field name (e.g., "traceID")
+	MatcherRegex    string `json:"matcherRegex" yaml:"matcherRegex"`       // regex to extract value from log line
+	URL             string `json:"url" yaml:"url"`                         // link template (e.g., "http://tempo:3200/trace/${__value.raw}")
 	URLDisplayLabel string `json:"urlDisplayLabel" yaml:"urlDisplayLabel"` // display text for the link
-	DatasourceUID string `json:"datasourceUid" yaml:"datasourceUid"`     // Grafana datasource UID for internal link
+	DatasourceUID   string `json:"datasourceUid" yaml:"datasourceUid"`     // Grafana datasource UID for internal link
 }
 
 const (
@@ -151,25 +171,36 @@ var CacheTTLs = map[string]time.Duration{
 }
 
 type Proxy struct {
-	backend        *url.URL
-	client         *http.Client
-	cache          *cache.Cache
-	log            *slog.Logger
-	metrics        *metrics.Metrics
-	queryTracker   *metrics.QueryTracker
-	coalescer      *mw.Coalescer
-	limiter        *mw.RateLimiter
-	breaker        *mw.CircuitBreaker
-	configMu       sync.RWMutex          // protects tenantMap and labelTranslator
-	tenantMap      map[string]TenantMapping
-	maxLines       int
-	forwardHeaders []string          // headers to copy from client request to VL
-	backendHeaders map[string]string // static headers on all VL requests
-	derivedFields    []DerivedField
-	streamResponse   bool
-	labelTranslator  *LabelTranslator
-	streamFieldsMap  map[string]bool // known _stream_fields for VL stream selector optimization
-	peerCache        *cache.PeerCache // L3 fleet peer cache
+	backend                  *url.URL
+	client                   *http.Client
+	tailClient               *http.Client
+	cache                    *cache.Cache
+	log                      *slog.Logger
+	metrics                  *metrics.Metrics
+	queryTracker             *metrics.QueryTracker
+	coalescer                *mw.Coalescer
+	limiter                  *mw.RateLimiter
+	breaker                  *mw.CircuitBreaker
+	configMu                 sync.RWMutex // protects tenantMap and labelTranslator
+	tenantMap                map[string]TenantMapping
+	authEnabled              bool
+	allowGlobalTenant        bool
+	maxLines                 int
+	forwardHeaders           []string          // headers to copy from client request to VL
+	forwardCookies           map[string]bool   // cookie names to copy from client request to VL
+	backendHeaders           map[string]string // static headers on all VL requests
+	derivedFields            []DerivedField
+	streamResponse           bool
+	labelTranslator          *LabelTranslator
+	streamFieldsMap          map[string]bool  // known _stream_fields for VL stream selector optimization
+	peerCache                *cache.PeerCache // L3 fleet peer cache
+	peerAuthToken            string
+	registerInstrumentation  bool
+	enablePprof              bool
+	enableQueryAnalytics     bool
+	adminAuthToken           string
+	tailAllowedOrigins       map[string]struct{}
+	metricsTrustProxyHeaders bool
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -214,15 +245,21 @@ func New(cfg Config) (*Proxy, error) {
 	// Build HTTP client optimized for high-concurrency single-backend proxying.
 	// Go defaults (MaxIdleConnsPerHost=2) cause ephemeral port exhaustion under load.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 256                // total idle connections across all hosts
+	transport.MaxIdleConns = 256                 // total idle connections across all hosts
 	transport.MaxIdleConnsPerHost = 256          // VL is the only backend — all slots for it
 	transport.MaxConnsPerHost = 0                // unlimited concurrent connections to VL
 	transport.IdleConnTimeout = 90 * time.Second // reuse connections for 90s
-	transport.ResponseHeaderTimeout = 120 * time.Second
-	transport.DisableCompression = false         // accept gzip from VL if available
+	backendTimeout := cfg.BackendTimeout
+	if backendTimeout <= 0 {
+		backendTimeout = 120 * time.Second
+	}
+	transport.ResponseHeaderTimeout = backendTimeout
+	transport.DisableCompression = false // accept gzip from VL if available
 	if cfg.BackendTLSSkip {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	tailTransport := transport.Clone()
+	tailTransport.ResponseHeaderTimeout = 30 * time.Second
 
 	maxLines := cfg.MaxLines
 	if maxLines <= 0 {
@@ -237,29 +274,62 @@ func New(cfg Config) (*Proxy, error) {
 		encoded := base64Encode(cfg.BackendBasicAuth)
 		backendHeaders["Authorization"] = "Basic " + encoded
 	}
+	registerInstrumentation := true
+	if cfg.RegisterInstrumentation != nil {
+		registerInstrumentation = *cfg.RegisterInstrumentation
+	}
+	forwardCookies := make(map[string]bool, len(cfg.ForwardCookies))
+	for _, cookieName := range cfg.ForwardCookies {
+		cookieName = strings.TrimSpace(cookieName)
+		if cookieName == "" {
+			continue
+		}
+		forwardCookies[cookieName] = true
+	}
+	tailAllowedOrigins := make(map[string]struct{}, len(cfg.TailAllowedOrigins))
+	for _, origin := range cfg.TailAllowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		tailAllowedOrigins[origin] = struct{}{}
+	}
 
 	return &Proxy{
 		backend: u,
 		client: &http.Client{
-			Timeout:   120 * time.Second,
+			Timeout:   backendTimeout,
 			Transport: transport,
 		},
-		cache:          cfg.Cache,
-		log:            logger,
-		metrics:        metrics.NewMetrics(),
-		queryTracker:   metrics.NewQueryTracker(10000),
-		coalescer:      mw.NewCoalescer(),
-		limiter:        mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
-		breaker:        mw.NewCircuitBreaker(cbFail, 3, cbOpen),
-		tenantMap:      cfg.TenantMap,
-		maxLines:       maxLines,
-		forwardHeaders: cfg.ForwardHeaders,
-		backendHeaders: backendHeaders,
-		derivedFields:    cfg.DerivedFields,
-		streamResponse:   cfg.StreamResponse,
-		labelTranslator:  NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
-		streamFieldsMap:  buildStreamFieldsMap(cfg.StreamFields),
-		peerCache:        cfg.PeerCache,
+		tailClient: &http.Client{
+			Transport: tailTransport,
+		},
+		cache:                    cfg.Cache,
+		log:                      logger,
+		metrics:                  metrics.NewMetricsWithLimits(cfg.MetricsMaxTenants, cfg.MetricsMaxClients),
+		queryTracker:             metrics.NewQueryTracker(10000),
+		coalescer:                mw.NewCoalescer(),
+		limiter:                  mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
+		breaker:                  mw.NewCircuitBreaker(cbFail, 3, cbOpen),
+		tenantMap:                cfg.TenantMap,
+		authEnabled:              cfg.AuthEnabled,
+		allowGlobalTenant:        cfg.AllowGlobalTenant,
+		maxLines:                 maxLines,
+		forwardHeaders:           cfg.ForwardHeaders,
+		forwardCookies:           forwardCookies,
+		backendHeaders:           backendHeaders,
+		derivedFields:            cfg.DerivedFields,
+		streamResponse:           cfg.StreamResponse,
+		labelTranslator:          NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
+		streamFieldsMap:          buildStreamFieldsMap(cfg.StreamFields),
+		peerCache:                cfg.PeerCache,
+		peerAuthToken:            cfg.PeerAuthToken,
+		registerInstrumentation:  registerInstrumentation,
+		enablePprof:              cfg.EnablePprof,
+		enableQueryAnalytics:     cfg.EnableQueryAnalytics,
+		adminAuthToken:           cfg.AdminAuthToken,
+		tailAllowedOrigins:       tailAllowedOrigins,
+		metricsTrustProxyHeaders: cfg.MetricsTrustProxyHeaders,
 	}, nil
 }
 
@@ -309,10 +379,153 @@ func securityHeaders(h http.Handler) http.Handler {
 	})
 }
 
+type requestPolicyError struct {
+	status int
+	msg    string
+}
+
+func (e *requestPolicyError) Error() string { return e.msg }
+
+// validateTenantHeader applies Loki-style tenant presence checks and proxy-specific
+// mapping validation before any backend call is made.
+func (p *Proxy) validateTenantHeader(r *http.Request) error {
+	orgID := strings.TrimSpace(r.Header.Get("X-Scope-OrgID"))
+	if orgID == "" {
+		if p.authEnabled {
+			return &requestPolicyError{
+				status: http.StatusUnauthorized,
+				msg:    "missing X-Scope-OrgID header",
+			}
+		}
+		return nil
+	}
+	if strings.Contains(orgID, "|") {
+		return &requestPolicyError{
+			status: http.StatusBadRequest,
+			msg:    "multi-tenant X-Scope-OrgID values are not supported by this proxy",
+		}
+	}
+	if orgID == "*" || orgID == "0" {
+		if p.allowGlobalTenant {
+			return nil
+		}
+		return &requestPolicyError{
+			status: http.StatusForbidden,
+			msg:    `global tenant bypass ("*" or "0") is disabled`,
+		}
+	}
+	if _, err := strconv.Atoi(orgID); err == nil {
+		return nil
+	}
+
+	p.configMu.RLock()
+	_, ok := p.tenantMap[orgID]
+	p.configMu.RUnlock()
+	if ok {
+		return nil
+	}
+
+	return &requestPolicyError{
+		status: http.StatusForbidden,
+		msg:    fmt.Sprintf("unknown tenant %q", orgID),
+	}
+}
+
+func (p *Proxy) tenantMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := p.validateTenantHeader(r); err != nil {
+			if rpe, ok := err.(*requestPolicyError); ok {
+				p.writeError(w, rpe.status, rpe.msg)
+				return
+			}
+			p.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (p *Proxy) adminMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p.adminAuthToken != "" {
+			got := strings.TrimSpace(r.Header.Get("X-Admin-Token"))
+			if got == "" {
+				auth := strings.TrimSpace(r.Header.Get("Authorization"))
+				if strings.HasPrefix(auth, "Bearer ") {
+					got = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+				}
+			}
+			if got != p.adminAuthToken {
+				p.writeError(w, http.StatusUnauthorized, "admin authentication required")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostOnly(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+func (p *Proxy) isKnownPeerHost(host string) bool {
+	if p.peerCache == nil {
+		return false
+	}
+	for _, peer := range p.peerCache.Peers() {
+		if hostOnly(peer) == host {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Proxy) peerCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p.peerAuthToken != "" {
+			if r.Header.Get("X-Peer-Token") != p.peerAuthToken {
+				p.writeError(w, http.StatusUnauthorized, "peer authentication required")
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !p.isKnownPeerHost(hostOnly(r.RemoteAddr)) {
+			p.writeError(w, http.StatusForbidden, "peer cache endpoint is restricted to configured peers")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (p *Proxy) isAllowedTailOrigin(origin string) bool {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return true
+	}
+	if _, ok := p.tailAllowedOrigins["*"]; ok {
+		return true
+	}
+	_, ok := p.tailAllowedOrigins[origin]
+	return ok
+}
+
+func (p *Proxy) tailUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return p.isAllowedTailOrigin(r.Header.Get("Origin"))
+		},
+	}
+}
+
 func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	// Rate-limited endpoints with security headers + request logging
 	rl := func(endpoint string, h http.HandlerFunc) http.Handler {
-		return securityHeaders(p.limiter.Middleware(p.requestLogger(endpoint, h)))
+		return securityHeaders(p.tenantMiddleware(p.limiter.Middleware(p.requestLogger(endpoint, h))))
 	}
 
 	// Loki API endpoints — data queries are rate-limited
@@ -354,15 +567,24 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ready", p.handleReady)
 	mux.HandleFunc("/loki/api/v1/status/buildinfo", p.handleBuildInfo)
 
-	// Prometheus metrics endpoint — NOT rate-limited
-	mux.HandleFunc("/metrics", p.metrics.Handler)
-	mux.HandleFunc("/debug/queries", p.queryTracker.Handler)
+	if p.registerInstrumentation {
+		// Prometheus metrics endpoint — NOT rate-limited
+		mux.HandleFunc("/metrics", p.metrics.Handler)
+		if p.enablePprof {
+			mux.Handle("/debug/pprof/cmdline", p.adminMiddleware(http.NotFoundHandler()))
+			mux.Handle("/debug/pprof/", p.adminMiddleware(http.DefaultServeMux))
+		}
+	}
+
+	if p.enableQueryAnalytics {
+		mux.Handle("/debug/queries", securityHeaders(p.adminMiddleware(http.HandlerFunc(p.queryTracker.Handler))))
+	}
 
 	// Peer cache endpoint — internal, for sharded fleet cache
 	if p.peerCache != nil {
-		mux.HandleFunc("/_cache/get", func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/_cache/get", securityHeaders(p.peerCacheMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p.peerCache.ServeHTTP(w, r, p.cache)
-		})
+		}))))
 	}
 }
 
@@ -421,7 +643,7 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(start)
 	p.metrics.RecordRequest("query_range", sc.code, elapsed)
-	p.queryTracker.Record("query_range", logqlQuery, elapsed, false)
+	p.queryTracker.Record("query_range", logqlQuery, elapsed, sc.code >= 400)
 }
 
 // handleQuery translates Loki instant queries.
@@ -472,7 +694,7 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(start)
 	p.metrics.RecordRequest("query", sc.code, elapsed)
-	p.queryTracker.Record("query", logqlQuery, elapsed, false)
+	p.queryTracker.Record("query", logqlQuery, elapsed, sc.code >= 400)
 }
 
 // handleLabels returns label names.
@@ -1235,11 +1457,6 @@ func (p *Proxy) handleDelete(w http.ResponseWriter, r *http.Request) {
 	p.metrics.RecordRequest("delete", http.StatusNoContent, time.Since(start))
 }
 
-// wsUpgrader is the WebSocket upgrader for tail connections.
-var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 // handleTail bridges Loki's WebSocket tail to VL's NDJSON streaming tail.
 // Loki: ws:///loki/api/v1/tail?query={...}&start=...&limit=...
 // VL:   GET /select/logsql/tail?query=...
@@ -1261,8 +1478,43 @@ func (p *Proxy) handleTail(w http.ResponseWriter, r *http.Request) {
 
 	r = withOrgID(r)
 
-	// Upgrade to WebSocket
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	tailCtx, tailCancel := context.WithCancel(r.Context())
+	defer tailCancel()
+
+	// Connect to VL tail endpoint before upgrading the client connection so
+	// upstream auth and readiness failures are returned as normal HTTP errors.
+	vlURL := fmt.Sprintf("%s/select/logsql/tail?query=%s",
+		p.backend.String(), url.QueryEscape(logsqlQuery))
+	req, err := http.NewRequestWithContext(tailCtx, "GET", vlURL, nil)
+	if err != nil {
+		p.writeError(w, http.StatusInternalServerError, "failed to create VL request")
+		p.metrics.RecordRequest("tail", http.StatusInternalServerError, time.Since(start))
+		return
+	}
+	p.applyBackendHeaders(req)
+	p.forwardTenantHeaders(req)
+	resp, err := p.tailClient.Do(req)
+	if err != nil {
+		p.writeError(w, http.StatusBadGateway, "VL tail connection failed: "+err.Error())
+		p.metrics.RecordRequest("tail", http.StatusBadGateway, time.Since(start))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		p.writeError(w, resp.StatusCode, msg)
+		p.metrics.RecordRequest("tail", resp.StatusCode, time.Since(start))
+		return
+	}
+
+	// Upgrade to WebSocket only after the backend stream is confirmed.
+	upgrader := p.tailUpgrader()
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		p.log.Error("websocket upgrade failed", "error", err)
 		p.metrics.RecordRequest("tail", http.StatusBadRequest, time.Since(start))
@@ -1270,32 +1522,15 @@ func (p *Proxy) handleTail(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Connect to VL tail endpoint (streaming NDJSON)
-	vlURL := fmt.Sprintf("%s/select/logsql/tail?query=%s",
-		p.backend.String(), url.QueryEscape(logsqlQuery))
-	req, err := http.NewRequestWithContext(r.Context(), "GET", vlURL, nil)
-	if err != nil {
-		p.sendWSError(conn, "failed to create VL request")
-		return
-	}
-	p.forwardTenantHeaders(req)
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		p.sendWSError(conn, "VL tail connection failed: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
 	p.log.Debug("tail connected", "logql", logqlQuery, "logsql", logsqlQuery)
 	p.metrics.RecordRequest("tail", http.StatusOK, time.Since(start))
 
 	// Start a read loop to detect client disconnect (WebSocket protocol requires it).
 	// When client closes, this goroutine exits and wsCtx is canceled.
-	wsCtx, wsCancel := context.WithCancel(r.Context())
+	wsCtx, wsCancel := context.WithCancel(tailCtx)
 	defer wsCancel()
 	go func() {
-		defer wsCancel()
+		defer tailCancel()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -1303,38 +1538,62 @@ func (p *Proxy) handleTail(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Read VL NDJSON stream and forward as Loki WebSocket frames
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max line
+	pingTicker := time.NewTicker(time.Second)
+	defer pingTicker.Stop()
 
-	for scanner.Scan() {
-		// Check if client disconnected
+	// Read VL NDJSON stream and forward as Loki WebSocket frames
+	lineCh := make(chan []byte)
+	errCh := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max line
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case lineCh <- line:
+			case <-wsCtx.Done():
+				return
+			}
+		}
+		errCh <- scanner.Err()
+	}()
+
+	for {
 		select {
 		case <-wsCtx.Done():
 			return
-		default:
-		}
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		// Parse VL NDJSON line
-		var vlLine map[string]interface{}
-		if err := json.Unmarshal(line, &vlLine); err != nil {
-			continue
-		}
-
-		// Convert to Loki tail frame
-		frame := p.vlLineToTailFrame(vlLine)
-		frameJSON, err := json.Marshal(frame)
-		if err != nil {
-			continue
-		}
-
-		if err := conn.WriteMessage(websocket.TextMessage, frameJSON); err != nil {
-			p.log.Debug("websocket write failed, client disconnected", "error", err)
+		case <-pingTicker.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				p.log.Debug("websocket ping failed, client disconnected", "error", err)
+				return
+			}
+		case err := <-errCh:
+			if err != nil && wsCtx.Err() == nil {
+				p.log.Debug("tail stream ended with error", "error", err)
+			}
 			return
+		case line := <-lineCh:
+			if len(line) == 0 {
+				continue
+			}
+
+			// Parse VL NDJSON line
+			var vlLine map[string]interface{}
+			if err := json.Unmarshal(line, &vlLine); err != nil {
+				continue
+			}
+
+			// Convert to Loki tail frame
+			frame := p.vlLineToTailFrame(vlLine)
+			frameJSON, err := json.Marshal(frame)
+			if err != nil {
+				continue
+			}
+
+			if err := conn.WriteMessage(websocket.TextMessage, frameJSON); err != nil {
+				p.log.Debug("websocket write failed, client disconnected", "error", err)
+				return
+			}
 		}
 	}
 }
@@ -1388,7 +1647,8 @@ func (p *Proxy) sendWSError(conn *websocket.Conn, msg string) {
 // handleReady returns readiness status.
 func (p *Proxy) handleReady(w http.ResponseWriter, r *http.Request) {
 	// Probe VL backend health
-	resp, err := p.client.Get(p.backend.String() + "/health")
+	readyReq := withOrgID(r)
+	resp, err := p.vlGet(readyReq.Context(), "/health", nil)
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("backend not ready"))
@@ -1442,9 +1702,9 @@ func (p *Proxy) handleBuildInfo(w http.ResponseWriter, r *http.Request) {
 	p.writeJSON(w, map[string]interface{}{
 		"status": "success",
 		"data": map[string]interface{}{
-			"version":  "2.9.0",
-			"revision": "loki-vl-proxy",
-			"branch":   "main",
+			"version":   "2.9.0",
+			"revision":  "loki-vl-proxy",
+			"branch":    "main",
 			"goVersion": "go1.23",
 		},
 	})
@@ -2092,9 +2352,9 @@ func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response) {
 func (p *Proxy) applyDerivedFields(streams []map[string]interface{}) {
 	// Pre-compile regexes
 	type compiledDF struct {
-		name  string
-		re    *regexp.Regexp
-		url   string
+		name string
+		re   *regexp.Regexp
+		url  string
 	}
 	compiled := make([]compiledDF, 0, len(p.derivedFields))
 	for _, df := range p.derivedFields {
@@ -2358,8 +2618,8 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 type vlHitsResponse struct {
 	Hits []struct {
 		Fields     map[string]string `json:"fields"`
-		Timestamps []string         `json:"timestamps"` // VL v1.49+: RFC3339 strings
-		Values     []int            `json:"values"`
+		Timestamps []string          `json:"timestamps"` // VL v1.49+: RFC3339 strings
+		Values     []int             `json:"values"`
 	} `json:"hits"`
 }
 
@@ -2515,6 +2775,9 @@ func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 
 	// Wildcard: "*" or "0" → skip tenant headers, let VL serve all data
 	if orgID == "*" || orgID == "0" {
+		if p.allowGlobalTenant {
+			return
+		}
 		return
 	}
 
@@ -2535,13 +2798,8 @@ func (p *Proxy) forwardTenantHeaders(req *http.Request) {
 	if _, err := strconv.Atoi(orgID); err == nil {
 		req.Header.Set("AccountID", orgID)
 		req.Header.Set("ProjectID", "0")
-	} else {
-		// Unmapped non-numeric org ID → default tenant
-		req.Header.Set("AccountID", "0")
-		req.Header.Set("ProjectID", "0")
 	}
 }
-
 
 // --- Error / JSON helpers ---
 
@@ -2631,13 +2889,18 @@ func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 	for k, v := range p.backendHeaders {
 		vlReq.Header.Set(k, v)
 	}
-	// Forward configured client headers from the original request
-	if len(p.forwardHeaders) > 0 {
-		if origReq, ok := vlReq.Context().Value(origRequestKey).(*http.Request); ok && origReq != nil {
+	if origReq, ok := vlReq.Context().Value(origRequestKey).(*http.Request); ok && origReq != nil {
+		// Forward configured client headers from the original request
+		if len(p.forwardHeaders) > 0 {
 			for _, hdr := range p.forwardHeaders {
 				if val := origReq.Header.Get(hdr); val != "" {
 					vlReq.Header.Set(hdr, val)
 				}
+			}
+		}
+		for _, cookie := range origReq.Cookies() {
+			if p.forwardCookies["*"] || p.forwardCookies[cookie.Name] {
+				vlReq.AddCookie(cookie)
 			}
 		}
 	}
@@ -2692,7 +2955,7 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 		p.metrics.RecordTenantRequest(tenant, endpoint, sc.code, elapsed)
 
 		// Per-client identity metrics (Grafana user > tenant > IP)
-		clientID := metrics.ResolveClientID(r)
+		clientID := metrics.ResolveClientID(r, p.metricsTrustProxyHeaders)
 		p.metrics.RecordClientIdentity(clientID, endpoint, elapsed, int64(sc.bytesWritten))
 
 		// Client error categorization

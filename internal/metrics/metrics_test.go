@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -92,5 +93,50 @@ func TestMetrics_RecordTranslationError(t *testing.T) {
 	m.RecordTranslationError()
 	if m.translationErrors.Load() != 2 {
 		t.Errorf("expected 2, got %d", m.translationErrors.Load())
+	}
+}
+
+func TestResolveClientID_IgnoresUntrustedProxyHeadersByDefault(t *testing.T) {
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	req.Header.Set("X-Grafana-User", "grafana-user")
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("backend-user:secret")))
+	req.RemoteAddr = "198.51.100.20:1234"
+
+	got := ResolveClientID(req, false)
+	if got != "backend-user" {
+		t.Fatalf("expected basic auth user when proxy headers are untrusted, got %q", got)
+	}
+}
+
+func TestMetrics_Handler_BoundsTenantAndClientCardinality(t *testing.T) {
+	m := NewMetricsWithLimits(1, 1)
+	m.RecordTenantRequest("team-a", "query_range", 200, 10*time.Millisecond)
+	m.RecordTenantRequest("team-b", "query_range", 200, 10*time.Millisecond)
+	m.RecordClientIdentity("client-a", "query_range", 10*time.Millisecond, 10)
+	m.RecordClientIdentity("client-b", "query_range", 10*time.Millisecond, 10)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	m.Handler(w, r)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `tenant="team-a"`) {
+		t.Fatal("expected first tenant label to be retained")
+	}
+	if !strings.Contains(body, `tenant="__overflow__"`) {
+		t.Fatal("expected overflow tenant bucket in metrics output")
+	}
+	if strings.Contains(body, `tenant="team-b"`) {
+		t.Fatal("expected second tenant to be folded into overflow bucket")
+	}
+	if !strings.Contains(body, `client="client-a"`) {
+		t.Fatal("expected first client label to be retained")
+	}
+	if !strings.Contains(body, `client="__overflow__"`) {
+		t.Fatal("expected overflow client bucket in metrics output")
+	}
+	if strings.Contains(body, `client="client-b"`) {
+		t.Fatal("expected second client to be folded into overflow bucket")
 	}
 }

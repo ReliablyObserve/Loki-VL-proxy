@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,9 +27,9 @@ func TestTenant_StringMapping(t *testing.T) {
 	defer vlBackend.Close()
 
 	tenantMap := map[string]TenantMapping{
-		"team-alpha":  {AccountID: "100", ProjectID: "1"},
-		"team-beta":   {AccountID: "200", ProjectID: "2"},
-		"ops-prod":    {AccountID: "300", ProjectID: "0"},
+		"team-alpha": {AccountID: "100", ProjectID: "1"},
+		"team-beta":  {AccountID: "200", ProjectID: "2"},
+		"ops-prod":   {AccountID: "300", ProjectID: "0"},
 	}
 
 	c := cache.New(60*time.Second, 1000)
@@ -53,10 +54,10 @@ func TestTenant_StringMapping(t *testing.T) {
 	}
 }
 
-func TestTenant_UnmappedStringDefaultsToZero(t *testing.T) {
-	var receivedAccountID string
+func TestTenant_UnmappedStringRejected(t *testing.T) {
+	var backendCalled bool
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAccountID = r.Header.Get("AccountID")
+		backendCalled = true
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"values": []map[string]interface{}{},
 		})
@@ -71,13 +72,19 @@ func TestTenant_UnmappedStringDefaultsToZero(t *testing.T) {
 		TenantMap:  map[string]TenantMapping{"known": {AccountID: "1", ProjectID: "0"}},
 	})
 
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
 	r.Header.Set("X-Scope-OrgID", "unknown-tenant")
-	p.handleLabels(w, r)
+	mux.ServeHTTP(w, r)
 
-	if receivedAccountID != "0" {
-		t.Errorf("expected AccountID=0 for unknown tenant, got %q", receivedAccountID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unknown tenant, got %d body=%s", w.Code, w.Body.String())
+	}
+	if backendCalled {
+		t.Fatal("backend should not be called for unknown tenant")
 	}
 }
 
@@ -127,5 +134,78 @@ func TestTenant_NoHeader(t *testing.T) {
 
 	if receivedAccountID != "" {
 		t.Errorf("expected no AccountID when no OrgID, got %q", receivedAccountID)
+	}
+}
+
+func TestTenant_AuthEnabledRequiresHeader(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("backend should not be called when tenant header is required")
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{
+		BackendURL:  vlBackend.URL,
+		Cache:       c,
+		LogLevel:    "error",
+		AuthEnabled: true,
+	})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when auth.enabled=true and X-Scope-OrgID is missing, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTenant_GlobalBypassDisabledByDefault(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("backend should not be called when global tenant bypass is disabled")
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+	r.Header.Set("X-Scope-OrgID", "*")
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for wildcard tenant bypass, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTenant_MultiTenantHeaderRejected(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("backend should not be called for multi-tenant header values")
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+	r.Header.Set("X-Scope-OrgID", "tenant-a|tenant-b")
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for multi-tenant X-Scope-OrgID, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "multi-tenant") {
+		t.Fatalf("expected multi-tenant rejection message, got %s", w.Body.String())
 	}
 }

@@ -278,10 +278,10 @@ func TestGap_MultitenancyHeader_Forwarded(t *testing.T) {
 	}
 }
 
-func TestGap_MultitenancyHeader_StringOrgID(t *testing.T) {
-	var receivedAccountID string
+func TestGap_MultitenancyHeader_StringOrgIDRejectedWithoutMapping(t *testing.T) {
+	var backendCalled bool
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAccountID = r.Header.Get("AccountID")
+		backendCalled = true
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"values": []map[string]interface{}{},
 		})
@@ -289,14 +289,19 @@ func TestGap_MultitenancyHeader_StringOrgID(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newGapTestProxy(t, vlBackend.URL)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
 	r.Header.Set("X-Scope-OrgID", "my-tenant")
-	p.handleLabels(w, r)
+	mux.ServeHTTP(w, r)
 
-	// Non-numeric OrgID should default to 0
-	if receivedAccountID != "0" {
-		t.Errorf("expected AccountID=0 for non-numeric org, got %q", receivedAccountID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unmapped string tenant, got %d body=%s", w.Code, w.Body.String())
+	}
+	if backendCalled {
+		t.Fatal("backend should not be called for unmapped string tenant")
 	}
 }
 
@@ -463,10 +468,10 @@ func TestCoverage_FormatVLTimestamp(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"1234567890", "1234567890"},         // numeric seconds
-		{"1234567890.123", "1234567890.123"}, // numeric float
+		{"1234567890", "1234567890"},                     // numeric seconds
+		{"1234567890.123", "1234567890.123"},             // numeric float
 		{"2024-01-15T10:30:00Z", "2024-01-15T10:30:00Z"}, // non-numeric passthrough
-		{"now-5m", "now-5m"},                 // relative passthrough
+		{"now-5m", "now-5m"},                             // relative passthrough
 	}
 	for _, tc := range tests {
 		got := formatVLTimestamp(tc.input)

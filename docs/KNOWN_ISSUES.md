@@ -13,6 +13,15 @@ All LogQL features are handled. No errors, no silent failures. Minor behavioral 
 | `group_left()`/`group_right()` | Proxy-side one-to-many join via on() | Native one-to-many join validation |
 | Subquery `rate(...)[1h:5m]` | Proxy-side: runs inner query at sub-steps, aggregates | Native nested sub-step evaluation |
 
+## Grafana Datasource Gaps
+
+The proxy now supports datasource-facing headers, cookie forwarding, backend timeout control, and optional HTTPS client-certificate verification. Two areas are still intentionally partial:
+
+| Area | Current State |
+|---|---|
+| Alerting / ruler APIs | `/rules` and `/alerts` are compatibility stubs only, not a full Loki ruler implementation |
+| Browser-origin tailing | `/loki/api/v1/tail` rejects browser `Origin` headers unless explicitly allowlisted via `-tail.allowed-origins` |
+
 ## Data Model Differences
 
 ### Stream Filter vs Field Filter Performance
@@ -39,7 +48,7 @@ These were previously listed as gaps and have been resolved:
 - ~~`absent_over_time()`~~ -> Fixed: mapped to `count()`
 - ~~Binary metric expressions~~ -> Fixed: proxy-side evaluation
 - ~~`quantile_over_time()`~~ -> Fixed: mapped to VL `quantile(phi, field)`
-- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Fixed: stubs for Grafana Alerting compatibility
+- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Partially fixed: datasource-compatible stubs exist, but full ruler semantics remain a roadmap item
 - ~~Coalescer cross-tenant data leak~~ -> Fixed: tenant included in coalescing key
 - ~~Stats detection false-positive~~ -> Fixed: quote-aware parsing
 - ~~Metrics always recording 200~~ -> Fixed: actual status code captured
@@ -50,7 +59,7 @@ These were previously listed as gaps and have been resolved:
 - ~~`targetLabels` missing on volume_range~~ -> Fixed: field param forwarded (v0.17.0)
 - ~~`IsScalar` rejects negatives~~ -> Fixed: uses strconv.ParseFloat (v0.17.0)
 - ~~No delete API~~ -> Fixed: `/loki/api/v1/delete` with safeguards (v0.17.0)
-- ~~`X-Forwarded-For` spoofable~~ -> Fixed: ClientID uses RemoteAddr (v0.18.0)
+- ~~`X-Forwarded-For` spoofable~~ -> Fixed: proxy headers are ignored for client metrics unless `-metrics.trust-proxy-headers=true` (v0.24.0)
 - ~~`offset` and `@` modifiers~~ -> Fixed: stripped during translation, time range unaffected (v0.19.0)
 - ~~`bool` modifier~~ -> Fixed: stripped at translation, comparisons return 1/0 (v0.19.0)
 - ~~Field-specific parser `| json f1, f2`~~ -> Fixed: maps to full unpack (v0.19.0)

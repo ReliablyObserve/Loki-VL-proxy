@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"runtime"
 	"sort"
@@ -17,11 +18,11 @@ type Metrics struct {
 
 	// Request counters by endpoint and status
 	requestsTotal    map[string]*atomic.Int64 // "endpoint:status" → count
-	requestDurations map[string]*histogram     // "endpoint" → duration histogram
+	requestDurations map[string]*histogram    // "endpoint" → duration histogram
 
 	// Per-tenant request counters
-	tenantRequests   map[string]*atomic.Int64 // "tenant:endpoint:status" → count
-	tenantDurations  map[string]*histogram     // "tenant:endpoint" → duration histogram
+	tenantRequests  map[string]*atomic.Int64 // "tenant:endpoint:status" → count
+	tenantDurations map[string]*histogram    // "tenant:endpoint" → duration histogram
 
 	// Cache stats (global)
 	cacheHits   atomic.Int64
@@ -39,8 +40,8 @@ type Metrics struct {
 	coalescedSaved atomic.Int64 // backend requests saved by coalescing
 
 	// Translation stats
-	translationsTotal  atomic.Int64
-	translationErrors  atomic.Int64
+	translationsTotal atomic.Int64
+	translationErrors atomic.Int64
 
 	// Client error tracking
 	clientErrors map[string]*atomic.Int64 // "endpoint:reason" → count
@@ -61,6 +62,11 @@ type Metrics struct {
 
 	// Startup time
 	startTime time.Time
+
+	maxTenantLabels int
+	maxClientLabels int
+	knownTenants    map[string]struct{}
+	knownClients    map[string]struct{}
 }
 
 type histogram struct {
@@ -73,6 +79,12 @@ type histogram struct {
 }
 
 var defaultBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+const (
+	defaultMaxTenantLabels = 256
+	defaultMaxClientLabels = 256
+	overflowMetricLabel    = "__overflow__"
+)
 
 func newHistogram() *histogram {
 	return &histogram{
@@ -94,20 +106,34 @@ func (h *histogram) observe(v float64) {
 }
 
 func NewMetrics() *Metrics {
+	return NewMetricsWithLimits(defaultMaxTenantLabels, defaultMaxClientLabels)
+}
+
+func NewMetricsWithLimits(maxTenantLabels, maxClientLabels int) *Metrics {
+	if maxTenantLabels <= 0 {
+		maxTenantLabels = defaultMaxTenantLabels
+	}
+	if maxClientLabels <= 0 {
+		maxClientLabels = defaultMaxClientLabels
+	}
 	return &Metrics{
-		requestsTotal:      make(map[string]*atomic.Int64),
-		requestDurations:   make(map[string]*histogram),
-		tenantRequests:     make(map[string]*atomic.Int64),
-		tenantDurations:    make(map[string]*histogram),
-		clientErrors:       make(map[string]*atomic.Int64),
-		endpointCacheHits:  make(map[string]*atomic.Int64),
+		requestsTotal:       make(map[string]*atomic.Int64),
+		requestDurations:    make(map[string]*histogram),
+		tenantRequests:      make(map[string]*atomic.Int64),
+		tenantDurations:     make(map[string]*histogram),
+		clientErrors:        make(map[string]*atomic.Int64),
+		endpointCacheHits:   make(map[string]*atomic.Int64),
 		endpointCacheMisses: make(map[string]*atomic.Int64),
-		backendDurations:   make(map[string]*histogram),
-		clientRequests:     make(map[string]*atomic.Int64),
-		clientDurations:    make(map[string]*histogram),
-		clientBytes:        make(map[string]*atomic.Int64),
-		system:             NewSystemMetrics(),
-		startTime:          time.Now(),
+		backendDurations:    make(map[string]*histogram),
+		clientRequests:      make(map[string]*atomic.Int64),
+		clientDurations:     make(map[string]*histogram),
+		clientBytes:         make(map[string]*atomic.Int64),
+		system:              NewSystemMetrics(),
+		startTime:           time.Now(),
+		maxTenantLabels:     maxTenantLabels,
+		maxClientLabels:     maxClientLabels,
+		knownTenants:        make(map[string]struct{}),
+		knownClients:        make(map[string]struct{}),
 	}
 }
 
@@ -149,9 +175,7 @@ func (m *Metrics) RecordRequest(endpoint string, statusCode int, duration time.D
 // RecordTenantRequest records a request for a specific tenant (X-Scope-OrgID).
 // Empty tenant is recorded as "__none__".
 func (m *Metrics) RecordTenantRequest(tenant, endpoint string, statusCode int, duration time.Duration) {
-	if tenant == "" {
-		tenant = "__none__"
-	}
+	tenant = m.canonicalTenantLabel(tenant)
 	key := fmt.Sprintf("%s:%s:%d", tenant, endpoint, statusCode)
 	m.mu.RLock()
 	counter, ok := m.tenantRequests[key]
@@ -187,13 +211,7 @@ func (m *Metrics) RecordTenantRequest(tenant, endpoint string, statusCode int, d
 // RecordClientIdentity records a request for a specific client identity.
 // Client is identified by: X-Grafana-User > tenant > basic auth user > IP.
 func (m *Metrics) RecordClientIdentity(clientID, endpoint string, duration time.Duration, responseBytes int64) {
-	if clientID == "" {
-		clientID = "__anonymous__"
-	}
-	// Limit cardinality: truncate to first 64 chars
-	if len(clientID) > 64 {
-		clientID = clientID[:64]
-	}
+	clientID = m.canonicalClientLabel(clientID)
 
 	key := fmt.Sprintf("%s:%s", clientID, endpoint)
 	m.mu.RLock()
@@ -237,14 +255,17 @@ func (m *Metrics) RecordClientIdentity(clientID, endpoint string, duration time.
 }
 
 // ResolveClientID extracts the client identity from an HTTP request.
-// Priority: X-Grafana-User > X-Scope-OrgID > basic auth user > IP.
-func ResolveClientID(r *http.Request) string {
+// Priority with trusted proxy headers: X-Grafana-User > X-Scope-OrgID > basic auth user > X-Forwarded-For > remote IP.
+// Priority without trusted proxy headers: X-Scope-OrgID > basic auth user > remote IP.
+func ResolveClientID(r *http.Request, trustProxyHeaders bool) string {
 	// Grafana sets this header when proxying datasource requests
-	if user := r.Header.Get("X-Grafana-User"); user != "" {
-		return user
+	if trustProxyHeaders {
+		if user := strings.TrimSpace(r.Header.Get("X-Grafana-User")); user != "" {
+			return user
+		}
 	}
 	// Tenant ID (X-Scope-OrgID)
-	if tenant := r.Header.Get("X-Scope-OrgID"); tenant != "" {
+	if tenant := strings.TrimSpace(r.Header.Get("X-Scope-OrgID")); tenant != "" {
 		return tenant
 	}
 	// Basic auth username
@@ -252,18 +273,61 @@ func ResolveClientID(r *http.Request) string {
 		return user
 	}
 	// Forwarded client IP
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// Take first IP (original client)
-		if idx := strings.IndexByte(fwd, ','); idx > 0 {
-			return strings.TrimSpace(fwd[:idx])
+	if trustProxyHeaders {
+		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
+			// Take first IP (original client)
+			if idx := strings.IndexByte(fwd, ','); idx > 0 {
+				return strings.TrimSpace(fwd[:idx])
+			}
+			return strings.TrimSpace(fwd)
 		}
-		return strings.TrimSpace(fwd)
 	}
 	// Remote address (IP:port → strip port)
-	if idx := strings.LastIndexByte(r.RemoteAddr, ':'); idx > 0 {
-		return r.RemoteAddr[:idx]
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
 	}
-	return r.RemoteAddr
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func sanitizeMetricIdentity(v string, emptyFallback string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return emptyFallback
+	}
+	v = strings.ReplaceAll(v, ":", "_")
+	if len(v) > 64 {
+		v = v[:64]
+	}
+	return v
+}
+
+func (m *Metrics) canonicalTenantLabel(tenant string) string {
+	tenant = sanitizeMetricIdentity(tenant, "__none__")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.knownTenants[tenant]; ok {
+		return tenant
+	}
+	if len(m.knownTenants) >= m.maxTenantLabels {
+		return overflowMetricLabel
+	}
+	m.knownTenants[tenant] = struct{}{}
+	return tenant
+}
+
+func (m *Metrics) canonicalClientLabel(clientID string) string {
+	clientID = sanitizeMetricIdentity(clientID, "__anonymous__")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.knownClients[clientID]; ok {
+		return clientID
+	}
+	if len(m.knownClients) >= m.maxClientLabels {
+		return overflowMetricLabel
+	}
+	m.knownClients[clientID] = struct{}{}
+	return clientID
 }
 
 // RecordClientError records a client-side error with a reason category.
@@ -285,8 +349,8 @@ func (m *Metrics) RecordClientError(endpoint, reason string) {
 	counter.Add(1)
 }
 
-func (m *Metrics) RecordCacheHit()  { m.cacheHits.Add(1) }
-func (m *Metrics) RecordCacheMiss() { m.cacheMisses.Add(1) }
+func (m *Metrics) RecordCacheHit()         { m.cacheHits.Add(1) }
+func (m *Metrics) RecordCacheMiss()        { m.cacheMisses.Add(1) }
 func (m *Metrics) RecordTranslation()      { m.translationsTotal.Add(1) }
 func (m *Metrics) RecordTranslationError() { m.translationErrors.Add(1) }
 

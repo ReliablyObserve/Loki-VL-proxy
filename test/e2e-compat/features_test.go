@@ -138,10 +138,10 @@ func TestFeature_IndexVolumeRange_ReturnsMatrix(t *testing.T) {
 // Multitenancy (X-Scope-OrgID → AccountID/ProjectID)
 // =============================================================================
 
-func TestFeature_Multitenancy_HeaderPropagation(t *testing.T) {
+func TestFeature_Multitenancy_DefaultTenantBypassDisabled(t *testing.T) {
 	score := &CompatScore{}
 
-	// Query with a specific tenant header — should not error
+	// Global/default-tenant bypass is intentionally disabled unless explicitly enabled.
 	now := time.Now()
 	params := url.Values{}
 	params.Set("query", `{app="api-gateway"}`)
@@ -156,14 +156,14 @@ func TestFeature_Multitenancy_HeaderPropagation(t *testing.T) {
 		score.fail("multitenancy", "request failed: "+err.Error())
 	} else {
 		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			score.pass("multitenancy", "OrgID=0 accepted (default tenant)")
+		if resp.StatusCode == http.StatusForbidden {
+			score.pass("multitenancy", "OrgID=0 rejected by default")
 		} else {
-			score.fail("multitenancy", fmt.Sprintf("OrgID=0 returned %d", resp.StatusCode))
+			score.fail("multitenancy", fmt.Sprintf("expected OrgID=0 to be rejected, got %d", resp.StatusCode))
 		}
 	}
 
-	// Query without tenant header — should also work
+	// Query without tenant header is still allowed when auth.enabled=false.
 	req2, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/labels", nil)
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
@@ -172,6 +172,26 @@ func TestFeature_Multitenancy_HeaderPropagation(t *testing.T) {
 		defer resp2.Body.Close()
 		if resp2.StatusCode == 200 {
 			score.pass("multitenancy", "no OrgID header accepted")
+		}
+	}
+
+	score.report(t)
+}
+
+func TestFeature_AdminDebugEndpoints_DefaultClosed(t *testing.T) {
+	score := &CompatScore{}
+
+	for _, path := range []string{"/debug/queries", "/debug/pprof/"} {
+		resp, err := http.Get(proxyURL + path)
+		if err != nil {
+			score.fail("admin_endpoints", fmt.Sprintf("%s request failed: %v", path, err))
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			score.pass("admin_endpoints", fmt.Sprintf("%s disabled by default", path))
+		} else {
+			score.fail("admin_endpoints", fmt.Sprintf("%s expected 404, got %d", path, resp.StatusCode))
 		}
 	}
 
@@ -222,6 +242,31 @@ func TestFeature_Tail_WebSocketConnection(t *testing.T) {
 	score.report(t)
 }
 
+func TestFeature_Tail_BrowserOriginRejectedByDefault(t *testing.T) {
+	score := &CompatScore{}
+
+	wsURL := "ws" + strings.TrimPrefix(proxyURL, "http") + "/loki/api/v1/tail"
+	params := url.Values{}
+	params.Set("query", `{app="api-gateway"}`)
+	headers := http.Header{}
+	headers.Set("Origin", "https://grafana.example.com")
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL+"?"+params.Encode(), headers)
+	if err == nil {
+		conn.Close()
+		score.fail("tail_origin", "expected browser origin to be rejected by default")
+		score.report(t)
+		return
+	}
+	if resp != nil && resp.StatusCode == http.StatusForbidden {
+		score.pass("tail_origin", "browser origin rejected by default")
+	} else {
+		score.fail("tail_origin", fmt.Sprintf("expected 403 for browser origin, got resp=%v err=%v", resp, err))
+	}
+
+	score.report(t)
+}
+
 // =============================================================================
 // Query Analytics (/debug/queries)
 // =============================================================================
@@ -234,35 +279,16 @@ func TestFeature_QueryAnalytics_Endpoint(t *testing.T) {
 	queryProxy(t, `{app="payment-service"}`)
 	queryProxy(t, `{app="api-gateway"} |= "error"`)
 
-	// Check analytics endpoint
-	resp := getJSON(t, proxyURL+"/debug/queries")
-
-	if total, ok := resp["total_queries"].(float64); ok && total > 0 {
-		score.pass("analytics", fmt.Sprintf("total_queries=%v", total))
+	resp, err := http.Get(proxyURL + "/debug/queries")
+	if err != nil {
+		score.fail("analytics", "request failed: "+err.Error())
 	} else {
-		score.fail("analytics", fmt.Sprintf("expected total_queries > 0, got %v", resp["total_queries"]))
-	}
-
-	if uniq, ok := resp["unique_queries"].(float64); ok && uniq > 0 {
-		score.pass("analytics", fmt.Sprintf("unique_queries=%v", uniq))
-	} else {
-		score.fail("analytics", "expected unique_queries > 0")
-	}
-
-	if top, ok := resp["top_by_frequency"].([]interface{}); ok && len(top) > 0 {
-		score.pass("analytics", fmt.Sprintf("top_by_frequency has %d entries", len(top)))
-		// Check first entry has required fields
-		if entry, ok := top[0].(map[string]interface{}); ok {
-			for _, field := range []string{"fingerprint", "query", "count"} {
-				if _, ok := entry[field]; ok {
-					score.pass("analytics", fmt.Sprintf("entry has %s", field))
-				} else {
-					score.fail("analytics", fmt.Sprintf("entry missing %s", field))
-				}
-			}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			score.pass("analytics", "/debug/queries disabled by default")
+		} else {
+			score.fail("analytics", fmt.Sprintf("expected /debug/queries to be disabled by default, got %d", resp.StatusCode))
 		}
-	} else {
-		score.fail("analytics", "empty top_by_frequency")
 	}
 
 	score.report(t)

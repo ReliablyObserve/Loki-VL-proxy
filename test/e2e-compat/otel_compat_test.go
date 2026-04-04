@@ -13,7 +13,8 @@
 //   - Grafana Drilldown patterns with OTel labels
 //
 // Requires:
-//   docker-compose up -d --build (includes loki-vl-proxy-underscore at :3102)
+//
+//	docker-compose up -d --build (includes loki-vl-proxy-underscore at :3102)
 package e2e_compat
 
 import (
@@ -55,6 +56,9 @@ func ensureOTelData(t *testing.T) {
 	ingestUnderscoreTestData(t)
 	ingestMixedLabelTestData(t)
 	ingestAllOTelCategories(t)
+	// The e2e proxy caches global label queries briefly; wait for the short
+	// cache TTL in docker-compose to expire before asserting on label discovery.
+	time.Sleep(6 * time.Second)
 	otelDataIngested = true
 }
 
@@ -76,7 +80,7 @@ func ingestOTelTestData(t *testing.T) {
 				"deployment.environment": "production",
 				"telemetry.sdk.name":     "opentelemetry",
 				"telemetry.sdk.language": "go",
-				"host.name":             "ip-10-0-1-42",
+				"host.name":              "ip-10-0-1-42",
 				"level":                  "info",
 			},
 			Lines: []string{
@@ -94,7 +98,7 @@ func ingestOTelTestData(t *testing.T) {
 				"k8s.pod.name":           "auth-svc-6f4d8c9-xj2k1",
 				"k8s.container.name":     "auth",
 				"deployment.environment": "production",
-				"host.name":             "ip-10-0-1-42",
+				"host.name":              "ip-10-0-1-42",
 				"level":                  "error",
 			},
 			Lines: []string{
@@ -111,7 +115,7 @@ func ingestOTelTestData(t *testing.T) {
 				"k8s.pod.name":           "order-svc-8a7b6c5-mn3p",
 				"k8s.container.name":     "orders",
 				"deployment.environment": "production",
-				"container.id":          "abc123def456",
+				"container.id":           "abc123def456",
 				"level":                  "warn",
 			},
 			Lines: []string{
@@ -141,7 +145,7 @@ func ingestUnderscoreTestData(t *testing.T) {
 			"k8s_namespace_name":     "staging",
 			"k8s_pod_name":           "underscore-pod-abc",
 			"deployment_environment": "staging",
-			"host_name":             "host-underscore-1",
+			"host_name":              "host-underscore-1",
 			"level":                  "info",
 		},
 		Lines: []string{
@@ -201,7 +205,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"cloud.region":            "us-east-1",
 				"cloud.availability_zone": "us-east-1a",
 				"cloud.account.id":        "123456789012",
-				"level":                    "info",
+				"level":                   "info",
 			},
 			Lines: []string{`{"msg":"cloud metadata test entry"}`},
 		},
@@ -213,7 +217,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"host.id":      "i-0abc123def456",
 				"host.type":    "m5.xlarge",
 				"host.arch":    "amd64",
-				"level":         "info",
+				"level":        "info",
 			},
 			Lines: []string{`{"msg":"host metadata test entry"}`},
 		},
@@ -225,19 +229,19 @@ func ingestAllOTelCategories(t *testing.T) {
 				"process.executable.name": "myapp",
 				"process.runtime.name":    "go",
 				"process.runtime.version": "1.23.0",
-				"level":                    "info",
+				"level":                   "info",
 			},
 			Lines: []string{`{"msg":"process metadata test entry"}`},
 		},
 		// ── Container attributes ──
 		{
 			Labels: map[string]string{
-				"service.name":        "container-metadata-svc",
-				"container.id":        "sha256:abc123def456",
-				"container.name":      "myapp-container",
-				"container.runtime":   "containerd",
+				"service.name":         "container-metadata-svc",
+				"container.id":         "sha256:abc123def456",
+				"container.name":       "myapp-container",
+				"container.runtime":    "containerd",
 				"container.image.name": "ghcr.io/org/myapp",
-				"container.image.tag": "v1.2.3",
+				"container.image.tag":  "v1.2.3",
 				"level":                "info",
 			},
 			Lines: []string{`{"msg":"container metadata test entry"}`},
@@ -248,7 +252,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"service.name": "os-metadata-svc",
 				"os.type":      "linux",
 				"os.version":   "5.15.0-1042-aws",
-				"level":         "info",
+				"level":        "info",
 			},
 			Lines: []string{`{"msg":"os metadata test entry"}`},
 		},
@@ -260,7 +264,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"net.host.port": "8443",
 				"net.peer.name": "db.internal",
 				"net.peer.port": "5432",
-				"level":          "info",
+				"level":         "info",
 			},
 			Lines: []string{`{"msg":"network metadata test entry"}`},
 		},
@@ -271,24 +275,24 @@ func ingestAllOTelCategories(t *testing.T) {
 				"log.file.path": "/var/log/app/myapp.log",
 				"log.file.name": "myapp.log",
 				"log.iostream":  "stdout",
-				"level":          "info",
+				"level":         "info",
 			},
 			Lines: []string{`{"msg":"log metadata test entry"}`},
 		},
 		// ── Kubernetes workload types ──
 		{
 			Labels: map[string]string{
-				"service.name":            "k8s-workloads-svc",
-				"k8s.deployment.name":     "myapp-deploy",
-				"k8s.replicaset.name":     "myapp-deploy-abc123",
-				"k8s.daemonset.name":      "fluentbit",
-				"k8s.statefulset.name":    "redis",
-				"k8s.job.name":            "batch-import",
-				"k8s.cronjob.name":        "nightly-cleanup",
-				"k8s.cluster.name":        "prod-us-east",
-				"k8s.namespace.name":      "default",
-				"k8s.pod.name":            "k8s-workloads-pod",
-				"level":                    "info",
+				"service.name":         "k8s-workloads-svc",
+				"k8s.deployment.name":  "myapp-deploy",
+				"k8s.replicaset.name":  "myapp-deploy-abc123",
+				"k8s.daemonset.name":   "fluentbit",
+				"k8s.statefulset.name": "redis",
+				"k8s.job.name":         "batch-import",
+				"k8s.cronjob.name":     "nightly-cleanup",
+				"k8s.cluster.name":     "prod-us-east",
+				"k8s.namespace.name":   "default",
+				"k8s.pod.name":         "k8s-workloads-pod",
+				"level":                "info",
 			},
 			Lines: []string{`{"msg":"k8s workload types test entry"}`},
 		},
@@ -301,7 +305,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"telemetry.sdk.version":  "1.21.0",
 				"service.version":        "2.0.0",
 				"service.instance.id":    "instance-xyz-789",
-				"level":                   "info",
+				"level":                  "info",
 			},
 			Lines: []string{`{"msg":"telemetry sdk metadata test entry"}`},
 		},
@@ -311,7 +315,7 @@ func ingestAllOTelCategories(t *testing.T) {
 				"service.name":                "deployment-metadata-svc",
 				"deployment.environment":      "production",
 				"deployment.environment.name": "prod-us-east",
-				"level":                        "info",
+				"level":                       "info",
 			},
 			Lines: []string{`{"msg":"deployment metadata test entry"}`},
 		},
@@ -1347,10 +1351,10 @@ func TestOTelCompatibilityScore(t *testing.T) {
 
 	// Label values
 	labelValueTests := map[string]string{
-		"service_name":    "otel-auth-service",
-		"cloud_provider":  "aws",
-		"os_type":         "linux",
-		"log_iostream":    "stdout",
+		"service_name":   "otel-auth-service",
+		"cloud_provider": "aws",
+		"os_type":        "linux",
+		"log_iostream":   "stdout",
 	}
 	for label, wantValue := range labelValueTests {
 		vals := getLabelValues(t, proxyUnderscoreURL, label)

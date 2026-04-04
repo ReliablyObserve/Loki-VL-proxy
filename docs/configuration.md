@@ -11,6 +11,8 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 | `-log-level` | — | `info` | Log level: debug, info, warn, error |
 | `-tls-cert-file` | — | — | TLS certificate file for HTTPS |
 | `-tls-key-file` | — | — | TLS key file for HTTPS |
+| `-tls-client-ca-file` | — | — | CA file for verifying HTTPS client certificates |
+| `-tls-require-client-cert` | — | `false` | Require and verify HTTPS client certificates |
 
 ## Label Translation
 
@@ -63,12 +65,15 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `-tenant-map` | `TENANT_MAP` | — | JSON string→int tenant mapping |
+| `-auth.enabled` | — | `false` | Require `X-Scope-OrgID` on query requests |
+| `-tenant.allow-global` | — | `false` | Allow `X-Scope-OrgID` of `0` or `*` to use the backend default tenant |
 
 ### Tenant Resolution Order
 
 1. **Tenant map lookup** — if `-tenant-map` is configured and the org ID matches a key, use the mapped `AccountID`/`ProjectID`
 2. **Numeric passthrough** — if the org ID is a number (e.g., `"42"`), pass it directly as `AccountID` with `ProjectID: 0`
-3. **Default** — unmapped non-numeric org IDs get `AccountID: 0`, `ProjectID: 0`
+3. **Fail closed** — unmapped non-numeric org IDs are rejected with `403 Forbidden`
+4. **Optional global bypass** — `X-Scope-OrgID` values `0` and `*` are rejected unless `-tenant.allow-global=true`
 
 ### Configuration Examples
 
@@ -126,9 +131,42 @@ kill -HUP $(pidof loki-vl-proxy)
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `-max-lines` | — | `1000` | Default max lines per query |
+| `-backend-timeout` | — | `120s` | Timeout for non-streaming VL backend requests |
 | `-stream-response` | — | `false` | Stream via chunked transfer |
 | `-response-gzip` | — | `true` | Compress responses |
 | `-derived-fields` | — | — | JSON derived fields for trace linking |
 | `-forward-headers` | — | — | HTTP headers to forward to VL |
+| `-forward-cookies` | — | — | Cookie names to forward to VL |
 | `-backend-basic-auth` | — | — | `user:password` for VL basic auth |
 | `-backend-tls-skip-verify` | — | `false` | Skip TLS on VL connection |
+| `-tail.allowed-origins` | — | — | Comma-separated WebSocket Origin allowlist for `/loki/api/v1/tail` |
+
+## Observability and Admin Surfaces
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `-server.register-instrumentation` | — | `true` | Register `/metrics` and related instrumentation handlers |
+| `-server.enable-pprof` | — | `false` | Expose `/debug/pprof/*` |
+| `-server.enable-query-analytics` | — | `false` | Expose `/debug/queries` |
+| `-server.admin-auth-token` | — | — | Bearer token accepted on admin/debug endpoints |
+| `-metrics.max-tenants` | — | `256` | Max unique tenant labels retained in `/metrics` before using `__overflow__` |
+| `-metrics.max-clients` | — | `256` | Max unique client labels retained in `/metrics` before using `__overflow__` |
+| `-metrics.trust-proxy-headers` | — | `false` | Trust `X-Grafana-User` and `X-Forwarded-For` for client metrics |
+
+## Grafana Datasource Mapping
+
+These Grafana Loki datasource settings now have a direct proxy-side mapping:
+
+| Grafana Setting | Proxy Support |
+|---|---|
+| URL | `-listen`, optional `-tls-cert-file` / `-tls-key-file` |
+| No Authentication | Supported by default |
+| TLS Client Authentication | `-tls-client-ca-file`, `-tls-require-client-cert` |
+| Skip TLS certificate validation | Grafana-side only |
+| Add self-signed certificate | Grafana-side only |
+| HTTP headers (`X-Scope-OrgID`, auth headers) | `-forward-headers`, `-tenant-map`, `-auth.enabled` |
+| Allowed cookies | `-forward-cookies` |
+| Timeout | `-backend-timeout` for proxy→VL, Grafana datasource timeout for Grafana→proxy |
+| Maximum lines | `-max-lines` |
+
+Alerting datasource integration is still partial: the proxy exposes empty rules/alerts stubs for datasource compatibility, but it does not implement a full Loki ruler API.

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -54,17 +57,32 @@ func main() {
 	// TLS server
 	tlsCertFile := flag.String("tls-cert-file", "", "TLS certificate file for HTTPS server")
 	tlsKeyFile := flag.String("tls-key-file", "", "TLS private key file for HTTPS server")
+	tlsClientCAFile := flag.String("tls-client-ca-file", "", "CA certificate file used to verify HTTPS client certificates")
+	tlsRequireClientCert := flag.Bool("tls-require-client-cert", false, "Require and verify HTTPS client certificates")
 
 	// Response compression
 	enableGzip := flag.Bool("response-gzip", true, "Enable gzip response compression for clients that accept it")
 
 	// Grafana datasource compatibility
 	maxLines := flag.Int("max-lines", 1000, "Default max lines per query")
+	backendTimeout := flag.Duration("backend-timeout", 120*time.Second, "Timeout for non-streaming requests to the VictoriaLogs backend")
 	backendBasicAuth := flag.String("backend-basic-auth", "", "Basic auth for VL backend (user:password)")
 	backendTLSSkip := flag.Bool("backend-tls-skip-verify", false, "Skip TLS verification for VL backend")
 	forwardHeaders := flag.String("forward-headers", "", "Comma-separated list of HTTP headers to forward to VL backend")
+	forwardCookies := flag.String("forward-cookies", "", "Comma-separated list of cookie names to forward to VL backend")
 	derivedFieldsJSON := flag.String("derived-fields", "", `JSON derived fields: [{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]`)
 	streamResponse := flag.Bool("stream-response", false, "Stream log responses via chunked transfer encoding")
+
+	// Loki-style auth / instrumentation controls
+	authEnabled := flag.Bool("auth.enabled", false, "Require X-Scope-OrgID on query requests. When false, requests without a tenant header use the backend default tenant.")
+	registerInstrumentation := flag.Bool("server.register-instrumentation", true, "Register instrumentation handlers such as /metrics")
+	enablePprof := flag.Bool("server.enable-pprof", false, "Expose /debug/pprof/* handlers")
+	enableQueryAnalytics := flag.Bool("server.enable-query-analytics", false, "Expose /debug/queries query analytics")
+	adminAuthToken := flag.String("server.admin-auth-token", "", "Bearer token required for admin/debug endpoints when set")
+	tailAllowedOrigins := flag.String("tail.allowed-origins", "", "Comma-separated WebSocket Origin allowlist for /loki/api/v1/tail. Empty denies browser origins.")
+	metricsMaxTenants := flag.Int("metrics.max-tenants", 256, "Maximum unique tenant labels retained in exported metrics before collapsing into __overflow__")
+	metricsMaxClients := flag.Int("metrics.max-clients", 256, "Maximum unique client labels retained in exported metrics before collapsing into __overflow__")
+	metricsTrustProxyHeaders := flag.Bool("metrics.trust-proxy-headers", false, "Trust X-Grafana-User and X-Forwarded-For when deriving per-client metrics labels")
 
 	// Label translation
 	labelStyle := flag.String("label-style", "passthrough", `Label name translation mode:
@@ -72,12 +90,14 @@ func main() {
   underscores  - convert dots to underscores (use when VL stores OTel-style dotted names like service.name)`)
 	fieldMappingJSON := flag.String("field-mapping", "", `JSON custom field mappings: [{"vl_field":"service.name","loki_label":"service_name"}]`)
 	streamFieldsCSV := flag.String("stream-fields", "", `Comma-separated VL _stream_fields labels for stream selector optimization (e.g., "app,env,namespace")`)
+	allowGlobalTenant := flag.Bool("tenant.allow-global", false, `Allow X-Scope-OrgID "*" or "0" to bypass AccountID/ProjectID scoping and use the backend default tenant`)
 
 	// Peer cache (fleet distribution)
 	peerSelf := flag.String("peer-self", "", `This instance's address for peer cache (e.g., "10.0.0.1:3100"). Empty disables peer cache.`)
 	peerDiscovery := flag.String("peer-discovery", "", `Peer discovery: "dns" (headless service) or "static" (comma-separated)`)
 	peerDNS := flag.String("peer-dns", "", `Headless service DNS name for peer discovery (e.g., "proxy-headless.ns.svc.cluster.local")`)
 	peerStatic := flag.String("peer-static", "", `Static peer list (e.g., "10.0.0.1:3100,10.0.0.2:3100")`)
+	peerAuthToken := flag.String("peer-auth-token", "", "Shared token required on /_cache/get peer-cache requests when set")
 
 	flag.Parse()
 
@@ -190,20 +210,33 @@ func main() {
 
 	// Create proxy
 	p, err := proxy.New(proxy.Config{
-		BackendURL:       *backendURL,
-		Cache:            c,
-		LogLevel:         *logLevel,
-		TenantMap:        tenantMap,
-		MaxLines:         *maxLines,
-		BackendBasicAuth: *backendBasicAuth,
-		BackendTLSSkip:   *backendTLSSkip,
-		ForwardHeaders:   fwdHeaders,
-		DerivedFields:    derivedFields,
-		StreamResponse:   *streamResponse,
-		LabelStyle:       ls,
-		FieldMappings:    fieldMappings,
-		StreamFields:     parseCSV(*streamFieldsCSV),
-		PeerCache:        peerCache,
+		BackendURL:               *backendURL,
+		Cache:                    c,
+		LogLevel:                 *logLevel,
+		TenantMap:                tenantMap,
+		MaxLines:                 *maxLines,
+		BackendTimeout:           *backendTimeout,
+		BackendBasicAuth:         *backendBasicAuth,
+		BackendTLSSkip:           *backendTLSSkip,
+		ForwardHeaders:           fwdHeaders,
+		ForwardCookies:           parseCSV(*forwardCookies),
+		DerivedFields:            derivedFields,
+		StreamResponse:           *streamResponse,
+		AuthEnabled:              *authEnabled,
+		AllowGlobalTenant:        *allowGlobalTenant,
+		RegisterInstrumentation:  registerInstrumentation,
+		EnablePprof:              *enablePprof,
+		EnableQueryAnalytics:     *enableQueryAnalytics,
+		AdminAuthToken:           *adminAuthToken,
+		TailAllowedOrigins:       parseCSV(*tailAllowedOrigins),
+		MetricsMaxTenants:        *metricsMaxTenants,
+		MetricsMaxClients:        *metricsMaxClients,
+		MetricsTrustProxyHeaders: *metricsTrustProxyHeaders,
+		LabelStyle:               ls,
+		FieldMappings:            fieldMappings,
+		StreamFields:             parseCSV(*streamFieldsCSV),
+		PeerCache:                peerCache,
+		PeerAuthToken:            *peerAuthToken,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
@@ -227,9 +260,6 @@ func main() {
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 
-	// pprof endpoints for production profiling
-	mux.HandleFunc("/debug/pprof/", http.DefaultServeMux.ServeHTTP)
-
 	// Middleware chain: body limit → gzip compression
 	handler := maxBodyHandler(*maxBodyBytes, mux)
 	if *enableGzip {
@@ -244,6 +274,13 @@ func main() {
 		WriteTimeout:   *writeTimeout,
 		IdleTimeout:    *idleTimeout,
 		MaxHeaderBytes: *maxHeaderBytes,
+	}
+	if *tlsClientCAFile != "" || *tlsRequireClientCert {
+		tlsCfg, err := buildServerTLSConfig(*tlsClientCAFile, *tlsRequireClientCert)
+		if err != nil {
+			log.Fatalf("Failed to configure server TLS client authentication: %v", err)
+		}
+		srv.TLSConfig = tlsCfg
 	}
 
 	// SIGHUP config reload for tenant-map and field-mapping
@@ -325,4 +362,34 @@ func parseCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+func buildServerTLSConfig(clientCAFile string, requireClientCert bool) (*tls.Config, error) {
+	if clientCAFile == "" {
+		if requireClientCert {
+			return nil, fmt.Errorf("tls-client-ca-file is required when tls-require-client-cert is enabled")
+		}
+		return nil, nil
+	}
+
+	caPEM, err := os.ReadFile(clientCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read client CA file: %w", err)
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("failed to parse client CA PEM")
+	}
+
+	clientAuth := tls.VerifyClientCertIfGiven
+	if requireClientCert {
+		clientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientCAs:  pool,
+		ClientAuth: clientAuth,
+	}, nil
 }

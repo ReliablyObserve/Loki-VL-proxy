@@ -81,6 +81,10 @@ jobs:
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      pr_created: ${{ steps.create_release_pr.outputs.pr_created }}
+      release_branch: ${{ steps.create_release_pr.outputs.release_branch }}
+      pr_url: ${{ steps.create_release_pr.outputs.pr_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -161,7 +165,10 @@ jobs:
           sed -i "s|tests-[0-9]*%20passed|tests-${TESTS}%20passed|g" README.md
 
       - name: Create release PR
+        id: create_release_pr
         run: |
+          set -euo pipefail
+
           VERSION="${{ needs.prepare-release.outputs.next_version }}"
           BRANCH="release/v${VERSION}"
           TESTS="${{ steps.metrics.outputs.tests }}"
@@ -177,7 +184,10 @@ jobs:
           git commit -m "chore: release v${VERSION} [skip ci]"
           git push origin "$BRANCH"
 
-          gh pr create \
+          echo "release_branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "pr_created=false" >> "$GITHUB_OUTPUT"
+
+          if PR_URL=$(gh pr create \
             --title "chore: release v${VERSION}" \
             --body "$(cat <<PRBODY
           ## Release v${VERSION}
@@ -193,15 +203,42 @@ jobs:
           )" \
             --base main \
             --head "$BRANCH" \
-            --label "release"
+            --label "release" 2>pr_create.err); then
+            echo "pr_created=true" >> "$GITHUB_OUTPUT"
+            echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+            echo "Created release PR: ${PR_URL}"
+          else
+            ERR_MSG=$(cat pr_create.err)
+            if echo "$ERR_MSG" | grep -q "GitHub Actions is not permitted to create or approve pull requests"; then
+              echo "::warning::GitHub policy blocked automatic release PR creation. Enable 'Allow GitHub Actions to create and approve pull requests' or create a PR manually from ${BRANCH}."
+              {
+                echo "## Auto Release manual handoff"
+                echo ""
+                echo "GitHub rejected \`gh pr create\` for \`${BRANCH}\` because this repository does not allow \`GITHUB_TOKEN\` to create pull requests."
+                echo ""
+                echo "- Branch pushed: \`${BRANCH}\`"
+                echo "- Create PR manually: https://github.com/${{ github.repository }}/pull/new/${BRANCH}"
+                echo "- Repo setting to enable full automation: Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
 
+            echo "$ERR_MSG"
+            exit 1
+          fi
+
+      - name: Enable auto-merge for release PR
+        if: steps.create_release_pr.outputs.pr_created == 'true'
+        run: |
+          set -euo pipefail
           sleep 5
-          gh pr merge "$BRANCH" --squash --auto --delete-branch
+          gh pr merge "${{ steps.create_release_pr.outputs.release_branch }}" --squash --auto --delete-branch
         env:
           GH_TOKEN: ${{ github.token }}
 
   tag-release:
     needs: [prepare-release, create-release-pr]
+    if: needs.prepare-release.outputs.should_release == 'true' && needs.create-release-pr.outputs.pr_created == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

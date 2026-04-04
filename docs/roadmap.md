@@ -18,7 +18,7 @@
 - [x] Query fingerprinting + analytics (`/debug/queries`)
 - [x] Auto-warming cache for top-N queries
 - [x] Graceful HTTP server shutdown (SIGTERM/SIGINT)
-- [x] Grafana datasource config (maxLines, basic auth, TLS, header forwarding)
+- [x] Grafana datasource config (maxLines, basic auth, backend timeout, TLS, header/cookie forwarding, optional listener mTLS)
 - [x] Derived fields (regex extraction for trace linking)
 - [x] Chunked streaming (Transfer-Encoding: chunked for large results)
 - [x] OTel label translation (bidirectional dot<->underscore for 50+ fields)
@@ -39,7 +39,7 @@
 - [x] `quantile_over_time()` mapped to VL quantile
 - [x] `label_format` multi-rename (comma-separated)
 - [x] Extended binary ops (`%`, `^`, `==`, `!=`, `>`, `<`, `>=`, `<=`)
-- [x] Admin endpoint stubs (`/rules`, `/alerts`, `/config`)
+- [x] Datasource compatibility stubs (`/rules`, `/alerts`, `/config`)
 - [x] Playwright UI e2e tests
 - [x] Delete API endpoint with safeguards (confirmation, tenant scoping, audit logging)
 - [x] `without()` clause detection and clear error message
@@ -66,3 +66,4 @@
 - [ ] Peer cache Phase 1 implementation (DNS discovery + peer fetch)
 - [x] System metrics in /metrics (CPU, memory, IO, network via /proc) (v0.19.0)
 - [x] Native VL stream selector optimization for known `_stream_fields` (v0.23.0)
+- [ ] Full Loki ruler / alerting API semantics beyond datasource compatibility stubs
