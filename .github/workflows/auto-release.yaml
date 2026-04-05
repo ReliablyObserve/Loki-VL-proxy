@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - "README.md"
       - "CHANGELOG.md"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,7 +16,7 @@ jobs:
   prepare-release:
     runs-on: ubuntu-latest
     # Skip if this push is from a release PR merge or badge update
-    if: "!contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: release')"
+    if: github.event_name == 'workflow_dispatch' || (!contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore: release'))
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       next_version: ${{ steps.check.outputs.next_version }}
@@ -205,22 +206,29 @@ jobs:
 
           VERSION="${{ needs.prepare-release.outputs.next_version }}"
           BRANCH="release/v${VERSION}"
+          EXISTING_PR_URL="$(gh pr list --state open --base main --head "$BRANCH" --json url --jq '.[0].url // empty')"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Delete stale release branch if it exists from a previous run
-          git push origin --delete "$BRANCH" 2>/dev/null || true
-          git checkout -b "$BRANCH"
+          git checkout -B "$BRANCH"
           git add CHANGELOG.md README.md docs/observability.md
           git add -f charts/loki-vl-proxy/Chart.yaml
           git diff --cached --quiet && { echo "No changes to release"; exit 0; }
           git commit -m "chore: release v${VERSION}"
-          git push origin "$BRANCH"
+          git push --force-with-lease origin "$BRANCH"
 
           echo "release_branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "pr_created=false" >> "$GITHUB_OUTPUT"
 
-          if PR_URL=$(gh pr create \
+          if [ -n "$EXISTING_PR_URL" ]; then
+            gh pr edit "$EXISTING_PR_URL" \
+              --title "chore: release v${VERSION}" \
+              --body-file "${{ steps.pr_body.outputs.body_file }}" \
+              --add-label "release"
+            echo "pr_created=true" >> "$GITHUB_OUTPUT"
+            echo "pr_url=${EXISTING_PR_URL}" >> "$GITHUB_OUTPUT"
+            echo "Updated existing release PR: ${EXISTING_PR_URL}"
+          elif PR_URL=$(gh pr create \
             --title "chore: release v${VERSION}" \
             --body-file "${{ steps.pr_body.outputs.body_file }}" \
             --base main \
@@ -248,6 +256,19 @@ jobs:
             echo "$ERR_MSG"
             exit 1
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Dispatch release PR validation workflows
+        if: steps.create_release_pr.outputs.pr_created == 'true'
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.create_release_pr.outputs.release_branch }}"
+          gh workflow run ci.yaml --ref "$BRANCH"
+          gh workflow run codeql.yaml --ref "$BRANCH"
+          gh workflow run compat-loki.yaml --ref "$BRANCH"
+          gh workflow run compat-drilldown.yaml --ref "$BRANCH"
+          gh workflow run compat-vl.yaml --ref "$BRANCH"
         env:
           GH_TOKEN: ${{ github.token }}
 
