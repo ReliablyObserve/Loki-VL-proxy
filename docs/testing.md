@@ -147,6 +147,8 @@ That release-specific validation intentionally checks only release artifacts and
 
 Normal PRs continue to run the full CI, compatibility, and PR quality workflows.
 
+For fully automatic release PR validation, configure a repository secret named `RELEASE_WORKFLOW_TOKEN` with `repo` and `workflow` scope. If that secret is missing and GitHub blocks workflow dispatch from `GITHUB_TOKEN`, the release PR is still created but validation dispatch falls back to manual handoff in the workflow summary.
+
 See [compatibility-matrix.md](/tmp/Loki-VL-proxy/docs/compatibility-matrix.md), [compatibility-loki.md](/tmp/Loki-VL-proxy/docs/compatibility-loki.md), [compatibility-drilldown.md](/tmp/Loki-VL-proxy/docs/compatibility-drilldown.md), [compatibility-victorialogs.md](/tmp/Loki-VL-proxy/docs/compatibility-victorialogs.md), and [compatibility-matrix.json](/tmp/Loki-VL-proxy/test/e2e-compat/compatibility-matrix.json).
 
 ## Running Specific Tests

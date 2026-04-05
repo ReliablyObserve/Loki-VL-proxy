@@ -218,6 +218,12 @@ Proxy-side datasource helpers:
 
 ## Release Automation
 
+The release path is PR-driven:
+
+`main merge -> Auto Release -> release/vX.Y.Z PR -> auto-merge -> tag -> GitHub release`
+
+For fully automatic release PR validation, set a repository secret named `RELEASE_WORKFLOW_TOKEN` with `repo` and `workflow` scope. Without that token, GitHub may reject workflow dispatch from `GITHUB_TOKEN`; the release PR is still created, but validation dispatch falls back to manual handoff.
+
 The `Auto Release` workflow opens a release PR from a generated `release/vX.Y.Z` branch. Full automation requires the repository setting `Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests`.
 
 The release PR updates the versioned changelog section, README badges, Helm chart metadata, and versioned observability examples. After the release PR merges, a tag is created from the merged commit and the `Release` workflow publishes binaries, the Helm package, the container image, and the GitHub release using that exact changelog section as the release notes.

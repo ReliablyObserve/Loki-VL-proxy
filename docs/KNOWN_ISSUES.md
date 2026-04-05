@@ -34,6 +34,7 @@ The remaining limitation is repository signature policy:
 |---|---|
 | Automated release commit signatures | Release PR commits created by `github-actions[bot]` are still unsigned unless workflow signing is configured |
 | Fully automatic release PR merge under required signatures | Requires either workflow commit signing or a repo ruleset exception for release automation |
+| Automatic dispatch of release PR validation workflows | `GITHUB_TOKEN` may be blocked from `workflow_dispatch`; set `RELEASE_WORKFLOW_TOKEN` (`repo` + `workflow`) for full automatic validation on release PRs |
 
 The workflow already handles:
 

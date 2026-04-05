@@ -260,23 +260,53 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Dispatch release PR validation workflows
+        id: dispatch_release_pr_validation_workflows
         if: steps.create_release_pr.outputs.pr_created == 'true'
         run: |
           set -euo pipefail
           BRANCH="${{ steps.create_release_pr.outputs.release_branch }}"
-          gh workflow run release-pr-validation.yaml --ref "$BRANCH"
-          gh workflow run codeql.yaml --ref "$BRANCH"
+          dispatch() {
+            local workflow="$1"
+            local err_file
+            err_file="$(mktemp)"
+            if gh workflow run "$workflow" --ref "$BRANCH" 2>"$err_file"; then
+              return 0
+            fi
+
+            if grep -q "Resource not accessible by integration" "$err_file"; then
+              echo "::warning::Unable to dispatch ${workflow} for ${BRANCH} with the current token."
+              {
+                echo "## Release PR validation handoff"
+                echo ""
+                echo "The release PR was created, but \`${workflow}\` could not be dispatched for \`${BRANCH}\` with the current automation token."
+                echo ""
+                echo "- Branch: \`${BRANCH}\`"
+                echo "- Release PR: ${{ steps.create_release_pr.outputs.pr_url }}"
+                echo "- To enable fully automatic release PR validation, set a repository secret named \`RELEASE_WORKFLOW_TOKEN\` with \`repo\` + \`workflow\` scope."
+                echo "- Without that secret, release PR checks for CodeQL and release validation must be started manually."
+              } >> "$GITHUB_STEP_SUMMARY"
+              return 1
+            fi
+
+            cat "$err_file"
+            exit 1
+          }
+
+          DISPATCH_OK=true
+          dispatch release-pr-validation.yaml || DISPATCH_OK=false
+          dispatch codeql.yaml || DISPATCH_OK=false
+          echo "dispatch_ok=${DISPATCH_OK}" >> "$GITHUB_OUTPUT"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_WORKFLOW_TOKEN || github.token }}
 
       - name: Enable auto-merge for release PR
-        if: steps.create_release_pr.outputs.pr_created == 'true'
+        if: steps.create_release_pr.outputs.pr_created == 'true' && steps.dispatch_release_pr_validation_workflows.outputs.dispatch_ok != 'false'
         run: |
           set -euo pipefail
           sleep 5
           gh pr merge "${{ steps.create_release_pr.outputs.release_branch }}" --squash --auto --delete-branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_WORKFLOW_TOKEN || github.token }}
 
   tag-release:
     if: "startsWith(github.event.head_commit.message, 'chore: release v')"
