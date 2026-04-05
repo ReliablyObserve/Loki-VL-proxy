@@ -150,6 +150,10 @@ func readCPUStat() (cpuStat, error) {
 	if err != nil {
 		return cpuStat{}, err
 	}
+	return parseCPUStatData(string(data))
+}
+
+func parseCPUStatData(data string) (cpuStat, error) {
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "cpu ") {
@@ -176,7 +180,11 @@ func readMemInfo() (total, avail, free int64) {
 	if err != nil {
 		return 0, 0, 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	return parseMemInfoData(string(data))
+}
+
+func parseMemInfoData(data string) (total, avail, free int64) {
+	for _, line := range strings.Split(data, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 {
 			val, _ := strconv.ParseInt(fields[1], 10, 64)
@@ -199,7 +207,11 @@ func readProcessRSS() int64 {
 	if err != nil {
 		return 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	return parseProcessRSSData(string(data))
+}
+
+func parseProcessRSSData(data string) int64 {
+	for _, line := range strings.Split(data, "\n") {
 		if strings.HasPrefix(line, "VmRSS:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
@@ -216,7 +228,11 @@ func readDiskIO() (readBytes, writeBytes int64) {
 	if err != nil {
 		return 0, 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	return parseDiskIOData(string(data))
+}
+
+func parseDiskIOData(data string) (readBytes, writeBytes int64) {
+	for _, line := range strings.Split(data, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 14 {
 			// fields[5] = sectors read, fields[9] = sectors written (512 bytes/sector)
@@ -234,7 +250,11 @@ func readNetIO() (rxBytes, txBytes int64) {
 	if err != nil {
 		return 0, 0
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	return parseNetIOData(string(data))
+}
+
+func parseNetIOData(data string) (rxBytes, txBytes int64) {
+	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.Contains(line, ":") || strings.HasPrefix(line, "Inter") || strings.HasPrefix(line, " face") {
 			continue
@@ -266,7 +286,13 @@ func readPSI(resource string) (some10, some60, some300, full10, full60, full300 
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	return parsePSIData(string(data))
+}
+
+func parsePSIData(data string) (some10, some60, some300, full10, full60, full300 float64) {
+	some10, some60, some300 = -1, -1, -1
+	full10, full60, full300 = -1, -1, -1
+	for _, line := range strings.Split(data, "\n") {
 		if strings.HasPrefix(line, "some ") {
 			some10, some60, some300 = parsePSILine(line)
 		}

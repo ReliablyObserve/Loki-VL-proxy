@@ -251,6 +251,92 @@ func TestParseLabelModes(t *testing.T) {
 	}
 }
 
+func TestBuildProxyConfig(t *testing.T) {
+	registerInstrumentation := true
+	c := proxyRuntimeConfig{
+		backendURL:               "http://backend",
+		cache:                    nil,
+		logLevel:                 "debug",
+		tenantMapJSON:            `{"team-a":{"account_id":"1","project_id":"2"}}`,
+		maxLines:                 123,
+		backendTimeout:           5 * time.Second,
+		backendBasicAuth:         "user:pass",
+		backendTLSSkip:           true,
+		forwardHeaders:           "Authorization, X-Scope-OrgID",
+		forwardCookies:           "session, csrf",
+		derivedFieldsJSON:        `[{"name":"traceID","matcherRegex":"trace_id=(\\w+)","url":"http://tempo/${__value.raw}"}]`,
+		streamResponse:           true,
+		authEnabled:              true,
+		allowGlobalTenant:        true,
+		registerInstrumentation:  &registerInstrumentation,
+		enablePprof:              true,
+		enableQueryAnalytics:     true,
+		adminAuthToken:           "secret",
+		tailAllowedOrigins:       "https://grafana.example.com",
+		metricsMaxTenants:        11,
+		metricsMaxClients:        12,
+		metricsTrustProxyHeaders: true,
+		labelStyle:               "underscores",
+		metadataFieldMode:        "hybrid",
+		fieldMappingJSON:         `[{"vl_field":"service.name","loki_label":"service_name"}]`,
+		streamFieldsCSV:          "app,namespace",
+		peerSelf:                 "10.0.0.1:3100",
+		peerDiscovery:            "static",
+		peerStatic:               "10.0.0.2:3100,10.0.0.3:3100",
+		peerAuthToken:            "peer-secret",
+	}
+
+	got, err := buildProxyConfig(c)
+	if err != nil {
+		t.Fatalf("unexpected buildProxyConfig error: %v", err)
+	}
+	if got.BackendURL != "http://backend" || got.MaxLines != 123 || got.BackendBasicAuth != "user:pass" || !got.BackendTLSSkip {
+		t.Fatalf("unexpected proxy config basics: %+v", got)
+	}
+	if len(got.TenantMap) != 1 || got.TenantMap["team-a"].AccountID != "1" {
+		t.Fatalf("unexpected tenant map: %+v", got.TenantMap)
+	}
+	if len(got.ForwardHeaders) != 2 || got.ForwardHeaders[0] != "Authorization" {
+		t.Fatalf("unexpected forward headers: %+v", got.ForwardHeaders)
+	}
+	if len(got.ForwardCookies) != 2 || got.ForwardCookies[1] != "csrf" {
+		t.Fatalf("unexpected forward cookies: %+v", got.ForwardCookies)
+	}
+	if got.LabelStyle != proxy.LabelStyleUnderscores || got.MetadataFieldMode != proxy.MetadataFieldModeHybrid {
+		t.Fatalf("unexpected label modes: %v %v", got.LabelStyle, got.MetadataFieldMode)
+	}
+	if len(got.FieldMappings) != 1 || got.FieldMappings[0].VLField != "service.name" {
+		t.Fatalf("unexpected field mappings: %+v", got.FieldMappings)
+	}
+	if len(got.DerivedFields) != 1 || got.DerivedFields[0].Name != "traceID" {
+		t.Fatalf("unexpected derived fields: %+v", got.DerivedFields)
+	}
+	if len(got.StreamFields) != 2 || got.StreamFields[0] != "app" {
+		t.Fatalf("unexpected stream fields: %+v", got.StreamFields)
+	}
+	if got.PeerCache == nil {
+		t.Fatal("expected peer cache to be created")
+	}
+	if got.PeerAuthToken != "peer-secret" {
+		t.Fatalf("unexpected peer auth token: %q", got.PeerAuthToken)
+	}
+}
+
+func TestBuildProxyConfig_InvalidInputs(t *testing.T) {
+	cases := []proxyRuntimeConfig{
+		{tenantMapJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
+		{fieldMappingJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
+		{derivedFieldsJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
+		{labelStyle: "bad", metadataFieldMode: "hybrid"},
+		{labelStyle: "passthrough", metadataFieldMode: "bad"},
+	}
+	for _, tc := range cases {
+		if _, err := buildProxyConfig(tc); err == nil {
+			t.Fatalf("expected buildProxyConfig to reject %+v", tc)
+		}
+	}
+}
+
 func writeTestCA(t *testing.T) string {
 	t.Helper()
 

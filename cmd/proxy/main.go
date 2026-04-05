@@ -42,6 +42,40 @@ type envConfig struct {
 	deploymentEnv     string
 }
 
+type proxyRuntimeConfig struct {
+	backendURL               string
+	cache                    *cache.Cache
+	logLevel                 string
+	tenantMapJSON            string
+	maxLines                 int
+	backendTimeout           time.Duration
+	backendBasicAuth         string
+	backendTLSSkip           bool
+	forwardHeaders           string
+	forwardCookies           string
+	derivedFieldsJSON        string
+	streamResponse           bool
+	authEnabled              bool
+	allowGlobalTenant        bool
+	registerInstrumentation  *bool
+	enablePprof              bool
+	enableQueryAnalytics     bool
+	adminAuthToken           string
+	tailAllowedOrigins       string
+	metricsMaxTenants        int
+	metricsMaxClients        int
+	metricsTrustProxyHeaders bool
+	labelStyle               string
+	metadataFieldMode        string
+	fieldMappingJSON         string
+	streamFieldsCSV          string
+	peerSelf                 string
+	peerDiscovery            string
+	peerDNS                  string
+	peerStatic               string
+	peerAuthToken            string
+}
+
 func main() {
 	// Server flags
 	listenAddr := flag.String("listen", ":3100", "Address to listen on (Loki-compatible frontend)")
@@ -173,15 +207,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse tenant map
-	tenantMap, err := parseTenantMapJSON(*tenantMapJSON)
-	if err != nil {
-		fatal("failed to parse tenant map json", "error", err)
-	}
-	if tenantMap != nil {
-		logger.Info("loaded tenant mappings", "count", len(tenantMap))
-	}
-
 	// L1 in-memory cache
 	c := cache.New(*cacheTTL, *cacheMax)
 
@@ -206,89 +231,61 @@ func main() {
 		)
 	}
 
-	// Parse forward headers
-	var fwdHeaders []string
-	if *forwardHeaders != "" {
-		for _, h := range strings.Split(*forwardHeaders, ",") {
-			h = strings.TrimSpace(h)
-			if h != "" {
-				fwdHeaders = append(fwdHeaders, h)
-			}
-		}
-	}
-
-	// Parse field mappings
-	fieldMappings, err := parseFieldMappingsJSON(*fieldMappingJSON)
+	proxyCfg, err := buildProxyConfig(proxyRuntimeConfig{
+		backendURL:               *backendURL,
+		cache:                    c,
+		logLevel:                 *logLevel,
+		tenantMapJSON:            *tenantMapJSON,
+		maxLines:                 *maxLines,
+		backendTimeout:           *backendTimeout,
+		backendBasicAuth:         *backendBasicAuth,
+		backendTLSSkip:           *backendTLSSkip,
+		forwardHeaders:           *forwardHeaders,
+		forwardCookies:           *forwardCookies,
+		derivedFieldsJSON:        *derivedFieldsJSON,
+		streamResponse:           *streamResponse,
+		authEnabled:              *authEnabled,
+		allowGlobalTenant:        *allowGlobalTenant,
+		registerInstrumentation:  registerInstrumentation,
+		enablePprof:              *enablePprof,
+		enableQueryAnalytics:     *enableQueryAnalytics,
+		adminAuthToken:           *adminAuthToken,
+		tailAllowedOrigins:       *tailAllowedOrigins,
+		metricsMaxTenants:        *metricsMaxTenants,
+		metricsMaxClients:        *metricsMaxClients,
+		metricsTrustProxyHeaders: *metricsTrustProxyHeaders,
+		labelStyle:               *labelStyle,
+		metadataFieldMode:        *metadataFieldMode,
+		fieldMappingJSON:         *fieldMappingJSON,
+		streamFieldsCSV:          *streamFieldsCSV,
+		peerSelf:                 *peerSelf,
+		peerDiscovery:            *peerDiscovery,
+		peerDNS:                  *peerDNS,
+		peerStatic:               *peerStatic,
+		peerAuthToken:            *peerAuthToken,
+	})
 	if err != nil {
-		fatal("failed to parse field mapping json", "error", err)
+		fatal("failed to build proxy configuration", "error", err)
 	}
-	if fieldMappings != nil {
-		logger.Info("loaded field mappings", "count", len(fieldMappings))
+	if proxyCfg.TenantMap != nil {
+		logger.Info("loaded tenant mappings", "count", len(proxyCfg.TenantMap))
 	}
-
-	// Validate label style
-	ls, mfm, err := parseLabelModes(*labelStyle, *metadataFieldMode)
-	if err != nil {
-		fatal("invalid label mode configuration", "error", err)
+	if proxyCfg.FieldMappings != nil {
+		logger.Info("loaded field mappings", "count", len(proxyCfg.FieldMappings))
 	}
-	if ls == proxy.LabelStyleUnderscores {
-		logger.Info("label translation enabled", "label_style", "underscores", "metadata_field_mode", string(mfm))
+	if proxyCfg.LabelStyle == proxy.LabelStyleUnderscores {
+		logger.Info("label translation enabled", "label_style", "underscores", "metadata_field_mode", string(proxyCfg.MetadataFieldMode))
 	}
-
-	// Parse derived fields
-	derivedFields, err := parseDerivedFieldsJSON(*derivedFieldsJSON)
-	if err != nil {
-		fatal("failed to parse derived fields json", "error", err)
+	if proxyCfg.DerivedFields != nil {
+		logger.Info("loaded derived fields", "count", len(proxyCfg.DerivedFields))
 	}
-	if derivedFields != nil {
-		logger.Info("loaded derived fields", "count", len(derivedFields))
-	}
-
-	// Create peer cache if configured
-	var peerCache *cache.PeerCache
-	if *peerSelf != "" && *peerDiscovery != "" {
-		peerCache = cache.NewPeerCache(cache.PeerConfig{
-			SelfAddr:      *peerSelf,
-			DiscoveryType: *peerDiscovery,
-			DNSName:       *peerDNS,
-			StaticPeers:   *peerStatic,
-			Port:          3100,
-		})
-		c.SetL3(peerCache)
+	if proxyCfg.PeerCache != nil {
+		c.SetL3(proxyCfg.PeerCache)
 		logger.Info("peer cache enabled", "self", *peerSelf, "discovery", *peerDiscovery)
 	}
 
 	// Create proxy
-	p, err := proxy.New(proxy.Config{
-		BackendURL:               *backendURL,
-		Cache:                    c,
-		LogLevel:                 *logLevel,
-		TenantMap:                tenantMap,
-		MaxLines:                 *maxLines,
-		BackendTimeout:           *backendTimeout,
-		BackendBasicAuth:         *backendBasicAuth,
-		BackendTLSSkip:           *backendTLSSkip,
-		ForwardHeaders:           fwdHeaders,
-		ForwardCookies:           parseCSV(*forwardCookies),
-		DerivedFields:            derivedFields,
-		StreamResponse:           *streamResponse,
-		AuthEnabled:              *authEnabled,
-		AllowGlobalTenant:        *allowGlobalTenant,
-		RegisterInstrumentation:  registerInstrumentation,
-		EnablePprof:              *enablePprof,
-		EnableQueryAnalytics:     *enableQueryAnalytics,
-		AdminAuthToken:           *adminAuthToken,
-		TailAllowedOrigins:       parseCSV(*tailAllowedOrigins),
-		MetricsMaxTenants:        *metricsMaxTenants,
-		MetricsMaxClients:        *metricsMaxClients,
-		MetricsTrustProxyHeaders: *metricsTrustProxyHeaders,
-		LabelStyle:               ls,
-		MetadataFieldMode:        mfm,
-		FieldMappings:            fieldMappings,
-		StreamFields:             parseCSV(*streamFieldsCSV),
-		PeerCache:                peerCache,
-		PeerAuthToken:            *peerAuthToken,
-	})
+	p, err := proxy.New(proxyCfg)
 	if err != nil {
 		fatal("failed to create proxy", "error", err)
 	}
@@ -542,6 +539,67 @@ func parseHeaderMapCSV(s string) map[string]string {
 		return nil
 	}
 	return headers
+}
+
+func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
+	tenantMap, err := parseTenantMapJSON(cfg.tenantMapJSON)
+	if err != nil {
+		return proxy.Config{}, fmt.Errorf("parse tenant map: %w", err)
+	}
+	fieldMappings, err := parseFieldMappingsJSON(cfg.fieldMappingJSON)
+	if err != nil {
+		return proxy.Config{}, fmt.Errorf("parse field mappings: %w", err)
+	}
+	ls, mfm, err := parseLabelModes(cfg.labelStyle, cfg.metadataFieldMode)
+	if err != nil {
+		return proxy.Config{}, err
+	}
+	derivedFields, err := parseDerivedFieldsJSON(cfg.derivedFieldsJSON)
+	if err != nil {
+		return proxy.Config{}, fmt.Errorf("parse derived fields: %w", err)
+	}
+
+	var peerCache *cache.PeerCache
+	if cfg.peerSelf != "" && cfg.peerDiscovery != "" {
+		peerCache = cache.NewPeerCache(cache.PeerConfig{
+			SelfAddr:      cfg.peerSelf,
+			DiscoveryType: cfg.peerDiscovery,
+			DNSName:       cfg.peerDNS,
+			StaticPeers:   cfg.peerStatic,
+			Port:          3100,
+		})
+	}
+
+	return proxy.Config{
+		BackendURL:               cfg.backendURL,
+		Cache:                    cfg.cache,
+		LogLevel:                 cfg.logLevel,
+		TenantMap:                tenantMap,
+		MaxLines:                 cfg.maxLines,
+		BackendTimeout:           cfg.backendTimeout,
+		BackendBasicAuth:         cfg.backendBasicAuth,
+		BackendTLSSkip:           cfg.backendTLSSkip,
+		ForwardHeaders:           parseCSV(cfg.forwardHeaders),
+		ForwardCookies:           parseCSV(cfg.forwardCookies),
+		DerivedFields:            derivedFields,
+		StreamResponse:           cfg.streamResponse,
+		AuthEnabled:              cfg.authEnabled,
+		AllowGlobalTenant:        cfg.allowGlobalTenant,
+		RegisterInstrumentation:  cfg.registerInstrumentation,
+		EnablePprof:              cfg.enablePprof,
+		EnableQueryAnalytics:     cfg.enableQueryAnalytics,
+		AdminAuthToken:           cfg.adminAuthToken,
+		TailAllowedOrigins:       parseCSV(cfg.tailAllowedOrigins),
+		MetricsMaxTenants:        cfg.metricsMaxTenants,
+		MetricsMaxClients:        cfg.metricsMaxClients,
+		MetricsTrustProxyHeaders: cfg.metricsTrustProxyHeaders,
+		LabelStyle:               ls,
+		MetadataFieldMode:        mfm,
+		FieldMappings:            fieldMappings,
+		StreamFields:             parseCSV(cfg.streamFieldsCSV),
+		PeerCache:                peerCache,
+		PeerAuthToken:            cfg.peerAuthToken,
+	}, nil
 }
 
 func buildServerTLSConfig(clientCAFile string, requireClientCert bool) (*tls.Config, error) {

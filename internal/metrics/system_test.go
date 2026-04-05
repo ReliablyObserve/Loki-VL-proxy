@@ -107,6 +107,64 @@ func TestParsePSILine(t *testing.T) {
 	}
 }
 
+func TestParseCPUStatData(t *testing.T) {
+	got, err := parseCPUStatData("cpu  100 5 20 300 7 0 1 2\ncpu0 1 2 3 4 5 6 7 8\n")
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if got.user != 100 || got.nice != 5 || got.system != 20 || got.idle != 300 || got.iowait != 7 || got.softirq != 1 || got.steal != 2 {
+		t.Fatalf("unexpected cpu stat: %+v", got)
+	}
+}
+
+func TestParseCPUStatData_MissingCPU(t *testing.T) {
+	if _, err := parseCPUStatData("intr 1\nctxt 2\n"); err == nil {
+		t.Fatal("expected cpu parse error when aggregate cpu line is missing")
+	}
+}
+
+func TestParseMemInfoData(t *testing.T) {
+	total, avail, free := parseMemInfoData("MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n")
+	if total != 1024*1024 || avail != 512*1024 || free != 128*1024 {
+		t.Fatalf("unexpected meminfo values: total=%d avail=%d free=%d", total, avail, free)
+	}
+}
+
+func TestParseProcessRSSData(t *testing.T) {
+	if got := parseProcessRSSData("Name:\tproxy\nVmRSS:\t123 kB\n"); got != 123*1024 {
+		t.Fatalf("unexpected rss value: %d", got)
+	}
+	if got := parseProcessRSSData("Name:\tproxy\n"); got != 0 {
+		t.Fatalf("expected rss fallback 0, got %d", got)
+	}
+}
+
+func TestParseDiskIOData(t *testing.T) {
+	readBytes, writeBytes := parseDiskIOData("   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n")
+	if readBytes != 6*512 || writeBytes != 10*512 {
+		t.Fatalf("unexpected disk io values: read=%d write=%d", readBytes, writeBytes)
+	}
+}
+
+func TestParseNetIOData(t *testing.T) {
+	input := "Inter-|   Receive                                                |  Transmit\n" +
+		" face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" +
+		"    lo: 11 0 0 0 0 0 0 0 22 0 0 0 0 0 0 0\n" +
+		"  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n"
+	rxBytes, txBytes := parseNetIOData(input)
+	if rxBytes != 101 || txBytes != 202 {
+		t.Fatalf("unexpected net io values: rx=%d tx=%d", rxBytes, txBytes)
+	}
+}
+
+func TestParsePSIData(t *testing.T) {
+	input := "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n"
+	some10, some60, some300, full10, full60, full300 := parsePSIData(input)
+	if some10 != 1 || some60 != 2 || some300 != 3 || full10 != 4 || full60 != 5 || full300 != 6 {
+		t.Fatalf("unexpected psi data parse: %g %g %g %g %g %g", some10, some60, some300, full10, full60, full300)
+	}
+}
+
 func TestParseFloat(t *testing.T) {
 	if got := parseFloat("12.5"); got != 12.5 {
 		t.Fatalf("expected 12.5, got %g", got)
