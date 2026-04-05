@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - expanded OTLP exporter and observability configuration coverage
 
+## [0.26.0] - 2026-04-05
+
+### Features
+
+- improve observability and pr quality reporting
+
+### Bug Fixes
+
+- validate release prs via workflow dispatch (#5)
+- align release notes with changelog (#3)
+- restore nonzero pr quality snapshots
+- keep pr quality metrics json clean
+- publish releases from workflow dispatch
+- restore release workflow automation
+
+### Tests
+
+- 1023 total tests (86.3% coverage)
+
 ## [0.25.0] - 2026-04-05
 
 ### Features
