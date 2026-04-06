@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-04-06
+
 ### Features
 
 - configurable `tail.mode` with explicit `auto`, `native`, and `synthetic` streaming modes for Loki-compatible `/tail`
