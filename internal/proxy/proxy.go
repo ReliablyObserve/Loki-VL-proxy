@@ -174,6 +174,10 @@ const (
 	// maxLimitValue caps the number of results per query.
 	maxLimitValue    = 10000
 	tailWriteTimeout = 2 * time.Second
+	maxMultiTenantFanout = 64
+	maxMultiTenantMergedResponseBytes = 32 << 20
+	maxDetectedScanLines = 2000
+	maxSyntheticTailSeenEntries = 4096
 )
 
 // CacheTTLs defines per-endpoint cache TTLs.
@@ -182,6 +186,8 @@ var CacheTTLs = map[string]time.Duration{
 	"label_values":    60 * time.Second,
 	"series":          30 * time.Second,
 	"detected_fields": 30 * time.Second,
+	"detected_labels": 30 * time.Second,
+	"patterns":        20 * time.Second,
 	"query_range":     10 * time.Second,
 	"query":           10 * time.Second,
 }
@@ -221,12 +227,19 @@ type Proxy struct {
 	tailAllowedOrigins       map[string]struct{}
 	tailMode                 TailMode
 	metricsTrustProxyHeaders bool
+	translationCache         *cache.Cache
 }
 
 type tailConn interface {
 	SetWriteDeadline(time.Time) error
 	WriteMessage(int, []byte) error
 	WriteControl(int, []byte, time.Time) error
+}
+
+type syntheticTailSeen struct {
+	seen  map[string]struct{}
+	order []string
+	limit int
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -388,6 +401,7 @@ func New(cfg Config) (*Proxy, error) {
 		tailAllowedOrigins:       tailAllowedOrigins,
 		tailMode:                 tailMode,
 		metricsTrustProxyHeaders: cfg.MetricsTrustProxyHeaders,
+		translationCache:         cache.New(5*time.Minute, 5000),
 	}, nil
 }
 
@@ -418,6 +432,9 @@ func (p *Proxy) ReloadTenantMap(m map[string]TenantMapping) {
 func (p *Proxy) ReloadFieldMappings(mappings []FieldMapping) {
 	p.configMu.Lock()
 	p.labelTranslator = NewLabelTranslator(p.labelTranslator.style, mappings)
+	if p.translationCache != nil {
+		p.translationCache.InvalidatePrefix("")
+	}
 	p.configMu.Unlock()
 }
 
@@ -848,11 +865,16 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	var (
 		sc       = &statusCapture{ResponseWriter: w, code: 200}
 		capture  *bufferedResponseWriter
+		tee      *cacheTeeResponseWriter
 		cacheOut []byte
 	)
-	if len(withoutLabels) > 0 || cacheable {
+	if len(withoutLabels) > 0 {
 		capture = &bufferedResponseWriter{header: make(http.Header)}
 		sc = &statusCapture{ResponseWriter: capture, code: 200}
+	} else if cacheable {
+		tee = newCacheTeeResponseWriter(w)
+		defer tee.Release()
+		sc = &statusCapture{ResponseWriter: tee, code: 200}
 	}
 
 	// Check for subquery expression (e.g., max_over_time(rate(...)[1h:5m]))
@@ -883,6 +905,8 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		if cacheable && sc.code == http.StatusOK {
 			p.cache.SetWithTTL(cacheKey, cacheOut, CacheTTLs["query_range"])
 		}
+	} else if tee != nil && cacheable && sc.code == http.StatusOK {
+		p.cache.SetWithTTL(cacheKey, tee.CachedBody(), CacheTTLs["query_range"])
 	}
 
 	elapsed := time.Since(start)
@@ -1083,9 +1107,8 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	cacheKey := "labels:" + orgID + ":" + r.URL.RawQuery
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
-		p.log.Debug("labels cache hit")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(cached)
+		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("labels", http.StatusOK, time.Since(start))
 		p.metrics.RecordCacheHit()
 		return
@@ -1197,9 +1220,8 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	vlFieldName := p.labelTranslator.ToVL(labelName)
 
 	if cached, ok := p.cache.Get(cacheKey); ok {
-		p.log.Debug("label values cache hit", "label", labelName)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(cached)
+		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
 		p.metrics.RecordCacheHit()
 		return
@@ -1604,6 +1626,15 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = withOrgID(r)
+	cacheKey := "patterns:" + r.Header.Get("X-Scope-OrgID") + ":" + r.URL.RawQuery
+	if cached, ok := p.cache.Get(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		return
+	}
+	p.metrics.RecordCacheMiss()
 	query := r.FormValue("query")
 	if strings.TrimSpace(query) == "" {
 		query = "*"
@@ -1657,10 +1688,19 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.writeJSON(w, map[string]interface{}{
+	result := map[string]interface{}{
 		"status": "success",
 		"data":   extractLogPatterns(body, r.FormValue("step"), patternLimit),
-	})
+	}
+	resultBody, err := json.Marshal(result)
+	if err != nil {
+		p.writeJSON(w, map[string]interface{}{"status": "success", "data": []interface{}{}})
+		p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+		return
+	}
+	p.cache.SetWithTTL(cacheKey, resultBody, CacheTTLs["patterns"])
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resultBody)
 	p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
 }
 
@@ -2099,7 +2139,7 @@ func (p *Proxy) openNativeTailStream(parent context.Context, logsqlQuery string)
 }
 
 func (p *Proxy) streamSyntheticTail(ctx context.Context, conn tailConn, logsqlQuery, startHint string) {
-	lastSeen := make(map[string]struct{}, 128)
+	lastSeen := newSyntheticTailSeen(maxSyntheticTailSeenEntries)
 	windowStart := time.Now().Add(-5 * time.Second)
 	if parsed, ok := parseEntryTime(startHint); ok {
 		windowStart = parsed
@@ -2121,7 +2161,7 @@ func (p *Proxy) streamSyntheticTail(ctx context.Context, conn tailConn, logsqlQu
 	}
 }
 
-func (p *Proxy) writeSyntheticTailBatch(ctx context.Context, conn tailConn, logsqlQuery string, windowStart *time.Time, lastSeen map[string]struct{}) error {
+func (p *Proxy) writeSyntheticTailBatch(ctx context.Context, conn tailConn, logsqlQuery string, windowStart *time.Time, lastSeen *syntheticTailSeen) error {
 	params := url.Values{}
 	params.Set("query", logsqlQuery+" | sort by (_time)")
 	params.Set("start", formatVLTimestamp(windowStart.UTC().Format(time.RFC3339Nano)))
@@ -2155,10 +2195,10 @@ func (p *Proxy) writeSyntheticTailBatch(ctx context.Context, conn tailConn, logs
 		msgStr, _ := stringifyEntryValue(vlLine["_msg"])
 		streamStr, _ := stringifyEntryValue(vlLine["_stream"])
 		seenKey := timeStr + "\x00" + streamStr + "\x00" + msgStr
-		if _, ok := lastSeen[seenKey]; ok {
+		if lastSeen.Contains(seenKey) {
 			continue
 		}
-		lastSeen[seenKey] = struct{}{}
+		lastSeen.Add(seenKey)
 
 		if entryTime, ok := parseEntryTime(timeStr); ok && entryTime.After(newest) {
 			newest = entryTime
@@ -2177,10 +2217,39 @@ func (p *Proxy) writeSyntheticTailBatch(ctx context.Context, conn tailConn, logs
 	}
 
 	*windowStart = newest.Add(time.Nanosecond)
-	if len(lastSeen) > 1024 {
-		clear(lastSeen)
-	}
 	return nil
+}
+
+func newSyntheticTailSeen(limit int) *syntheticTailSeen {
+	if limit <= 0 {
+		limit = maxSyntheticTailSeenEntries
+	}
+	return &syntheticTailSeen{
+		seen:  make(map[string]struct{}, min(128, limit)),
+		order: make([]string, 0, min(128, limit)),
+		limit: limit,
+	}
+}
+
+func (s *syntheticTailSeen) Contains(key string) bool {
+	_, ok := s.seen[key]
+	return ok
+}
+
+func (s *syntheticTailSeen) Add(key string) {
+	if _, ok := s.seen[key]; ok {
+		return
+	}
+	s.seen[key] = struct{}{}
+	s.order = append(s.order, key)
+	if len(s.order) <= s.limit {
+		return
+	}
+	drop := len(s.order) - s.limit
+	for _, oldKey := range s.order[:drop] {
+		delete(s.seen, oldKey)
+	}
+	s.order = append([]string(nil), s.order[drop:]...)
 }
 
 func (p *Proxy) writeTailMessage(conn tailConn, messageType int, data []byte) error {
@@ -3795,6 +3864,10 @@ func (p *Proxy) handleMultiTenantFanout(w http.ResponseWriter, r *http.Request, 
 	if len(tenantIDs) < 2 {
 		return false
 	}
+	if len(tenantIDs) > maxMultiTenantFanout {
+		p.writeError(w, http.StatusBadRequest, fmt.Sprintf("multi-tenant fanout exceeds limit of %d tenants", maxMultiTenantFanout))
+		return true
+	}
 	filteredReq, filteredTenants, err := p.applyTenantSelectorFilter(r, tenantIDs)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
@@ -3865,6 +3938,10 @@ func (p *Proxy) handleMultiTenantFanout(w http.ResponseWriter, r *http.Request, 
 		p.writeError(w, http.StatusInternalServerError, "failed to merge multi-tenant response: "+err.Error())
 		return true
 	}
+	if len(body) > maxMultiTenantMergedResponseBytes {
+		p.writeError(w, http.StatusRequestEntityTooLarge, "multi-tenant merged response exceeds configured safety limit")
+		return true
+	}
 	if contentType == "" {
 		contentType = "application/json"
 	}
@@ -3874,6 +3951,82 @@ func (p *Proxy) handleMultiTenantFanout(w http.ResponseWriter, r *http.Request, 
 		p.cache.SetWithTTL(cacheKey, body, CacheTTLs[endpoint])
 	}
 	return true
+}
+
+type lokiStringListResponse struct {
+	Status string   `json:"status"`
+	Data   []string `json:"data"`
+}
+
+type lokiSeriesResponse struct {
+	Status string              `json:"status"`
+	Data   []map[string]string `json:"data"`
+}
+
+type lokiQueryResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string          `json:"resultType"`
+		Result     json.RawMessage `json:"result"`
+		Stats      json.RawMessage `json:"stats,omitempty"`
+	} `json:"data"`
+}
+
+type lokiStreamResult struct {
+	Stream map[string]string `json:"stream"`
+	Values [][]string        `json:"values"`
+}
+
+type lokiVectorResult struct {
+	Metric map[string]string `json:"metric"`
+	Value  []interface{}     `json:"value"`
+}
+
+type lokiMatrixResult struct {
+	Metric map[string]string `json:"metric"`
+	Values [][]interface{}   `json:"values"`
+}
+
+type detectedFieldResponse struct {
+	Status string                `json:"status"`
+	Data   []detectedFieldRecord `json:"data"`
+	Fields []detectedFieldRecord `json:"fields"`
+}
+
+type detectedFieldRecord struct {
+	Label       string        `json:"label"`
+	Type        string        `json:"type"`
+	Cardinality int           `json:"cardinality"`
+	Parsers     []string      `json:"parsers"`
+	JSONPath    []interface{} `json:"jsonPath,omitempty"`
+}
+
+type detectedFieldValuesResponse struct {
+	Status string   `json:"status"`
+	Data   []string `json:"data"`
+	Values []string `json:"values"`
+}
+
+type detectedLabelResponse struct {
+	Status         string                `json:"status"`
+	Data           []detectedLabelRecord `json:"data"`
+	DetectedLabels []detectedLabelRecord `json:"detectedLabels"`
+}
+
+type detectedLabelRecord struct {
+	Label       string `json:"label"`
+	Cardinality int    `json:"cardinality"`
+}
+
+type patternsResponse struct {
+	Status string               `json:"status"`
+	Data   []patternResultEntry `json:"data"`
+}
+
+type patternResultEntry struct {
+	Pattern string          `json:"pattern"`
+	Level   string          `json:"level,omitempty"`
+	Samples [][]interface{} `json:"samples"`
 }
 
 func parseDetectedLineLimit(r *http.Request) int {
@@ -4135,9 +4288,7 @@ func mergeMultiTenantResponses(endpoint string, tenantIDs []string, recorders []
 	case "labels":
 		values := make([]string, 0)
 		for _, rec := range recorders {
-			var resp struct {
-				Data []string `json:"data"`
-			}
+			var resp lokiStringListResponse
 			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 				return nil, "", err
 			}
@@ -4148,9 +4299,7 @@ func mergeMultiTenantResponses(endpoint string, tenantIDs []string, recorders []
 	case "label_values":
 		values := make([]string, 0)
 		for _, rec := range recorders {
-			var resp struct {
-				Data []string `json:"data"`
-			}
+			var resp lokiStringListResponse
 			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 				return nil, "", err
 			}
@@ -4228,15 +4377,12 @@ func interfaceStringMap(v interface{}) map[string]string {
 func mergeSeriesResponses(tenantIDs []string, recorders []*httptest.ResponseRecorder) ([]byte, string, error) {
 	seen := map[string]map[string]string{}
 	for i, rec := range recorders {
-		var resp struct {
-			Status string                   `json:"status"`
-			Data   []map[string]interface{} `json:"data"`
-		}
+		var resp lokiSeriesResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
 		for _, item := range resp.Data {
-			labels := injectTenantLabel(interfaceStringMap(item), tenantIDs[i])
+			labels := injectTenantLabel(item, tenantIDs[i])
 			seen[canonicalLabelsKey(labels)] = labels
 		}
 	}
@@ -4256,64 +4402,85 @@ func mergeSeriesResponses(tenantIDs []string, recorders []*httptest.ResponseReco
 func mergeLokiQueryResponses(tenantIDs []string, recorders []*httptest.ResponseRecorder) ([]byte, string, error) {
 	var (
 		resultType string
-		stats      interface{} = map[string]interface{}{}
-		merged     []interface{}
+		stats      json.RawMessage
+		streams    []lokiStreamResult
+		vectors    []lokiVectorResult
+		matrixes   []lokiMatrixResult
 	)
 	for i, rec := range recorders {
-		var resp map[string]interface{}
+		var resp lokiQueryResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
-		data, _ := resp["data"].(map[string]interface{})
-		if rt, _ := data["resultType"].(string); rt != "" {
-			if resultType == "" {
-				resultType = rt
-			}
+		if resp.Data.ResultType != "" && resultType == "" {
+			resultType = resp.Data.ResultType
 		}
-		if st, ok := data["stats"]; ok {
-			stats = st
+		if len(resp.Data.Stats) > 0 {
+			stats = resp.Data.Stats
 		}
-		items, _ := data["result"].([]interface{})
-		for _, item := range items {
-			obj, _ := item.(map[string]interface{})
-			switch resultType {
-			case "streams":
-				obj["stream"] = injectTenantLabel(interfaceStringMap(obj["stream"]), tenantIDs[i])
-			case "vector", "matrix":
-				obj["metric"] = injectTenantLabel(interfaceStringMap(obj["metric"]), tenantIDs[i])
+		switch resp.Data.ResultType {
+		case "streams":
+			var items []lokiStreamResult
+			if err := json.Unmarshal(resp.Data.Result, &items); err != nil {
+				return nil, "", err
 			}
-			merged = append(merged, obj)
+			for _, item := range items {
+				item.Stream = injectTenantLabel(item.Stream, tenantIDs[i])
+				streams = append(streams, item)
+			}
+		case "vector":
+			var items []lokiVectorResult
+			if err := json.Unmarshal(resp.Data.Result, &items); err != nil {
+				return nil, "", err
+			}
+			for _, item := range items {
+				item.Metric = injectTenantLabel(item.Metric, tenantIDs[i])
+				vectors = append(vectors, item)
+			}
+		case "matrix":
+			var items []lokiMatrixResult
+			if err := json.Unmarshal(resp.Data.Result, &items); err != nil {
+				return nil, "", err
+			}
+			for _, item := range items {
+				item.Metric = injectTenantLabel(item.Metric, tenantIDs[i])
+				matrixes = append(matrixes, item)
+			}
 		}
 	}
 	if resultType == "streams" {
-		sort.SliceStable(merged, func(i, j int) bool {
-			left, _ := merged[i].(map[string]interface{})
-			right, _ := merged[j].(map[string]interface{})
-			leftValues, _ := left["values"].([]interface{})
-			rightValues, _ := right["values"].([]interface{})
-			return latestStreamTimestamp(leftValues) > latestStreamTimestamp(rightValues)
+		sort.SliceStable(streams, func(i, j int) bool {
+			return latestStreamTimestampStrings(streams[i].Values) > latestStreamTimestampStrings(streams[j].Values)
 		})
 	}
-	body, err := json.Marshal(map[string]interface{}{
-		"status": "success",
-		"data": map[string]interface{}{
-			"resultType": resultType,
-			"result":     merged,
-			"stats":      stats,
-		},
-	})
+	data := map[string]interface{}{"resultType": resultType}
+	switch resultType {
+	case "streams":
+		data["result"] = streams
+	case "vector":
+		data["result"] = vectors
+	case "matrix":
+		data["result"] = matrixes
+	default:
+		data["result"] = []interface{}{}
+	}
+	if len(stats) > 0 {
+		data["stats"] = json.RawMessage(stats)
+	} else {
+		data["stats"] = map[string]interface{}{}
+	}
+	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": data})
 	return body, "application/json", err
 }
 
-func latestStreamTimestamp(values []interface{}) string {
+func latestStreamTimestampStrings(values [][]string) string {
 	if len(values) == 0 {
 		return ""
 	}
-	pair, _ := values[0].([]interface{})
-	if len(pair) == 0 {
+	if len(values[0]) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%v", pair[0])
+	return values[0][0]
 }
 
 func mergeIndexStatsResponses(recorders []*httptest.ResponseRecorder) ([]byte, string, error) {
@@ -4346,32 +4513,23 @@ func mergeDetectedFieldsResponses(recorders []*httptest.ResponseRecorder) ([]byt
 	}
 	merged := map[string]*mergedField{}
 	for _, rec := range recorders {
-		var resp map[string]interface{}
+		var resp detectedFieldResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
-		items, _ := resp["fields"].([]interface{})
-		for _, item := range items {
-			obj, _ := item.(map[string]interface{})
-			label, _ := obj["label"].(string)
+		for _, item := range resp.Fields {
+			label := item.Label
 			if label == "" {
 				continue
 			}
 			mf := merged[label]
 			if mf == nil {
-				mf = &mergedField{Label: label, Type: fmt.Sprintf("%v", obj["type"]), Parsers: map[string]struct{}{}}
-				if jp, ok := obj["jsonPath"].([]interface{}); ok {
-					mf.JSONPath = jp
-				}
+				mf = &mergedField{Label: label, Type: item.Type, Parsers: map[string]struct{}{}, JSONPath: item.JSONPath}
 				merged[label] = mf
 			}
-			if card, ok := obj["cardinality"].(float64); ok {
-				mf.Cardinality += int(card)
-			}
-			if parsers, ok := obj["parsers"].([]interface{}); ok {
-				for _, parser := range parsers {
-					mf.Parsers[fmt.Sprintf("%v", parser)] = struct{}{}
-				}
+			mf.Cardinality += item.Cardinality
+			for _, parser := range item.Parsers {
+				mf.Parsers[parser] = struct{}{}
 			}
 		}
 	}
@@ -4380,7 +4538,7 @@ func mergeDetectedFieldsResponses(recorders []*httptest.ResponseRecorder) ([]byt
 		labels = append(labels, label)
 	}
 	sort.Strings(labels)
-	out := make([]map[string]interface{}, 0, len(labels))
+	out := make([]detectedFieldRecord, 0, len(labels))
 	for _, label := range labels {
 		mf := merged[label]
 		parsers := make([]string, 0, len(mf.Parsers))
@@ -4388,18 +4546,18 @@ func mergeDetectedFieldsResponses(recorders []*httptest.ResponseRecorder) ([]byt
 			parsers = append(parsers, parser)
 		}
 		sort.Strings(parsers)
-		item := map[string]interface{}{
-			"label":       mf.Label,
-			"type":        mf.Type,
-			"cardinality": mf.Cardinality,
-			"parsers":     parsers,
+		item := detectedFieldRecord{
+			Label:       mf.Label,
+			Type:        mf.Type,
+			Cardinality: mf.Cardinality,
+			Parsers:     parsers,
 		}
 		if len(mf.JSONPath) > 0 {
-			item["jsonPath"] = mf.JSONPath
+			item.JSONPath = mf.JSONPath
 		}
 		out = append(out, item)
 	}
-	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": out, "fields": out})
+	body, err := json.Marshal(detectedFieldResponse{Status: "success", Data: out, Fields: out})
 	return body, "application/json", err
 }
 
@@ -4484,16 +4642,14 @@ func (p *Proxy) multiTenantDetectedFieldsResponse(r *http.Request, tenantIDs []s
 func mergeDetectedFieldValuesResponses(recorders []*httptest.ResponseRecorder) ([]byte, string, error) {
 	values := make([]string, 0)
 	for _, rec := range recorders {
-		var resp struct {
-			Values []string `json:"values"`
-		}
+		var resp detectedFieldValuesResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
 		values = append(values, resp.Values...)
 	}
 	values = uniqueSortedStrings(values)
-	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": values, "values": values})
+	body, err := json.Marshal(detectedFieldValuesResponse{Status: "success", Data: values, Values: values})
 	return body, "application/json", err
 }
 
@@ -4540,20 +4696,16 @@ func (p *Proxy) multiTenantDetectedLabelsResponse(r *http.Request, tenantIDs []s
 func mergeDetectedLabelsResponses(tenantIDs []string, recorders []*httptest.ResponseRecorder) ([]byte, string, error) {
 	cardinality := map[string]int{"__tenant_id__": len(tenantIDs)}
 	for _, rec := range recorders {
-		var resp map[string]interface{}
+		var resp detectedLabelResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
-		items, _ := resp["detectedLabels"].([]interface{})
-		for _, item := range items {
-			obj, _ := item.(map[string]interface{})
-			label, _ := obj["label"].(string)
+		for _, item := range resp.DetectedLabels {
+			label := item.Label
 			if label == "" {
 				continue
 			}
-			if card, ok := obj["cardinality"].(float64); ok {
-				cardinality[label] += int(card)
-			}
+			cardinality[label] += item.Cardinality
 		}
 	}
 	labels := make([]string, 0, len(cardinality))
@@ -4569,11 +4721,11 @@ func mergeDetectedLabelsResponses(tenantIDs []string, recorders []*httptest.Resp
 		}
 		return labels[i] < labels[j]
 	})
-	out := make([]map[string]interface{}, 0, len(labels))
+	out := make([]detectedLabelRecord, 0, len(labels))
 	for _, label := range labels {
-		out = append(out, map[string]interface{}{"label": label, "cardinality": cardinality[label]})
+		out = append(out, detectedLabelRecord{Label: label, Cardinality: cardinality[label]})
 	}
-	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": out, "detectedLabels": out})
+	body, err := json.Marshal(detectedLabelResponse{Status: "success", Data: out, DetectedLabels: out})
 	return body, "application/json", err
 }
 
@@ -4586,31 +4738,33 @@ func mergePatternsResponses(recorders []*httptest.ResponseRecorder) ([]byte, str
 	}
 	merged := map[string]*bucket{}
 	for _, rec := range recorders {
-		var resp map[string]interface{}
+		var resp patternsResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
 		}
-		items, _ := resp["data"].([]interface{})
-		for _, item := range items {
-			obj, _ := item.(map[string]interface{})
-			pattern, _ := obj["pattern"].(string)
-			level, _ := obj["level"].(string)
+		for _, item := range resp.Data {
+			pattern := item.Pattern
+			level := item.Level
 			key := level + "\x00" + pattern
 			b := merged[key]
 			if b == nil {
 				b = &bucket{level: level, pattern: pattern, samples: map[int64]int{}}
 				merged[key] = b
 			}
-			samples, _ := obj["samples"].([]interface{})
-			for _, sample := range samples {
-				pair, _ := sample.([]interface{})
+			for _, pair := range item.Samples {
 				if len(pair) < 2 {
 					continue
 				}
-				ts, _ := pair[0].(float64)
-				count, _ := pair[1].(float64)
-				b.samples[int64(ts)] += int(count)
-				b.total += int(count)
+				ts, ok := numberToInt64(pair[0])
+				if !ok {
+					continue
+				}
+				count, ok := numberToInt(pair[1])
+				if !ok {
+					continue
+				}
+				b.samples[ts] += count
+				b.total += count
 			}
 		}
 	}
@@ -4619,7 +4773,7 @@ func mergePatternsResponses(recorders []*httptest.ResponseRecorder) ([]byte, str
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].total > items[j].total })
-	out := make([]map[string]interface{}, 0, len(items))
+	out := make([]patternResultEntry, 0, len(items))
 	for _, item := range items {
 		timestamps := make([]int64, 0, len(item.samples))
 		for ts := range item.samples {
@@ -4630,14 +4784,46 @@ func mergePatternsResponses(recorders []*httptest.ResponseRecorder) ([]byte, str
 		for _, ts := range timestamps {
 			samples = append(samples, []interface{}{ts, item.samples[ts]})
 		}
-		respItem := map[string]interface{}{"pattern": item.pattern, "samples": samples}
+		respItem := patternResultEntry{Pattern: item.pattern, Samples: samples}
 		if item.level != "" {
-			respItem["level"] = item.level
+			respItem.Level = item.level
 		}
 		out = append(out, respItem)
 	}
-	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": out})
+	body, err := json.Marshal(patternsResponse{Status: "success", Data: out})
 	return body, "application/json", err
+}
+
+func numberToInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case json.Number:
+		out, err := n.Int64()
+		return out, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func numberToInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case json.Number:
+		out, err := n.Int64()
+		return int(out), err == nil
+	default:
+		return 0, false
+	}
 }
 
 // --- Multitenancy ---
@@ -4915,14 +5101,22 @@ func (p *Proxy) translateQuery(logql string) (string, error) {
 	case "", "*", `"*"`, "`*`":
 		return "*", nil
 	}
+	if p.translationCache != nil {
+		if cached, ok := p.translationCache.Get(normalized); ok {
+			return string(cached), nil
+		}
+	}
 
+	p.configMu.RLock()
 	labelFn := p.labelTranslator.ToVL
+	streamFieldsMap := p.streamFieldsMap
+	p.configMu.RUnlock()
 	var (
 		translated string
 		err        error
 	)
-	if p.streamFieldsMap != nil {
-		translated, err = translator.TranslateLogQLWithStreamFields(logql, labelFn, p.streamFieldsMap)
+	if streamFieldsMap != nil {
+		translated, err = translator.TranslateLogQLWithStreamFields(logql, labelFn, streamFieldsMap)
 	} else {
 		translated, err = translator.TranslateLogQLWithLabels(logql, labelFn)
 	}
@@ -4931,7 +5125,10 @@ func (p *Proxy) translateQuery(logql string) (string, error) {
 	}
 	trimmed := strings.TrimSpace(translated)
 	if strings.HasPrefix(trimmed, "|") {
-		return "* " + trimmed, nil
+		translated = "* " + trimmed
+	}
+	if p.translationCache != nil {
+		p.translationCache.SetWithTTL(normalized, []byte(translated), 5*time.Minute)
 	}
 	return translated, nil
 }

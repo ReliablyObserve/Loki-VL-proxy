@@ -225,3 +225,29 @@ func TestEncodeDiskEntryRejectsOverflowSizedValue(t *testing.T) {
 		t.Fatalf("expected overflow-sized entry to be rejected, got ok=%v len=%d", ok, len(encoded))
 	}
 }
+
+func TestDiskCache_MaxBytesSkipsFlushEntriesBeyondBudget(t *testing.T) {
+	dc, err := NewDiskCache(DiskCacheConfig{
+		Path:        tempDBPath(t),
+		Compression: false,
+		MaxBytes:    1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dc.Close() }()
+
+	dc.Set("small", []byte("ok"), 10*time.Second)
+	dc.Set("large", make([]byte, 2<<20), 10*time.Second)
+	dc.Flush()
+
+	if _, ok := dc.Get("small"); !ok {
+		t.Fatal("expected small entry to remain cacheable")
+	}
+	if _, ok := dc.Get("large"); ok {
+		t.Fatal("expected oversized entry to be skipped")
+	}
+	if dc.Evictions.Load() == 0 {
+		t.Fatal("expected max-bytes skip to increment evictions")
+	}
+}

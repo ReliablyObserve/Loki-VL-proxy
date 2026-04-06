@@ -273,6 +273,25 @@ func TestExtractLogPatterns(t *testing.T) {
 	}
 }
 
+func TestExtractLogPatterns_RespectsTopNLimit(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms"}`,
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 16ms"}`,
+		`{"_time":"2026-04-04T10:00:02Z","_msg":"POST /api/orders 201 42ms"}`,
+		`{"_time":"2026-04-04T10:00:03Z","_msg":"POST /api/orders 201 43ms"}`,
+		`{"_time":"2026-04-04T10:00:04Z","_msg":"POST /api/orders 201 44ms"}`,
+		`{"_time":"2026-04-04T10:00:05Z","_msg":"DELETE /api/users/42 204 5ms"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody, "1m", 2)
+	if len(patterns) != 2 {
+		t.Fatalf("expected top 2 patterns, got %d", len(patterns))
+	}
+	if patterns[0]["pattern"] == patterns[1]["pattern"] {
+		t.Fatalf("expected distinct top patterns, got %#v", patterns)
+	}
+}
+
 func TestExtractLogPatternsRespectsLimit(t *testing.T) {
 	vlBody := []byte(strings.Join([]string{
 		`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}`,

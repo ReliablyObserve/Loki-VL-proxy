@@ -798,6 +798,12 @@ func parseLogfmtFields(line string) map[string]string {
 }
 
 func (p *Proxy) detectFields(ctx context.Context, query, start, end string, lineLimit int) ([]map[string]interface{}, map[string][]string, error) {
+	if lineLimit > maxDetectedScanLines {
+		lineLimit = maxDetectedScanLines
+	}
+	if cachedFields, cachedValues, ok := p.getCachedDetectedFields(ctx, query, start, end, lineLimit); ok {
+		return cachedFields, cachedValues, nil
+	}
 	logsqlQuery, err := p.translateQuery(defaultFieldDetectionQuery(query))
 	if err != nil {
 		return nil, nil, err
@@ -821,6 +827,7 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 
 	body, _ := io.ReadAll(resp.Body)
 	fieldList, fieldValues := p.detectFieldsFromBody(body)
+	p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
 	return fieldList, fieldValues, nil
 }
 
@@ -949,6 +956,12 @@ func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map
 }
 
 func (p *Proxy) detectLabels(ctx context.Context, query, start, end string, lineLimit int) ([]map[string]interface{}, map[string]*detectedLabelSummary, error) {
+	if lineLimit > maxDetectedScanLines {
+		lineLimit = maxDetectedScanLines
+	}
+	if cachedLabels, cachedSummaries, ok := p.getCachedDetectedLabels(ctx, query, start, end, lineLimit); ok {
+		return cachedLabels, cachedSummaries, nil
+	}
 	logsqlQuery, err := p.translateQuery(defaultQuery(query))
 	if err != nil {
 		return nil, nil, err
@@ -972,7 +985,96 @@ func (p *Proxy) detectLabels(ctx context.Context, query, start, end string, line
 
 	body, _ := io.ReadAll(resp.Body)
 	summaries := scanDetectedLabelSummaries(body, p.labelTranslator)
-	return formatDetectedLabelSummaries(summaries), summaries, nil
+	labels := formatDetectedLabelSummaries(summaries)
+	p.setCachedDetectedLabels(ctx, query, start, end, lineLimit, labels, summaries)
+	return labels, summaries, nil
+}
+
+type detectedFieldsCachePayload struct {
+	Fields []map[string]interface{} `json:"fields"`
+	Values map[string][]string      `json:"values"`
+}
+
+type detectedLabelsCachePayload struct {
+	Labels []map[string]interface{} `json:"labels"`
+	Values map[string][]string      `json:"values"`
+}
+
+func (p *Proxy) detectedFieldsCacheKey(ctx context.Context, query, start, end string, lineLimit int) string {
+	return "detect_fields:" + getOrgID(ctx) + ":" + query + ":" + start + ":" + end + ":" + strconv.Itoa(lineLimit)
+}
+
+func (p *Proxy) detectedLabelsCacheKey(ctx context.Context, query, start, end string, lineLimit int) string {
+	return "detect_labels:" + getOrgID(ctx) + ":" + query + ":" + start + ":" + end + ":" + strconv.Itoa(lineLimit)
+}
+
+func (p *Proxy) getCachedDetectedFields(ctx context.Context, query, start, end string, lineLimit int) ([]map[string]interface{}, map[string][]string, bool) {
+	if p.cache == nil {
+		return nil, nil, false
+	}
+	raw, ok := p.cache.Get(p.detectedFieldsCacheKey(ctx, query, start, end, lineLimit))
+	if !ok {
+		return nil, nil, false
+	}
+	var payload detectedFieldsCachePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, nil, false
+	}
+	return payload.Fields, payload.Values, true
+}
+
+func (p *Proxy) setCachedDetectedFields(ctx context.Context, query, start, end string, lineLimit int, fields []map[string]interface{}, values map[string][]string) {
+	if p.cache == nil {
+		return
+	}
+	body, err := json.Marshal(detectedFieldsCachePayload{Fields: fields, Values: values})
+	if err != nil {
+		return
+	}
+	p.cache.SetWithTTL(p.detectedFieldsCacheKey(ctx, query, start, end, lineLimit), body, CacheTTLs["detected_fields"])
+}
+
+func (p *Proxy) getCachedDetectedLabels(ctx context.Context, query, start, end string, lineLimit int) ([]map[string]interface{}, map[string]*detectedLabelSummary, bool) {
+	if p.cache == nil {
+		return nil, nil, false
+	}
+	raw, ok := p.cache.Get(p.detectedLabelsCacheKey(ctx, query, start, end, lineLimit))
+	if !ok {
+		return nil, nil, false
+	}
+	var payload detectedLabelsCachePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, nil, false
+	}
+	summaries := make(map[string]*detectedLabelSummary, len(payload.Values))
+	for label, values := range payload.Values {
+		summary := &detectedLabelSummary{label: label, values: map[string]struct{}{}}
+		for _, value := range values {
+			summary.values[value] = struct{}{}
+		}
+		summaries[label] = summary
+	}
+	return payload.Labels, summaries, true
+}
+
+func (p *Proxy) setCachedDetectedLabels(ctx context.Context, query, start, end string, lineLimit int, labels []map[string]interface{}, summaries map[string]*detectedLabelSummary) {
+	if p.cache == nil {
+		return
+	}
+	values := make(map[string][]string, len(summaries))
+	for label, summary := range summaries {
+		sorted := make([]string, 0, len(summary.values))
+		for value := range summary.values {
+			sorted = append(sorted, value)
+		}
+		sort.Strings(sorted)
+		values[label] = sorted
+	}
+	body, err := json.Marshal(detectedLabelsCachePayload{Labels: labels, Values: values})
+	if err != nil {
+		return
+	}
+	p.cache.SetWithTTL(p.detectedLabelsCacheKey(ctx, query, start, end, lineLimit), body, 30*time.Second)
 }
 
 func formatDetectedValue(value interface{}) string {
