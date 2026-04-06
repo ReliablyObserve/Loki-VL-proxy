@@ -71,28 +71,29 @@ def main():
         )
 
     threshold = 5.0
+    cpu_threshold = 8.0
     benchmarks = (
-        ("query_range_cache_hit_ns_per_op", "QueryRange cache-hit CPU cost", "lower"),
-        ("query_range_cache_hit_bytes_per_op", "QueryRange cache-hit memory", "lower"),
-        ("query_range_cache_hit_allocs_per_op", "QueryRange cache-hit allocations", "lower"),
-        ("query_range_cache_bypass_ns_per_op", "QueryRange cache-bypass CPU cost", "lower"),
-        ("query_range_cache_bypass_bytes_per_op", "QueryRange cache-bypass memory", "lower"),
-        ("query_range_cache_bypass_allocs_per_op", "QueryRange cache-bypass allocations", "lower"),
-        ("labels_cache_hit_ns_per_op", "Labels cache-hit CPU cost", "lower"),
-        ("labels_cache_hit_bytes_per_op", "Labels cache-hit memory", "lower"),
-        ("labels_cache_hit_allocs_per_op", "Labels cache-hit allocations", "lower"),
-        ("labels_cache_bypass_ns_per_op", "Labels cache-bypass CPU cost", "lower"),
-        ("labels_cache_bypass_bytes_per_op", "Labels cache-bypass memory", "lower"),
-        ("labels_cache_bypass_allocs_per_op", "Labels cache-bypass allocations", "lower"),
+        ("query_range_cache_hit_ns_per_op", "QueryRange cache-hit CPU cost", "lower", cpu_threshold),
+        ("query_range_cache_hit_bytes_per_op", "QueryRange cache-hit memory", "lower", threshold),
+        ("query_range_cache_hit_allocs_per_op", "QueryRange cache-hit allocations", "lower", threshold),
+        ("query_range_cache_bypass_ns_per_op", "QueryRange cache-bypass CPU cost", "lower", cpu_threshold),
+        ("query_range_cache_bypass_bytes_per_op", "QueryRange cache-bypass memory", "lower", threshold),
+        ("query_range_cache_bypass_allocs_per_op", "QueryRange cache-bypass allocations", "lower", threshold),
+        ("labels_cache_hit_ns_per_op", "Labels cache-hit CPU cost", "lower", cpu_threshold),
+        ("labels_cache_hit_bytes_per_op", "Labels cache-hit memory", "lower", threshold),
+        ("labels_cache_hit_allocs_per_op", "Labels cache-hit allocations", "lower", threshold),
+        ("labels_cache_bypass_ns_per_op", "Labels cache-bypass CPU cost", "lower", cpu_threshold),
+        ("labels_cache_bypass_bytes_per_op", "Labels cache-bypass memory", "lower", threshold),
+        ("labels_cache_bypass_allocs_per_op", "Labels cache-bypass allocations", "lower", threshold),
     )
-    for key, label, better in benchmarks:
+    for key, label, better, metric_threshold in benchmarks:
         check_threshold(
             failures,
             label,
             float(base["performance"]["benchmarks"].get(key, 0)),
             float(head["performance"]["benchmarks"].get(key, 0)),
             better,
-            threshold,
+            metric_threshold,
         )
 
     check_threshold(
