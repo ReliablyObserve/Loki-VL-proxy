@@ -136,7 +136,7 @@ Compared against base branch \`main\`.
 
 ### Performance smoke
 
-Lower CPU cost (\`ns/op\`) is better. Lower benchmark memory cost (\`B/op\`, \`allocs/op\`) is better. Higher throughput is better. Lower load-test memory growth is better.
+Lower CPU cost (\`ns/op\`) is better. Lower benchmark memory cost (\`B/op\`, \`allocs/op\`) is better. Higher throughput is better. Lower load-test memory growth is better. Benchmark rows are medians from repeated samples.
 
 | Signal | Base | PR | Delta |
 |---|---:|---:|---:|

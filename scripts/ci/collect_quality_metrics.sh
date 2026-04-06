@@ -118,48 +118,64 @@ collect_compat() {
 
 collect_benchmarks() {
   local out="$TMP_DIR/bench.txt"
-  go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -count=1 >"$out"
-  local query_ns query_bytes query_allocs labels_ns labels_bytes labels_allocs
-  local query_bypass_ns query_bypass_bytes query_bypass_allocs labels_bypass_ns labels_bypass_bytes labels_bypass_allocs
-  query_ns="$(awk '/BenchmarkProxy_QueryRange_CacheHit/ {print $(NF-5); exit}' "$out")"
-  query_bytes="$(awk '/BenchmarkProxy_QueryRange_CacheHit/ {print $(NF-3); exit}' "$out")"
-  query_allocs="$(awk '/BenchmarkProxy_QueryRange_CacheHit/ {print $(NF-1); exit}' "$out")"
-  labels_ns="$(awk '/BenchmarkProxy_Labels_CacheHit/ {print $(NF-5); exit}' "$out")"
-  labels_bytes="$(awk '/BenchmarkProxy_Labels_CacheHit/ {print $(NF-3); exit}' "$out")"
-  labels_allocs="$(awk '/BenchmarkProxy_Labels_CacheHit/ {print $(NF-1); exit}' "$out")"
-  query_bypass_ns="$(awk '/BenchmarkProxy_QueryRange_CacheBypass/ {print $(NF-5); exit}' "$out")"
-  query_bypass_bytes="$(awk '/BenchmarkProxy_QueryRange_CacheBypass/ {print $(NF-3); exit}' "$out")"
-  query_bypass_allocs="$(awk '/BenchmarkProxy_QueryRange_CacheBypass/ {print $(NF-1); exit}' "$out")"
-  labels_bypass_ns="$(awk '/BenchmarkProxy_Labels_CacheBypass/ {print $(NF-5); exit}' "$out")"
-  labels_bypass_bytes="$(awk '/BenchmarkProxy_Labels_CacheBypass/ {print $(NF-3); exit}' "$out")"
-  labels_bypass_allocs="$(awk '/BenchmarkProxy_Labels_CacheBypass/ {print $(NF-1); exit}' "$out")"
-  jq -n \
-    --argjson query_ns "${query_ns:-0}" \
-    --argjson query_bytes "${query_bytes:-0}" \
-    --argjson query_allocs "${query_allocs:-0}" \
-    --argjson labels_ns "${labels_ns:-0}" \
-    --argjson labels_bytes "${labels_bytes:-0}" \
-    --argjson labels_allocs "${labels_allocs:-0}" \
-    --argjson query_bypass_ns "${query_bypass_ns:-0}" \
-    --argjson query_bypass_bytes "${query_bypass_bytes:-0}" \
-    --argjson query_bypass_allocs "${query_bypass_allocs:-0}" \
-    --argjson labels_bypass_ns "${labels_bypass_ns:-0}" \
-    --argjson labels_bypass_bytes "${labels_bypass_bytes:-0}" \
-    --argjson labels_bypass_allocs "${labels_bypass_allocs:-0}" \
-    '{
-      query_range_cache_hit_ns_per_op:$query_ns,
-      query_range_cache_hit_bytes_per_op:$query_bytes,
-      query_range_cache_hit_allocs_per_op:$query_allocs,
-      query_range_cache_bypass_ns_per_op:$query_bypass_ns,
-      query_range_cache_bypass_bytes_per_op:$query_bypass_bytes,
-      query_range_cache_bypass_allocs_per_op:$query_bypass_allocs,
-      labels_cache_hit_ns_per_op:$labels_ns,
-      labels_cache_hit_bytes_per_op:$labels_bytes,
-      labels_cache_hit_allocs_per_op:$labels_allocs,
-      labels_cache_bypass_ns_per_op:$labels_bypass_ns,
-      labels_cache_bypass_bytes_per_op:$labels_bypass_bytes,
-      labels_cache_bypass_allocs_per_op:$labels_bypass_allocs
-    }'
+  go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=1s -count=5 >"$out"
+  python3 - "$out" <<'PY'
+import json
+import re
+import statistics
+import sys
+
+path = sys.argv[1]
+metrics = {
+    "BenchmarkProxy_QueryRange_CacheHit": {
+        "query_range_cache_hit_ns_per_op": [],
+        "query_range_cache_hit_bytes_per_op": [],
+        "query_range_cache_hit_allocs_per_op": [],
+    },
+    "BenchmarkProxy_QueryRange_CacheBypass": {
+        "query_range_cache_bypass_ns_per_op": [],
+        "query_range_cache_bypass_bytes_per_op": [],
+        "query_range_cache_bypass_allocs_per_op": [],
+    },
+    "BenchmarkProxy_Labels_CacheHit": {
+        "labels_cache_hit_ns_per_op": [],
+        "labels_cache_hit_bytes_per_op": [],
+        "labels_cache_hit_allocs_per_op": [],
+    },
+    "BenchmarkProxy_Labels_CacheBypass": {
+        "labels_cache_bypass_ns_per_op": [],
+        "labels_cache_bypass_bytes_per_op": [],
+        "labels_cache_bypass_allocs_per_op": [],
+    },
+}
+
+with open(path, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        parts = raw.split()
+        if len(parts) < 7:
+            continue
+        name = re.sub(r"-\d+$", "", parts[0])
+        if name not in metrics:
+            continue
+        try:
+            ns_per_op = float(parts[2])
+            bytes_per_op = float(parts[4])
+            allocs_per_op = float(parts[6])
+        except ValueError:
+            continue
+        values = metrics[name]
+        metric_names = list(values.keys())
+        values[metric_names[0]].append(ns_per_op)
+        values[metric_names[1]].append(bytes_per_op)
+        values[metric_names[2]].append(allocs_per_op)
+
+result = {}
+for benchmark in metrics.values():
+    for key, samples in benchmark.items():
+        result[key] = statistics.median(samples) if samples else 0
+
+print(json.dumps(result))
+PY
 }
 
 collect_load() {
