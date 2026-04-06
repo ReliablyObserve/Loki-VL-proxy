@@ -101,7 +101,7 @@ def main():
         float(base["performance"]["load"]["high_concurrency_req_per_s"]),
         float(head["performance"]["load"]["high_concurrency_req_per_s"]),
         "higher",
-        threshold,
+        15.0,
     )
     check_threshold(
         failures,

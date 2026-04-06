@@ -82,10 +82,10 @@ func marshalTranslated(in RuleFile, opts ConvertOptions) ([]byte, Report, error)
 	var report Report
 	for _, g := range in.Groups {
 		translated, warnings, err := translateGroup(g, opts)
+		report.Warnings = append(report.Warnings, warnings...)
 		if err != nil {
 			return nil, report, err
 		}
-		report.Warnings = append(report.Warnings, warnings...)
 		out.Groups = append(out.Groups, translated)
 	}
 	data, err := yaml.Marshal(out)
@@ -103,7 +103,7 @@ func translateGroup(g Group, opts ConvertOptions) (Group, []Warning, error) {
 	for _, r := range g.Rules {
 		ruleWarnings := analyzeRule(g.Name, r)
 		if len(ruleWarnings) > 0 && !opts.AllowRisky {
-			return Group{}, nil, fmt.Errorf("rule %q in group %q requires manual review:\n%s", ruleName(r), g.Name, formatWarnings(ruleWarnings))
+			return Group{}, ruleWarnings, fmt.Errorf("rule %q in group %q requires manual review:\n%s", ruleName(r), g.Name, formatWarnings(ruleWarnings))
 		}
 		translated, err := translator.TranslateLogQL(r.Expr)
 		if err != nil {
