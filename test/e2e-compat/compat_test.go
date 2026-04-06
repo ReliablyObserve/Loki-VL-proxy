@@ -35,6 +35,8 @@ var (
 	lokiURL      = envOr("LOKI_URL", "http://localhost:3101")
 	proxyURL     = envOr("PROXY_URL", "http://localhost:3100")
 	tailProxyURL = envOr("TAIL_PROXY_URL", "http://localhost:3103")
+	tailIngressURL = envOr("TAIL_INGRESS_URL", "http://localhost:3104")
+	tailNativeURL = envOr("TAIL_NATIVE_URL", "http://localhost:3105")
 	vlURL        = envOr("VL_URL", "http://localhost:9428")
 )
 

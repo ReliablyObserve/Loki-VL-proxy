@@ -536,5 +536,34 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		if data == nil || len(extractArray(data, "result")) == 0 {
 			t.Fatalf("expected multi-tenant index/volume through Grafana resource, got %v", volumeResp)
 		}
+
+		fieldValuesResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+multiUID+"/resources/detected_field/method/values?"+valueParams.Encode())
+		fieldValues, _ := fieldValuesResp["values"].([]interface{})
+		if len(fieldValues) == 0 {
+			t.Fatalf("expected multi-tenant detected_field values through Grafana resource, got %v", fieldValuesResp)
+		}
+
+		labelValuesResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+multiUID+"/resources/label/cluster/values?"+valueParams.Encode())
+		labelValues, _ := labelValuesResp["data"].([]interface{})
+		if len(labelValues) == 0 {
+			t.Fatalf("expected multi-tenant label values through Grafana resource, got %v", labelValuesResp)
+		}
+
+		labelsListResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+multiUID+"/resources/labels?"+valueParams.Encode())
+		labelsList, _ := labelsListResp["data"].([]interface{})
+		if len(labelsList) == 0 {
+			t.Fatalf("expected multi-tenant labels resource through Grafana resource, got %v", labelsListResp)
+		}
+		seenLabels := map[string]bool{}
+		for _, item := range labelsList {
+			if label, ok := item.(string); ok {
+				seenLabels[label] = true
+			}
+		}
+		for _, want := range []string{"cluster", "__tenant_id__"} {
+			if !seenLabels[want] {
+				t.Fatalf("expected multi-tenant labels resource to include %q, got %v", want, labelsListResp)
+			}
+		}
 	})
 }

@@ -19,7 +19,7 @@ go test -v -tags=e2e -run '^TestLokiTrackScore$' ./test/e2e-compat/
 go test -v -tags=e2e -run '^TestDrilldownTrackScore$' ./test/e2e-compat/
 go test -v -tags=e2e -run '^TestVLTrackScore$' ./test/e2e-compat/
 
-# Playwright UI tests (Grafana Explore, drill-down, error handling)
+# Playwright UI tests (Grafana Explore, drill-down, live tail, error handling)
 cd test/e2e-ui
 npm install && npx playwright install chromium
 npm test
@@ -48,7 +48,7 @@ Exact counts move often. Treat the categories below as the stable map of what is
 | Query normalization | 8 | Canonicalization for cache keys |
 | Cache behavior | 6 | Hit/miss/TTL/eviction/protection |
 | Multitenancy | 4 | String->int mapping, numeric passthrough, unmapped default |
-| WebSocket tail | 2 | Query validation, WebSocket frame structure |
+| WebSocket tail | 4+ | Query validation, origin policy, native live frames, synthetic live streaming |
 | Disk cache (L2) | 12 | Set/get, TTL, compression, persistence, stats |
 | OTLP pusher | 4 | Push, custom headers, error handling, payload structure |
 | Hardening | 4 | Query length limit, limit sanitization, security headers |
@@ -80,7 +80,7 @@ Exact counts move often. Treat the categories below as the stable map of what is
 | `test/e2e-compat/` | Docker-based Loki vs proxy comparison |
 | `test/e2e-compat/drilldown_compat_test.go` | Grafana Logs Drilldown resource contracts via Grafana datasource proxy |
 | `test/e2e-compat/features_test.go` | Live Grafana-facing edge cases including multi-tenant `__tenant_id__` and Drilldown level-filter regressions |
-| `test/e2e-ui/` | Playwright browser tests against Grafana |
+| `test/e2e-ui/` | Playwright browser tests against Grafana Explore and Logs Drilldown |
 
 ## Compatibility Tracks
 
@@ -129,7 +129,7 @@ Pull requests also get a dedicated `pr-quality-report.yaml` workflow. It compare
 - Loki / Logs Drilldown / VictoriaLogs compatibility deltas
 - sampled benchmark and load-test deltas
 
-That report is informational by design. It highlights regressions early, but merge gating still comes from the required check set in repository settings.
+That report is part of the required PR gate. It is still a smoke signal rather than a full benchmark lab run, but it now blocks obvious regressions in coverage, compatibility, and the tracked performance signals.
 
 See [compatibility-matrix.md](/tmp/Loki-VL-proxy/docs/compatibility-matrix.md), [compatibility-loki.md](/tmp/Loki-VL-proxy/docs/compatibility-loki.md), [compatibility-drilldown.md](/tmp/Loki-VL-proxy/docs/compatibility-drilldown.md), [compatibility-victorialogs.md](/tmp/Loki-VL-proxy/docs/compatibility-victorialogs.md), and [compatibility-matrix.json](/tmp/Loki-VL-proxy/test/e2e-compat/compatibility-matrix.json).
 

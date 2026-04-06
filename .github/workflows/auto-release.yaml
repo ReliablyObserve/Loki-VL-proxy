@@ -155,7 +155,6 @@ jobs:
           SECTION_FILE="$(mktemp)"
           scripts/ci/materialize_unreleased.sh "${VERSION}" "$(date +%Y-%m-%d)" CHANGELOG.md
           scripts/ci/extract_changelog_section.sh "${VERSION}" CHANGELOG.md > "$SECTION_FILE"
-          cp CHANGELOG.md /tmp/postrelease-changelog.md
           git checkout -- CHANGELOG.md
           cat "$SECTION_FILE" > "$NOTES_FILE"
           {
@@ -184,12 +183,12 @@ jobs:
             echo "- Versioned Helm chart package"
             echo "- Multi-arch GHCR image"
           } >> "$NOTES_FILE"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
-          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
-          echo "postrelease_changelog=/tmp/postrelease-changelog.md" >> "$GITHUB_OUTPUT"
-
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "prev_tag=${PREV_TAG}"
+            echo "notes_file=${NOTES_FILE}"
+          } >> "$GITHUB_OUTPUT"
       - name: Create release tag
         run: |
           set -euo pipefail
@@ -257,40 +256,3 @@ jobs:
             dist/loki-vl-proxy-*
             dist/checksums.txt
             dist/loki-vl-proxy-*.tgz
-
-      - name: Open changelog sync PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.meta.outputs.version }}"
-          BRANCH="postrelease/v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$BRANCH"
-          cp "${{ steps.meta.outputs.postrelease_changelog }}" CHANGELOG.md
-          git add CHANGELOG.md
-          git diff --cached --quiet && exit 0
-          git commit -m "docs: finalize changelog for v${VERSION}"
-          git push --force origin "$BRANCH"
-
-          EXISTING_PR_URL="$(gh pr list --state open --base main --head "$BRANCH" --json url --jq '.[0].url // empty')"
-          BODY_FILE="$(mktemp)"
-          {
-            echo "## Post-release changelog sync"
-            echo ""
-            echo "- add the released \`v${VERSION}\` section to \`CHANGELOG.md\`"
-            echo "- reset \`Unreleased\` for the next change window"
-          } > "$BODY_FILE"
-
-          if [ -n "$EXISTING_PR_URL" ]; then
-            gh pr edit "$EXISTING_PR_URL" \
-              --title "docs: finalize changelog for v${VERSION}" \
-              --body-file "$BODY_FILE"
-          else
-            gh pr create \
-              --title "docs: finalize changelog for v${VERSION}" \
-              --body-file "$BODY_FILE" \
-              --base main \
-              --head "$BRANCH"
-          fi

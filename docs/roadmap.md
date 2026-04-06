@@ -69,3 +69,7 @@
 - [ ] Full Loki ruler / alerting API semantics beyond read-path compatibility and backend passthrough
 - [x] PR quality report workflow with coverage, compatibility, and performance delta comments (v0.26.0)
 - [ ] Raise total repository coverage toward 95%+ by extracting `main()` and remaining low-level system readers into smaller testable units
+- [ ] Finish `/tail` browser and ops compatibility: browser CI coverage, reverse-proxy websocket behavior, and backend close/error parity
+- [ ] Expand live multi-tenant Explore and Drilldown coverage for `__tenant_id__`, labels, series, and detected field/label surfaces
+- [ ] Convert more upstream Loki, Logs Drilldown, and VictoriaLogs edge cases into regression tests
+- [ ] Push `cmd/proxy` coverage further by extracting more startup/config/runtime wiring out of `main()`
