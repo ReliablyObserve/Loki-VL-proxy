@@ -1,6 +1,6 @@
 # Known Issues & VL Compatibility Gaps
 
-Last updated: v0.26.1
+Last updated: main
 
 ## Remaining Behavioral Differences
 
@@ -21,6 +21,24 @@ The proxy now supports datasource-facing headers, cookie forwarding, backend tim
 |---|---|
 | Alerting / ruler APIs | Read-path compatibility covers legacy Loki YAML rules routes plus Prometheus-style JSON rules and alerts, but Loki ruler write APIs and full rule lifecycle semantics are still incomplete |
 | Browser-origin tailing | `/loki/api/v1/tail` rejects browser `Origin` headers unless explicitly allowlisted via `-tail.allowed-origins` |
+
+## Remaining `/tail` Gaps
+
+`/loki/api/v1/tail` is now covered by handler tests plus compose-backed native and synthetic streaming e2e, but a few real-world gaps remain:
+
+- reverse-proxy and ingress websocket idle-timeout behavior still needs dedicated e2e
+- browser-path Grafana Explore live-tail coverage should be run in CI consistently, not just locally or in ad hoc compose runs
+- backend-native close/error propagation still needs broader coverage for `401`, `403`, and upstream `5xx`
+- `/tail` remains intentionally single-tenant; Loki-style `tenant-a|tenant-b` fanout and `__tenant_id__` filtering are not supported there
+
+## Remaining Multi-Tenant Gaps
+
+Read/query fanout now supports Loki-style `X-Scope-OrgID: tenant-a|tenant-b` plus `__tenant_id__` selector narrowing, but some edges still need tightening:
+
+- more live e2e for `/labels`, `/label/{name}/values`, `/series`, `detected_fields`, and `detected_labels` under fanout
+- Drilldown and Explore browser coverage for multi-tenant datasources still trails the API/resource coverage
+- merged field/label cardinality across tenants is still approximate in a few Drilldown-oriented surfaces
+- `*` remains a proxy-specific default/global bypass mode, not a Loki-compatible all-tenants shorthand
 
 ## Data Model Differences
 

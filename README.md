@@ -210,6 +210,8 @@ Proxy-side datasource helpers:
 - `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
 - `-tail.allowed-origins` when Grafana or another browser client must use `/tail`
 
+Current remaining gaps are tracked in [Known Issues](docs/KNOWN_ISSUES.md). The main active work areas are `/tail` browser/ingress parity, deeper multi-tenant Explore and Drilldown coverage, and further startup-path coverage in `cmd/proxy`.
+
 ### Grafana Datasource for Multi-Tenant Read Fanout
 
 ```yaml
