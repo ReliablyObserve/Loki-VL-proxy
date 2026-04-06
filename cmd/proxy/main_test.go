@@ -72,6 +72,28 @@ func (f *fakeOTLPPusher) Start() { f.started = true }
 
 func (f *fakeOTLPPusher) Stop() { f.stopped = true }
 
+func TestBuildLogger(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := buildLogger(buf, loggerConfig{
+		level:                 "debug",
+		serviceName:           "proxy",
+		serviceNamespace:      "platform",
+		serviceVersion:        "v1.2.3",
+		serviceInstanceID:     "proxy-1",
+		deploymentEnvironment: "prod",
+	})
+	if logger == nil {
+		t.Fatal("expected logger")
+	}
+	logger.Info("hello")
+	logs := buf.String()
+	for _, want := range []string{"\"service.name\":\"proxy\"", "\"service.version\":\"v1.2.3\"", "\"deployment.environment.name\":\"prod\"", "\"body\":\"hello\""} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected %q in %s", want, logs)
+		}
+	}
+}
+
 func TestBuildServerTLSConfig_RequiresCAWhenClientCertsRequired(t *testing.T) {
 	cfg, err := buildServerTLSConfig("", true)
 	if err == nil {

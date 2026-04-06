@@ -293,6 +293,50 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     });
     await assertNoErrors(page);
   });
+
+  test("native-tail failure can recover through ingress live tail", async ({ page }) => {
+    await openExplore(page, PROXY_TAIL_NATIVE_DS);
+    await waitForGrafanaReady(page);
+    await typeQuery(page, '{app="api-gateway"}');
+
+    const liveButton = page.getByRole("button", { name: /live/i }).first();
+    await expect(liveButton).toBeVisible({ timeout: 15_000 });
+    await liveButton.click();
+    await expect(page.getByText(/error|failed|unable/i).first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const ingressApp = `ui-tail-ingress-recovery-${Date.now()}`;
+    const ingressMsg = `ui ingress recovery frame ${ingressApp}`;
+
+    await openExplore(page, PROXY_TAIL_INGRESS_DS);
+    await waitForGrafanaReady(page);
+    await typeQuery(page, `{app="${ingressApp}"}`);
+
+    const ingressLiveButton = page.getByRole("button", { name: /live/i }).first();
+    await expect(ingressLiveButton).toBeVisible({ timeout: 15_000 });
+    await ingressLiveButton.click();
+
+    const pushResp = await page.request.post(
+      "http://127.0.0.1:9428/insert/jsonline?_stream_fields=app,env,level",
+      {
+        headers: { "Content-Type": "application/stream+json" },
+        data: `${JSON.stringify({
+          _time: new Date().toISOString(),
+          _msg: ingressMsg,
+          app: ingressApp,
+          env: "test",
+          level: "info",
+        })}\n`,
+      }
+    );
+    expect(pushResp.ok()).toBeTruthy();
+
+    await expect(page.getByText(ingressMsg, { exact: false })).toBeVisible({
+      timeout: 15_000,
+    });
+    await assertNoErrors(page);
+  });
 });
 
 test.describe("Grafana Explore — Side-by-side Comparison", () => {

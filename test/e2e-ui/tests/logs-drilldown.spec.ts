@@ -425,4 +425,17 @@ test.describe("Grafana Logs Drilldown", () => {
     expect(volumeResponse).toBeTruthy();
     expect(JSON.stringify(volumeResponse?.json)).toContain("us-east-1");
   });
+
+  test("multi-tenant cluster drilldown keeps multiple selected levels working", async ({ page }) => {
+    const errors = collectLokiErrors(page);
+    await openLabelDrilldown(page, PROXY_MULTI_DS, "cluster", "us-east-1", [
+      "error",
+      "info",
+      "warn",
+    ]);
+
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    await expect(page.getByText(/Log volume/i)).toBeVisible({ timeout: 15_000 });
+    expect(errors).toHaveLength(0);
+  });
 });

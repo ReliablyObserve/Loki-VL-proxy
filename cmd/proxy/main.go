@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -124,6 +125,15 @@ type serverLoopOptions struct {
 	backendURL  string
 	tlsCertFile string
 	tlsKeyFile  string
+}
+
+type loggerConfig struct {
+	level                 string
+	serviceName           string
+	serviceNamespace      string
+	serviceVersion        string
+	serviceInstanceID     string
+	deploymentEnvironment string
 }
 
 type reloadableProxy interface {
@@ -257,13 +267,13 @@ func main() {
 	*otelServiceInstanceID = envCfg.serviceInstanceID
 	*deploymentEnvironment = envCfg.deploymentEnv
 
-	logger := observability.NewLogger(os.Stdout, observability.LoggerConfig{
-		Level:                 *logLevel,
-		ServiceName:           *otelServiceName,
-		ServiceNamespace:      *otelServiceNamespace,
-		ServiceVersion:        version,
-		ServiceInstanceID:     *otelServiceInstanceID,
-		DeploymentEnvironment: *deploymentEnvironment,
+	logger := buildLogger(os.Stdout, loggerConfig{
+		level:                 *logLevel,
+		serviceName:           *otelServiceName,
+		serviceNamespace:      *otelServiceNamespace,
+		serviceVersion:        version,
+		serviceInstanceID:     *otelServiceInstanceID,
+		deploymentEnvironment: *deploymentEnvironment,
 	})
 	slog.SetDefault(logger)
 	fatal := func(msg string, args ...any) {
@@ -410,6 +420,19 @@ func buildCacheLayer(ttl time.Duration, maxEntries int, diskCfg cache.DiskCacheC
 		"flush_interval", diskCfg.FlushInterval.String(),
 	)
 	return c, func() { _ = dc.Close() }, nil
+}
+
+func buildLogger(w io.Writer, cfg loggerConfig) *slog.Logger {
+	logger := observability.NewLogger(w, observability.LoggerConfig{
+		Level:                 cfg.level,
+		ServiceName:           cfg.serviceName,
+		ServiceNamespace:      cfg.serviceNamespace,
+		ServiceVersion:        cfg.serviceVersion,
+		ServiceInstanceID:     cfg.serviceInstanceID,
+		DeploymentEnvironment: cfg.deploymentEnvironment,
+	})
+	slog.SetDefault(logger)
+	return logger
 }
 
 func buildSignalChannels(notify signalNotifier) (chan os.Signal, chan os.Signal) {
