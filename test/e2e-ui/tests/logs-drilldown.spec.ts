@@ -2,6 +2,9 @@ import { test, expect, type Page } from "@playwright/test";
 import {
   LOKI_DS,
   PROXY_DS,
+  PROXY_MULTI_DS,
+  assertNoErrors,
+  collectLokiErrors,
   openLogsDrilldown,
   waitForGrafanaReady,
 } from "./helpers";
@@ -70,6 +73,52 @@ async function openServiceDrilldown(
 
   await page.goto(
     `/a/grafana-lokiexplore-app/explore/service/${encodeURIComponent(serviceName)}/${view}?${params.toString()}`
+  );
+  await waitForGrafanaReady(page);
+}
+
+async function openLabelDrilldown(
+  page: Page,
+  datasource: string,
+  label: string,
+  value: string,
+  levels: string[] = []
+) {
+  const response = await page.request.get(
+    `/api/datasources/name/${encodeURIComponent(datasource)}`
+  );
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+
+  const params = new URLSearchParams({
+    patterns: "[]",
+    from: "now-3h",
+    to: "now",
+    timezone: "browser",
+    "var-lineFormat": "",
+    "var-ds": body.uid,
+    "var-filters": `${label}|=|${value}`,
+    "var-fields": "",
+    "var-metadata": "",
+    "var-jsonFields": "",
+    "var-all-fields": "",
+    "var-patterns": "",
+    "var-lineFilterV2": "",
+    "var-lineFilters": "",
+    displayedFields: "[]",
+    urlColumns: "[]",
+    visualizationType: `"logs"`,
+    prettifyLogMessage: "false",
+    userDisplayedFields: "false",
+    wrapLogMessage: "false",
+    sortOrder: `"Descending"`,
+  });
+  for (const level of levels) {
+    params.append("var-levels", `detected_level|=|${level}`);
+  }
+
+  await page.goto(
+    `/a/grafana-lokiexplore-app/explore/${encodeURIComponent(label)}/${encodeURIComponent(value)}/logs?${params.toString()}`
   );
   await waitForGrafanaReady(page);
 }
@@ -251,5 +300,25 @@ test.describe("Grafana Logs Drilldown", () => {
       timeout: 15_000,
     });
     await expect(page.getByText("No logs found")).toHaveCount(0);
+  });
+
+  test("proxy drilldown cluster logs handle multiple selected levels", async ({ page }) => {
+    const errors = collectLokiErrors(page);
+    const datasourceErrors: string[] = [];
+    page.on("response", (response) => {
+      if (response.url().includes("/api/ds/query") && response.status() >= 400) {
+        datasourceErrors.push(`${response.status()} ${response.url()}`);
+      }
+    });
+    await openLabelDrilldown(page, PROXY_MULTI_DS, "cluster", "us-east-1", [
+      "error",
+      "info",
+      "warn",
+    ]);
+
+    await assertNoErrors(page);
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    expect(errors).toHaveLength(0);
+    expect(datasourceErrors).toHaveLength(0);
   });
 });

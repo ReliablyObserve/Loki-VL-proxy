@@ -205,6 +205,7 @@ Proxy-side datasource helpers:
 - built-in default-tenant aliases `0`, `fake`, and `default` for VL's `0:0` tenant during single-tenant migrations
 - explicit Loki-style multi-tenant fanout on read/query endpoints with `X-Scope-OrgID: tenant-a|tenant-b`
 - synthetic `__tenant_id__` labels in merged query results so Explore and Drilldown filters can narrow multi-tenant reads back down
+- multi-tenant Drilldown and Explore level filters such as `detected_level="error" or detected_level="info"` are translated and regression-tested against the live Grafana stack
 - `-tenant.allow-global` to let `X-Scope-OrgID: *` use VL's default `0:0` tenant as a proxy-specific wildcard bypass
 - `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
 - `-tail.allowed-origins` when Grafana or another browser client must use `/tail`

@@ -615,6 +615,60 @@ func TestEdge_CombinedFilterTypes(t *testing.T) {
 	score.report(t)
 }
 
+func TestFeature_DrilldownClusterLevelOrFilters(t *testing.T) {
+	score := &CompatScore{}
+
+	query := `{cluster="us-east-1"} | detected_level="error" or detected_level="info" or detected_level="warn" | json | logfmt | drop __error__, __error_details__`
+
+	proxyResult := queryProxy(t, query)
+	lokiResult := queryLoki(t, query)
+
+	if checkStatus(proxyResult) {
+		score.pass("drilldown_level_filters", "proxy returns success")
+	} else {
+		score.fail("drilldown_level_filters", fmt.Sprintf("proxy error: %v", proxyResult))
+	}
+
+	if checkStatus(lokiResult) {
+		score.pass("drilldown_level_filters", "loki returns success")
+	} else {
+		score.fail("drilldown_level_filters", fmt.Sprintf("loki error: %v", lokiResult))
+	}
+
+	proxyLines := countLogLines(proxyResult)
+	lokiLines := countLogLines(lokiResult)
+	if proxyLines > 0 {
+		score.pass("drilldown_level_filters", fmt.Sprintf("proxy returns %d lines", proxyLines))
+	} else {
+		score.fail("drilldown_level_filters", "proxy returned no log lines")
+	}
+	if lokiLines == proxyLines {
+		score.pass("drilldown_level_filters", fmt.Sprintf("line count matches Loki (%d)", proxyLines))
+	} else {
+		score.fail("drilldown_level_filters", fmt.Sprintf("line count mismatch: loki=%d proxy=%d", lokiLines, proxyLines))
+	}
+
+	score.report(t)
+}
+
+func TestFeature_MultitenantDrilldownClusterLevelOrFilters(t *testing.T) {
+	headers := map[string]string{"X-Scope-OrgID": "0|fake"}
+	now := time.Now()
+	params := url.Values{}
+	params.Set("query", `{cluster="us-east-1"} | detected_level="error" or detected_level="info" or detected_level="warn" | json | logfmt | drop __error__, __error_details__`)
+	params.Set("start", fmt.Sprintf("%d", now.Add(-3*time.Hour).UnixNano()))
+	params.Set("end", fmt.Sprintf("%d", now.UnixNano()))
+	params.Set("limit", "1000")
+
+	resp := getJSONWithHeaders(t, proxyURL+"/loki/api/v1/query_range?"+params.Encode(), headers)
+	if !checkStatus(resp) {
+		t.Fatalf("expected multitenant drilldown level filters to succeed, got %v", resp)
+	}
+	if lines := countLogLines(resp); lines == 0 {
+		t.Fatalf("expected multitenant drilldown level filters to return logs, got %v", resp)
+	}
+}
+
 // =============================================================================
 // Edge Case: Empty result queries
 // =============================================================================

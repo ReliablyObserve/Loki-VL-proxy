@@ -79,6 +79,7 @@ Exact counts move often. Treat the categories below as the stable map of what is
 | `internal/middleware/middleware_test.go` | Rate limiter, circuit breaker |
 | `test/e2e-compat/` | Docker-based Loki vs proxy comparison |
 | `test/e2e-compat/drilldown_compat_test.go` | Grafana Logs Drilldown resource contracts via Grafana datasource proxy |
+| `test/e2e-compat/features_test.go` | Live Grafana-facing edge cases including multi-tenant `__tenant_id__` and Drilldown level-filter regressions |
 | `test/e2e-ui/` | Playwright browser tests against Grafana |
 
 ## Compatibility Tracks
