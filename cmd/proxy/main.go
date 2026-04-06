@@ -251,29 +251,14 @@ func main() {
 		serviceInstanceID: *otelServiceInstanceID,
 		deploymentEnv:     *deploymentEnvironment,
 	}, os.Getenv)
-	*listenAddr = envCfg.listenAddr
-	*backendURL = envCfg.backendURL
-	*rulerBackendURL = envCfg.rulerBackendURL
-	*alertsBackendURL = envCfg.alertsBackendURL
-	*tenantMapJSON = envCfg.tenantMapJSON
-	*otlpEndpoint = envCfg.otlpEndpoint
-	*otlpCompression = envCfg.otlpCompression
-	*otlpHeaders = envCfg.otlpHeaders
-	*labelStyle = envCfg.labelStyle
-	*fieldMappingJSON = envCfg.fieldMappingJSON
-	*metadataFieldMode = envCfg.metadataFieldMode
-	*otelServiceName = envCfg.serviceName
-	*otelServiceNamespace = envCfg.serviceNamespace
-	*otelServiceInstanceID = envCfg.serviceInstanceID
-	*deploymentEnvironment = envCfg.deploymentEnv
 
 	logger := buildLogger(os.Stdout, loggerConfig{
 		level:                 *logLevel,
-		serviceName:           *otelServiceName,
-		serviceNamespace:      *otelServiceNamespace,
+		serviceName:           envCfg.serviceName,
+		serviceNamespace:      envCfg.serviceNamespace,
 		serviceVersion:        version,
-		serviceInstanceID:     *otelServiceInstanceID,
-		deploymentEnvironment: *deploymentEnvironment,
+		serviceInstanceID:     envCfg.serviceInstanceID,
+		deploymentEnvironment: envCfg.deploymentEnv,
 	})
 	slog.SetDefault(logger)
 	fatal := func(msg string, args ...any) {
@@ -293,12 +278,12 @@ func main() {
 	defer cacheCleanup()
 
 	proxyCfg, err := buildProxyConfig(proxyRuntimeConfig{
-		backendURL:               *backendURL,
-		rulerBackendURL:          *rulerBackendURL,
-		alertsBackendURL:         *alertsBackendURL,
+		backendURL:               envCfg.backendURL,
+		rulerBackendURL:          envCfg.rulerBackendURL,
+		alertsBackendURL:         envCfg.alertsBackendURL,
 		cache:                    c,
 		logLevel:                 *logLevel,
-		tenantMapJSON:            *tenantMapJSON,
+		tenantMapJSON:            envCfg.tenantMapJSON,
 		maxLines:                 *maxLines,
 		backendTimeout:           *backendTimeout,
 		backendBasicAuth:         *backendBasicAuth,
@@ -318,9 +303,9 @@ func main() {
 		metricsMaxTenants:        *metricsMaxTenants,
 		metricsMaxClients:        *metricsMaxClients,
 		metricsTrustProxyHeaders: *metricsTrustProxyHeaders,
-		labelStyle:               *labelStyle,
-		metadataFieldMode:        *metadataFieldMode,
-		fieldMappingJSON:         *fieldMappingJSON,
+		labelStyle:               envCfg.labelStyle,
+		metadataFieldMode:        envCfg.metadataFieldMode,
+		fieldMappingJSON:         envCfg.fieldMappingJSON,
 		streamFieldsCSV:          *streamFieldsCSV,
 		peerSelf:                 *peerSelf,
 		peerDiscovery:            *peerDiscovery,
@@ -341,17 +326,17 @@ func main() {
 	p.Init()
 
 	stopOTLP := startOTLPMetricsPusher(otlpRuntimeConfig{
-		endpoint:              *otlpEndpoint,
+		endpoint:              envCfg.otlpEndpoint,
 		interval:              *otlpInterval,
-		headers:               *otlpHeaders,
-		compression:           *otlpCompression,
+		headers:               envCfg.otlpHeaders,
+		compression:           envCfg.otlpCompression,
 		timeout:               *otlpTimeout,
 		tlsSkipVerify:         *otlpTLSSkipVerify,
-		serviceName:           *otelServiceName,
-		serviceNamespace:      *otelServiceNamespace,
+		serviceName:           envCfg.serviceName,
+		serviceNamespace:      envCfg.serviceNamespace,
 		serviceVersion:        version,
-		serviceInstanceID:     *otelServiceInstanceID,
-		deploymentEnvironment: *deploymentEnvironment,
+		serviceInstanceID:     envCfg.serviceInstanceID,
+		deploymentEnvironment: envCfg.deploymentEnv,
 	}, p.GetMetrics(), logger, func(cfg metrics.OTLPConfig, m *metrics.Metrics) otlpMetricsPusher {
 		return metrics.NewOTLPPusher(cfg, m)
 	})
@@ -365,7 +350,7 @@ func main() {
 
 	// Hardened HTTP server with timeouts
 	srv, err := buildHTTPServer(serverRuntimeOptions{
-		listenAddr:           *listenAddr,
+		listenAddr:           envCfg.listenAddr,
 		handler:              handler,
 		readTimeout:          *readTimeout,
 		writeTimeout:         *writeTimeout,
@@ -384,8 +369,8 @@ func main() {
 
 	// Graceful shutdown on SIGTERM/SIGINT
 	go runServerLoop(srv, serverLoopOptions{
-		listenAddr:  *listenAddr,
-		backendURL:  *backendURL,
+		listenAddr:  envCfg.listenAddr,
+		backendURL:  envCfg.backendURL,
 		tlsCertFile: *tlsCertFile,
 		tlsKeyFile:  *tlsKeyFile,
 	}, logger, fatal)

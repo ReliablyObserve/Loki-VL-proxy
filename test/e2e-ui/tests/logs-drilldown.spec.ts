@@ -438,4 +438,20 @@ test.describe("Grafana Logs Drilldown", () => {
     await expect(page.getByText(/Log volume/i)).toBeVisible({ timeout: 15_000 });
     expect(errors).toHaveLength(0);
   });
+
+  test("multi-tenant cluster drilldown supports follow-up field filtering", async ({ page }) => {
+    const errors = collectLokiErrors(page);
+    await openLabelDrilldown(page, PROXY_MULTI_DS, "cluster", "us-east-1", [
+      "error",
+      "info",
+      "warn",
+    ]);
+
+    await addDrilldownFilter(page, "Filter by fields", "method", "GET");
+    await expect(page.getByLabel("Remove filter with key method")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    expect(errors).toHaveLength(0);
+  });
 });
