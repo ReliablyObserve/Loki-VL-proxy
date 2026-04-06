@@ -154,6 +154,23 @@ services:
       retries: 10
       start_period: 5s
 
+  tail-ingress:
+    image: nginx:1.27-alpine
+    container_name: e2e-tail-ingress
+    ports:
+      - "3104:8080"
+    volumes:
+      - ./nginx-tail.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      loki-vl-proxy-tail:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/ready"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
   # Grafana with 3 datasources for manual side-by-side comparison
   grafana:
     image: ${GRAFANA_IMAGE:-grafana/grafana:12.4.2}
@@ -172,6 +189,7 @@ services:
       - loki-vl-proxy
       - loki-vl-proxy-underscore
       - loki-vl-proxy-tail
+      - tail-ingress
 
 volumes:
   vl-data:

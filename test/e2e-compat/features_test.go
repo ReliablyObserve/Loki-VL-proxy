@@ -534,6 +534,37 @@ func TestFeature_Tail_SyntheticProxyAllowsConfiguredOriginAndStreamsLiveData(t *
 	}
 }
 
+func TestFeature_Tail_ReverseProxyIngressStreamsLiveData(t *testing.T) {
+	now := time.Now()
+	app := fmt.Sprintf("tail-ingress-%d", now.UnixNano())
+	msg := "ingress tail frame " + app
+
+	params := url.Values{}
+	params.Set("query", fmt.Sprintf(`{app="%s"}`, app))
+	params.Set("start", fmt.Sprintf("%d", now.UnixNano()))
+
+	headers := http.Header{}
+	headers.Set("Origin", "http://127.0.0.1:3002")
+	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(tailIngressURL, "http")+"/loki/api/v1/tail?"+params.Encode(), headers)
+	if err != nil {
+		t.Fatalf("ingress websocket dial failed: %v (resp=%v)", err, resp)
+	}
+	defer conn.Close()
+
+	pushCustomToVL(t, now.Add(500*time.Millisecond), map[string]string{
+		"app":   app,
+		"env":   "test",
+		"level": "info",
+	}, []logLine{{Msg: msg, Level: "info"}}, []string{"app", "env", "level"})
+
+	frame := readTailFrame(t, conn, msg, 10*time.Second)
+	streams, ok := frame["streams"].([]interface{})
+	if !ok || len(streams) == 0 {
+		t.Fatalf("expected ingress tail frame with streams, got %v", frame)
+	}
+}
+
 // =============================================================================
 // Query Analytics (/debug/queries)
 // =============================================================================

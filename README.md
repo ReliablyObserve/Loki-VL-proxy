@@ -100,39 +100,48 @@ See [Architecture](docs/architecture.md) for component design, [Observability](d
 
 ## Key Features
 
-### Query Translation
-See [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md), and [Loki Compatibility](docs/compatibility-loki.md).
+### User Compatibility
+See [Getting Started](docs/getting-started.md), [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md), [Loki Compatibility](docs/compatibility-loki.md), and [Logs Drilldown Compatibility](docs/compatibility-drilldown.md).
 
 - **100% LogQL coverage** -- stream selectors, line filters, parsers, metric queries, binary expressions, subqueries
 - **Proxy-side evaluation** for features VL doesn't support natively: `without()`, `on()`/`ignoring()`, `group_left()`/`group_right()`, subquery `[range:step]`, `bool` modifier, `| decolorize`, `| line_format`
 - **OTel label translation** -- bidirectional dot/underscore conversion for 50+ semantic convention fields
 - **Hybrid metadata fields by default** -- keep Loki-compatible labels while exposing both dotted OTel fields and underscore aliases for Drilldown, Explore, and correlation paths
+- **Grafana-native workflows** -- Explore, Logs Drilldown, dashboards, live tail, and datasource-side multi-tenant reads work through the standard Loki datasource
+- **Rules and alerts read compatibility** -- surface `vmalert` rules and alerts on Loki-compatible read endpoints and migrate existing files with the built-in converter
 - **VL stream selector optimization** -- known `_stream_fields` bypass full-text scan for native performance
 
-### Caching & Performance
-See [Fleet Cache](docs/fleet-cache.md), [Performance Guide](docs/performance.md), and [Scaling](docs/scaling.md).
+### Security & Hardening
+See [Security](docs/security.md), [Configuration](docs/configuration.md), [Observability](docs/observability.md), and [Known Issues](docs/KNOWN_ISSUES.md).
+
+- **Admin/debug endpoints closed by default** -- `/debug/queries`, `pprof`, and peer-cache internals require explicit enablement and optional admin auth
+- **Tail origin protection** -- `/tail` rejects browser origins unless explicitly allowlisted
+- **Tenant hardening** -- explicit tenant mapping, default-tenant aliases for VL `0:0`, and query-only multi-tenant fanout on `X-Scope-OrgID: tenant-a|tenant-b`
+- **6-layer protection** -- rate limiting, concurrency cap, coalescing, normalization, cache, circuit breaker
+- **Secret redaction** -- all log output passes through a redacting handler that masks API keys, bearer tokens, passwords, AWS credentials, and URL-embedded secrets
+- **Delete with safeguards** -- confirmation header, tenant scoping, time range limits, audit logging
+- **TLS support** -- server-side HTTPS, backend TLS, OTLP TLS, and optional client-certificate auth
+
+### Performance & Scale
+See [Performance Guide](docs/performance.md), [Scaling](docs/scaling.md), [Fleet Cache](docs/fleet-cache.md), and [Observability](docs/observability.md).
 
 - **3-tier cache**: L1 in-memory (LRU + TTL) → L2 on-disk (bbolt + gzip) → L3 peer (consistent hash ring)
 - **Fleet-distributed cache** -- consistent hashing across proxy replicas, shadow copies with TTL preservation, per-peer circuit breakers ([details](docs/fleet-cache.md))
 - **Request coalescing** -- N identical queries become 1 backend request (singleflight)
 - **Query normalization** -- sort matchers, collapse whitespace for better cache hit rates
-
-### Protection & Security
-See [Security](docs/security.md), [Configuration](docs/configuration.md), and [Known Issues](docs/KNOWN_ISSUES.md).
-
-- **6-layer protection** -- rate limiting, concurrency cap, coalescing, normalization, cache, circuit breaker
-- **Secret redaction** -- all log output passes through a redacting handler that masks API keys, bearer tokens, passwords, AWS credentials, and URL-embedded secrets
-- **Delete with safeguards** -- confirmation header, tenant scoping, time range limits, audit logging
-- **TLS support** -- server-side HTTPS, backend TLS, OTLP TLS
+- **Query-range response caching** -- final Loki-shaped cached responses for hot query paths, including merged multi-tenant reads
+- **Synthetic live tail fallback** -- keep `/tail` usable when native backend tail support is missing or disabled
+- **Cache-hit and bypass regression gates** -- PR quality checks track CPU, memory, allocations, throughput, and memory growth across hot and uncached paths
 
 ### Operations
-See [Configuration](docs/configuration.md), [Observability](docs/observability.md), [Testing](docs/testing.md), [Compatibility Matrix](docs/compatibility-matrix.md), [Logs Drilldown Compatibility](docs/compatibility-drilldown.md), and [Rules And Alerts Migration](docs/rules-alerts-migration.md).
+See [Getting Started](docs/getting-started.md), [Configuration](docs/configuration.md), [Scaling](docs/scaling.md), [Observability](docs/observability.md), [Testing](docs/testing.md), [Compatibility Matrix](docs/compatibility-matrix.md), and [Rules And Alerts Migration](docs/rules-alerts-migration.md).
 
 - **Multitenancy** -- Loki `X-Scope-OrgID` mapped to VL `AccountID`/`ProjectID`, SIGHUP hot-reload
 - **Observability** -- Prometheus `/metrics`, OTLP push with matching core metric names, OTel-friendly JSON logs, per-tenant breakdowns, per-client offender metrics, fleet peer-cache metrics
 - **Rules and alerts migration tool** -- convert Loki-style rule files into `vmalert` `type: vlogs` rule files for read-compatible Grafana alert visibility through the proxy
 - **WebSocket tail** -- live log tailing via Loki's WebSocket protocol with fast handshake, origin controls, and synthetic fallback when native VL tail streaming is unavailable
 - **GOMEMLIMIT auto-tuning** -- Helm chart calculates Go memory limit as % of k8s resource limits
+- **Versioned compatibility windows** -- pinned and matrix-tested Loki, VictoriaLogs, and Logs Drilldown support bands with dedicated CI badges
 
 ## Quick Start
 
