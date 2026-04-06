@@ -653,6 +653,9 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	rl := func(endpoint string, h http.HandlerFunc) http.Handler {
 		return securityHeaders(p.tenantMiddleware(p.limiter.Middleware(p.requestLogger(endpoint, h))))
 	}
+	rlNoTenant := func(endpoint string, h http.HandlerFunc) http.Handler {
+		return securityHeaders(p.limiter.Middleware(p.requestLogger(endpoint, h)))
+	}
 
 	// Loki API endpoints — data queries are rate-limited
 	mux.Handle("/loki/api/v1/query_range", rl("query_range", p.handleQueryRange))
@@ -675,7 +678,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	// Read-only API additions
 	mux.Handle("/loki/api/v1/format_query", rl("format_query", p.handleFormatQuery))
 	mux.Handle("/loki/api/v1/detected_labels", rl("detected_labels", p.handleDetectedLabels))
-	mux.Handle("/loki/api/v1/drilldown-limits", rl("drilldown_limits", p.handleDrilldownLimits))
+	mux.Handle("/loki/api/v1/drilldown-limits", rlNoTenant("drilldown_limits", p.handleDrilldownLimits))
 
 	// Write endpoints — blocked (this is a read-only proxy)
 	mux.HandleFunc("/loki/api/v1/push", p.handleWriteBlocked)

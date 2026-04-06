@@ -163,6 +163,32 @@ func TestTenant_AuthEnabledRequiresHeader(t *testing.T) {
 	}
 }
 
+func TestTenant_DrilldownLimitsDoesNotRequireHeaderWhenAuthEnabled(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("backend should not be called for drilldown-limits")
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{
+		BackendURL:  vlBackend.URL,
+		Cache:       c,
+		LogLevel:    "error",
+		AuthEnabled: true,
+	})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for drilldown-limits without X-Scope-OrgID when auth.enabled=true, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestTenant_GlobalBypassDisabledWhenMappingsConfigured(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("backend should not be called when global tenant bypass is disabled")

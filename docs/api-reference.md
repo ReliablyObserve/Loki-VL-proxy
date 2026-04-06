@@ -82,6 +82,8 @@ Read-path alerting compatibility follows Loki-facing routes and query parameters
 
 Query endpoints also support Loki-style explicit multi-tenant headers such as `X-Scope-OrgID: team-a|team-b`. The proxy fans those requests out per tenant, merges the Loki-shaped responses, and injects synthetic `__tenant_id__` labels in merged results. Leading-selector `__tenant_id__` matchers such as `{app="api",__tenant_id__="team-b"}` narrow the fanout set before backend requests are issued. `/tail`, delete, and write endpoints remain single-tenant.
 
+`/loki/api/v1/drilldown-limits` is a bootstrap/capability endpoint for Grafana Logs Drilldown and does not require a tenant header, even when `-auth.enabled=true`.
+
 ## Infrastructure Endpoints
 
 | Endpoint | Purpose |
