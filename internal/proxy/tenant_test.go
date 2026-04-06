@@ -812,3 +812,32 @@ func TestTenant_MultiTenantDetectedLabelsUsesExactValueUnion(t *testing.T) {
 		t.Fatalf("expected synthetic __tenant_id__ cardinality 2, got %d body=%s", got["__tenant_id__"], w.Body.String())
 	}
 }
+
+func TestTenant_HasMultiTenantOrgID(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: false},
+		{value: "tenant-a", want: false},
+		{value: "tenant-a|tenant-b", want: true},
+		{value: "tenant-a | tenant-b", want: true},
+	}
+	for _, tc := range cases {
+		if got := hasMultiTenantOrgID(tc.value); got != tc.want {
+			t.Fatalf("hasMultiTenantOrgID(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestTenant_QueryRangeCacheKeyUsesRawQueryWhenAvailable(t *testing.T) {
+	p, _ := New(Config{BackendURL: "http://example.com", Cache: cache.New(60*time.Second, 10), LogLevel: "error"})
+	r := httptest.NewRequest("GET", `/loki/api/v1/query_range?end=2&query={app="nginx"}&start=1&step=1`, nil)
+	r.Header.Set("X-Scope-OrgID", "tenant-a")
+
+	got := p.queryRangeCacheKey(r, `{app="nginx"}`)
+	want := `query_range:tenant-a:end=2&query={app="nginx"}&start=1&step=1`
+	if got != want {
+		t.Fatalf("queryRangeCacheKey() = %q, want %q", got, want)
+	}
+}

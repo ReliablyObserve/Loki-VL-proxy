@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,6 +67,63 @@ func BenchmarkProxy_Labels_CacheHit(b *testing.B) {
 		for pb.Next() {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
+			p.handleLabels(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_QueryRange_CacheBypass(b *testing.B) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"_time":"2024-01-15T10:30:00Z","_msg":"test","app":"nginx"}` + "\n"))
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 10000)
+	p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+
+	urls := make([]string, 1024)
+	for i := range urls {
+		urls[i] = `/loki/api/v1/query_range?query={app="nginx"}&start=` + strconv.Itoa(i+1) + `&end=` + strconv.Itoa(i+2) + `&step=1`
+	}
+	var idx atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			u := urls[int(idx.Add(1)-1)%len(urls)]
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", u, nil)
+			p.handleQueryRange(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_Labels_CacheBypass(b *testing.B) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"values": []map[string]interface{}{
+				{"value": "app", "hits": 100},
+				{"value": "namespace", "hits": 50},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 10000)
+	p, _ := New(Config{BackendURL: vlBackend.URL, Cache: c, LogLevel: "error"})
+
+	urls := make([]string, 1024)
+	for i := range urls {
+		urls[i] = "/loki/api/v1/labels?start=" + strconv.Itoa(i+1) + "&end=" + strconv.Itoa(i+2)
+	}
+	var idx atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			u := urls[int(idx.Add(1)-1)%len(urls)]
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", u, nil)
 			p.handleLabels(w, r)
 		}
 	})

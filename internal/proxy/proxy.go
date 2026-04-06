@@ -508,6 +508,10 @@ func splitMultiTenantOrgIDs(orgID string) []string {
 	return out
 }
 
+func hasMultiTenantOrgID(orgID string) bool {
+	return strings.IndexByte(orgID, '|') >= 0
+}
+
 func isMultiTenantQueryPath(path string) bool {
 	switch {
 	case path == "/loki/api/v1/query":
@@ -860,14 +864,23 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) queryRangeCacheKey(r *http.Request, logqlQuery string) string {
-	values := url.Values{}
-	values.Set("query", logqlQuery)
-	for _, key := range []string{"start", "end", "step", "limit", "direction"} {
-		if value := r.FormValue(key); value != "" {
-			values.Set(key, value)
+	rawQuery := r.URL.RawQuery
+	if rawQuery == "" {
+		var b strings.Builder
+		b.Grow(len(logqlQuery) + 64)
+		b.WriteString("query=")
+		b.WriteString(url.QueryEscape(logqlQuery))
+		for _, key := range []string{"start", "end", "step", "limit", "direction"} {
+			if value := r.FormValue(key); value != "" {
+				b.WriteByte('&')
+				b.WriteString(key)
+				b.WriteByte('=')
+				b.WriteString(url.QueryEscape(value))
+			}
 		}
+		rawQuery = b.String()
 	}
-	return "query_range:" + r.Header.Get("X-Scope-OrgID") + ":" + values.Encode()
+	return "query_range:" + r.Header.Get("X-Scope-OrgID") + ":" + rawQuery
 }
 
 // handleQuery translates Loki instant queries.
@@ -3722,7 +3735,11 @@ func formatVLStep(step string) string {
 }
 
 func (p *Proxy) handleMultiTenantFanout(w http.ResponseWriter, r *http.Request, endpoint string, single func(http.ResponseWriter, *http.Request)) bool {
-	tenantIDs := splitMultiTenantOrgIDs(strings.TrimSpace(r.Header.Get("X-Scope-OrgID")))
+	orgID := strings.TrimSpace(r.Header.Get("X-Scope-OrgID"))
+	if !hasMultiTenantOrgID(orgID) {
+		return false
+	}
+	tenantIDs := splitMultiTenantOrgIDs(orgID)
 	if len(tenantIDs) < 2 {
 		return false
 	}
