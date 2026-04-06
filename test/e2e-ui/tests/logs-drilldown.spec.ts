@@ -20,9 +20,9 @@ async function addDrilldownFilter(
   value: string
 ) {
   await page.getByRole("combobox", { name: comboName }).click();
-  await page.getByRole("option", { name: key, exact: true }).click();
-  await page.getByRole("option", { name: "= Equals", exact: true }).click();
-  await page.keyboard.type(value);
+  await selectComboboxOption(page, key);
+  await selectComboboxOption(page, "= Equals");
+  await typeIntoActiveCombobox(page, value);
   const valueOption = page.getByRole("option", { name: value, exact: true });
   if (await valueOption.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await valueOption.click();
@@ -37,6 +37,46 @@ async function addDrilldownFilter(
     await page.keyboard.press("Enter");
   }
   await page.keyboard.press("Escape");
+}
+
+function escapeRegex(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function typeIntoActiveCombobox(page: Page, value: string) {
+  const input = page
+    .locator('[role="combobox"][aria-expanded="true"] input, input[aria-autocomplete="list"]')
+    .last();
+  if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+    await input.fill("");
+    await input.type(value, { delay: 10 });
+    return;
+  }
+  await page.keyboard.type(value, { delay: 10 });
+}
+
+async function selectComboboxOption(page: Page, optionLabel: string) {
+  const exactOption = page.getByRole("option", { name: optionLabel, exact: true });
+  if (await exactOption.isVisible({ timeout: 1_500 }).catch(() => false)) {
+    await exactOption.click();
+    return;
+  }
+
+  await typeIntoActiveCombobox(page, optionLabel);
+
+  const exactPattern = new RegExp(`^${escapeRegex(optionLabel)}$`, "i");
+  const searchableOption = page.getByRole("option", { name: exactPattern }).first();
+  if (await searchableOption.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    await searchableOption.click();
+    return;
+  }
+
+  const fuzzyOption = page
+    .getByRole("option")
+    .filter({ hasText: optionLabel })
+    .first();
+  await expect(fuzzyOption).toBeVisible({ timeout: 5_000 });
+  await fuzzyOption.click();
 }
 
 async function openServiceDrilldown(
