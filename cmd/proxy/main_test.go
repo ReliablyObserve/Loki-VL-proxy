@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"encoding/pem"
 	"io"
 	"log/slog"
@@ -29,12 +31,33 @@ type fakeReloadableProxy struct {
 	fieldMappings []proxy.FieldMapping
 }
 
+type fakeHTTPServer struct {
+	listenErr     error
+	listenTLSErr  error
+	listenCalls   int
+	listenTLSCalls int
+}
+
 func (f *fakeReloadableProxy) ReloadTenantMap(m map[string]proxy.TenantMapping) {
 	f.tenantMap = m
 }
 
 func (f *fakeReloadableProxy) ReloadFieldMappings(m []proxy.FieldMapping) {
 	f.fieldMappings = m
+}
+
+func (f *fakeHTTPServer) ListenAndServe() error {
+	f.listenCalls++
+	return f.listenErr
+}
+
+func (f *fakeHTTPServer) ListenAndServeTLS(_, _ string) error {
+	f.listenTLSCalls++
+	return f.listenTLSErr
+}
+
+func (f *fakeHTTPServer) Shutdown(context.Context) error {
+	return nil
 }
 
 func TestBuildServerTLSConfig_RequiresCAWhenClientCertsRequired(t *testing.T) {
@@ -519,6 +542,90 @@ func TestBuildHTTPServer_WithTLSClientCA(t *testing.T) {
 	}
 	if srv.TLSConfig == nil || srv.TLSConfig.ClientAuth != tls.RequireAndVerifyClientCert {
 		t.Fatalf("expected client-auth TLS config, got %+v", srv.TLSConfig)
+	}
+}
+
+func TestRunServerLoop_UsesPlainHTTPByDefault(t *testing.T) {
+	srv := &fakeHTTPServer{}
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(buf, nil))
+	var fatalCalls int
+
+	runServerLoop(srv, serverLoopOptions{
+		listenAddr: ":3100",
+		backendURL: "http://backend",
+	}, logger, func(string, ...any) {
+		fatalCalls++
+	})
+
+	if srv.listenCalls != 1 || srv.listenTLSCalls != 0 {
+		t.Fatalf("expected plain HTTP listen path, got listen=%d tls=%d", srv.listenCalls, srv.listenTLSCalls)
+	}
+	if fatalCalls != 0 {
+		t.Fatalf("expected no fatal calls, got %d", fatalCalls)
+	}
+	if !strings.Contains(buf.String(), `"tls":false`) {
+		t.Fatalf("expected non-TLS startup log, got %s", buf.String())
+	}
+}
+
+func TestRunServerLoop_UsesTLSWhenCertAndKeyConfigured(t *testing.T) {
+	srv := &fakeHTTPServer{}
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(buf, nil))
+	var fatalCalls int
+
+	runServerLoop(srv, serverLoopOptions{
+		listenAddr:  ":3100",
+		backendURL:  "http://backend",
+		tlsCertFile: "server.crt",
+		tlsKeyFile:  "server.key",
+	}, logger, func(string, ...any) {
+		fatalCalls++
+	})
+
+	if srv.listenCalls != 0 || srv.listenTLSCalls != 1 {
+		t.Fatalf("expected TLS listen path, got listen=%d tls=%d", srv.listenCalls, srv.listenTLSCalls)
+	}
+	if fatalCalls != 0 {
+		t.Fatalf("expected no fatal calls, got %d", fatalCalls)
+	}
+	if !strings.Contains(buf.String(), `"tls":true`) {
+		t.Fatalf("expected TLS startup log, got %s", buf.String())
+	}
+}
+
+func TestRunServerLoop_ReportsServerFailure(t *testing.T) {
+	srv := &fakeHTTPServer{listenErr: errors.New("boom")}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	var fatalMsg string
+
+	runServerLoop(srv, serverLoopOptions{
+		listenAddr: ":3100",
+		backendURL: "http://backend",
+	}, logger, func(msg string, _ ...any) {
+		fatalMsg = msg
+	})
+
+	if fatalMsg != "server failed" {
+		t.Fatalf("expected server failure message, got %q", fatalMsg)
+	}
+}
+
+func TestRunServerLoop_IgnoresServerClosed(t *testing.T) {
+	srv := &fakeHTTPServer{listenErr: http.ErrServerClosed}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	var fatalCalls int
+
+	runServerLoop(srv, serverLoopOptions{
+		listenAddr: ":3100",
+		backendURL: "http://backend",
+	}, logger, func(string, ...any) {
+		fatalCalls++
+	})
+
+	if fatalCalls != 0 {
+		t.Fatalf("expected http.ErrServerClosed to be ignored, got %d fatal calls", fatalCalls)
 	}
 }
 

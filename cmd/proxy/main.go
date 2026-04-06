@@ -106,6 +106,19 @@ type serverRuntimeOptions struct {
 	tlsRequireClientCert bool
 }
 
+type httpServer interface {
+	ListenAndServe() error
+	ListenAndServeTLS(certFile, keyFile string) error
+	Shutdown(ctx context.Context) error
+}
+
+type serverLoopOptions struct {
+	listenAddr  string
+	backendURL  string
+	tlsCertFile string
+	tlsKeyFile  string
+}
+
 type reloadableProxy interface {
 	ReloadTenantMap(map[string]proxy.TenantMapping)
 	ReloadFieldMappings([]proxy.FieldMapping)
@@ -380,19 +393,12 @@ func main() {
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGTERM, syscall.SIGINT)
 
-	go func() {
-		if *tlsCertFile != "" && *tlsKeyFile != "" {
-			logger.Info("proxy listening", "listen_address", *listenAddr, "backend_url", *backendURL, "tls", true)
-			if err := srv.ListenAndServeTLS(*tlsCertFile, *tlsKeyFile); err != nil && err != http.ErrServerClosed {
-				fatal("tls server failed", "error", err)
-			}
-		} else {
-			logger.Info("proxy listening", "listen_address", *listenAddr, "backend_url", *backendURL, "tls", false)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				fatal("server failed", "error", err)
-			}
-		}
-	}()
+	go runServerLoop(srv, serverLoopOptions{
+		listenAddr:  *listenAddr,
+		backendURL:  *backendURL,
+		tlsCertFile: *tlsCertFile,
+		tlsKeyFile:  *tlsKeyFile,
+	}, logger, fatal)
 
 	sig := <-shutdownCh
 	logger.Info("shutdown requested", "signal", sig.String())
@@ -702,6 +708,21 @@ func buildHTTPServer(opts serverRuntimeOptions) (*http.Server, error) {
 		srv.TLSConfig = tlsCfg
 	}
 	return srv, nil
+}
+
+func runServerLoop(srv httpServer, opts serverLoopOptions, logger *slog.Logger, fatal func(string, ...any)) {
+	if opts.tlsCertFile != "" && opts.tlsKeyFile != "" {
+		logger.Info("proxy listening", "listen_address", opts.listenAddr, "backend_url", opts.backendURL, "tls", true)
+		if err := srv.ListenAndServeTLS(opts.tlsCertFile, opts.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+			fatal("tls server failed", "error", err)
+		}
+		return
+	}
+
+	logger.Info("proxy listening", "listen_address", opts.listenAddr, "backend_url", opts.backendURL, "tls", false)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fatal("server failed", "error", err)
+	}
 }
 
 func reloadDynamicConfig(p reloadableProxy, getenv func(string) string, logger *slog.Logger) {
