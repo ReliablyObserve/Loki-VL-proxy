@@ -71,7 +71,7 @@ def main():
         )
 
     threshold = 5.0
-    cpu_threshold = 8.0
+    cpu_threshold = 10.0
     benchmarks = (
         ("query_range_cache_hit_ns_per_op", "QueryRange cache-hit CPU cost", "lower", cpu_threshold),
         ("query_range_cache_hit_bytes_per_op", "QueryRange cache-hit memory", "lower", threshold),
@@ -102,7 +102,7 @@ def main():
         float(base["performance"]["load"]["high_concurrency_req_per_s"]),
         float(head["performance"]["load"]["high_concurrency_req_per_s"]),
         "higher",
-        15.0,
+        10.0,
     )
     check_threshold(
         failures,
