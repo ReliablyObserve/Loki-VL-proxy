@@ -385,4 +385,28 @@ test.describe("Grafana Logs Drilldown", () => {
     await expect(page.getByText("No logs found")).toHaveCount(0);
     expect(errors).toHaveLength(0);
   });
+
+  test("multi-tenant landing page can add and use a cluster breakdown tab", async ({ page }) => {
+    const responses = await collectDrilldownResponses(page);
+    const errors = collectLokiErrors(page);
+    await openLogsDrilldown(page, PROXY_MULTI_DS);
+    await waitForGrafanaReady(page);
+
+    await expect(serviceCard(page, "api-gateway").getByRole("heading", { name: "api-gateway" })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await addDrilldownFilter(page, "Filter by labels", "cluster", "us-east-1");
+    await expect(page.getByLabel("Remove filter with key cluster")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    expect(errors).toHaveLength(0);
+
+    const volumeResponse = responses.find((r) =>
+      String(r.url).includes("/resources/index/volume")
+    );
+    expect(volumeResponse).toBeTruthy();
+    expect(JSON.stringify(volumeResponse?.json)).toContain("us-east-1");
+  });
 });

@@ -143,6 +143,19 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     expect(errors).toHaveLength(0);
   });
 
+  test("multi-tenant line filter with __tenant_id__ works in Explore", async ({ page }) => {
+    await openExplore(page, PROXY_MULTI_DS);
+    await waitForGrafanaReady(page);
+
+    const errors = collectLokiErrors(page);
+    await typeQuery(page, '{app="api-gateway", __tenant_id__=~"f.*"} |= "error"');
+    await runQuery(page);
+
+    await assertNoErrors(page);
+    await assertLogsVisible(page);
+    expect(errors).toHaveLength(0);
+  });
+
   test("live tail works through the browser-allowed synthetic datasource", async ({
     page,
   }) => {
@@ -235,6 +248,12 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     await expect(page.getByText(/error|failed|unable/i).first()).toBeVisible({
       timeout: 15_000,
     });
+
+    await openExplore(page, PROXY_DS);
+    await waitForGrafanaReady(page);
+    await typeQuery(page, '{app="api-gateway"}');
+    await runQuery(page);
+    await assertNoErrors(page);
   });
 });
 

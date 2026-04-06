@@ -345,6 +345,36 @@ func TestFeature_Multitenancy_FilteredLabelsSeriesAndDetectedFields(t *testing.T
 		}
 	}
 
+	regexSeriesParams := url.Values{}
+	regexSeriesParams.Add("match[]", `{app="api-gateway",__tenant_id__=~"f.*"}`)
+	regexSeriesResp := getJSONWithHeaders(t, proxyURL+"/loki/api/v1/series?"+regexSeriesParams.Encode(), headers)
+	regexSeries := extractArray(regexSeriesResp, "data")
+	if len(regexSeries) == 0 {
+		t.Fatalf("expected regex-filtered series data for multi-tenant request, got %v", regexSeriesResp)
+	}
+	for _, item := range regexSeries {
+		labels, _ := item.(map[string]interface{})
+		if labels["__tenant_id__"] != "fake" {
+			t.Fatalf("expected regex-filtered series __tenant_id__=fake, got %v", item)
+		}
+	}
+
+	labelValueResp := getJSONWithHeaders(t, proxyURL+"/loki/api/v1/label/cluster/values?query="+url.QueryEscape(`{app="api-gateway",__tenant_id__=~"f.*"}`), headers)
+	labelValues := extractArray(labelValueResp, "data")
+	if len(labelValues) == 0 {
+		t.Fatalf("expected cluster label values for regex-filtered multi-tenant request, got %v", labelValueResp)
+	}
+	foundCluster := false
+	for _, item := range labelValues {
+		if item == "us-east-1" {
+			foundCluster = true
+			break
+		}
+	}
+	if !foundCluster {
+		t.Fatalf("expected regex-filtered cluster label values to include us-east-1, got %v", labelValueResp)
+	}
+
 	singleFields := getJSONWithHeaders(t, proxyURL+"/loki/api/v1/detected_fields?query="+url.QueryEscape(`{app="api-gateway"}`)+"&start="+start+"&end="+end, map[string]string{"X-Scope-OrgID": "0"})
 	multiFields := getJSONWithHeaders(t, proxyURL+"/loki/api/v1/detected_fields?query="+url.QueryEscape(`{app="api-gateway"}`)+"&start="+start+"&end="+end, headers)
 	singleFieldItems := extractArray(singleFields, "fields")
