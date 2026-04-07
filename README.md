@@ -180,10 +180,10 @@ helm install loki-vl-proxy ./charts/loki-vl-proxy \
 # Kubernetes (DNS discovery via headless service)
 helm install loki-vl-proxy ./charts/loki-vl-proxy \
   --set replicaCount=3 \
-  --set extraArgs.peer-self='$(POD_IP):3100' \
-  --set extraArgs.peer-discovery=dns \
-  --set extraArgs.peer-dns=loki-vl-proxy-headless.default.svc.cluster.local
+  --set peerCache.enabled=true
 ```
+
+When `peerCache.enabled=true`, the chart provisions a headless service and injects `-peer-self`, `-peer-discovery=dns`, and `-peer-dns` automatically. The proxy refreshes peers from DNS on a timer, so HPA-driven pod churn does not require a static replica list.
 
 ### Grafana Datasource
 

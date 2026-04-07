@@ -26,6 +26,8 @@ helm install loki-vl-proxy ./charts/loki-vl-proxy \
   --set extraArgs.label-style=underscores
 ```
 
+For multi-replica fleets with HPA, prefer `peerCache.enabled=true` over static peer lists. The chart creates a headless service and the proxy refreshes DNS-discovered peers automatically, so scaling events do not require manual replica or peer updates.
+
 ### Required Configuration
 
 | Flag | Required | Description |
