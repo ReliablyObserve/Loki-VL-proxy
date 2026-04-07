@@ -2263,7 +2263,6 @@ func (s *syntheticTailSeen) Add(key string) {
 	}
 	s.order = append([]string(nil), s.order[drop:]...)
 }
-
 func (p *Proxy) writeTailMessage(conn tailConn, messageType int, data []byte) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(tailWriteTimeout)); err != nil {
 		return err
