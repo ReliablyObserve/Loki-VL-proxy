@@ -39,11 +39,11 @@ func TestSetup_IngestEdgeCaseData(t *testing.T) {
 	for i := range 5 {
 		pushStream(t, now, streamDef{
 			Labels: map[string]string{
-				"app":      "edge-high-card",
-				"namespace": "edge-tests",
-				"level":    "info",
-				"trace_id": fmt.Sprintf("trace_%05d", i),
-				"user_id":  fmt.Sprintf("user_%03d", i),
+				"app":        "edge-high-card",
+				"namespace":  "edge-tests",
+				"level":      "info",
+				"trace_id":   fmt.Sprintf("trace_%05d", i),
+				"user_id":    fmt.Sprintf("user_%03d", i),
 				"request_id": fmt.Sprintf("req_%08d", i*1000+42),
 			},
 			Lines: []string{
@@ -56,11 +56,11 @@ func TestSetup_IngestEdgeCaseData(t *testing.T) {
 	pushStream(t, now, streamDef{
 		Labels: map[string]string{
 			"app":                "edge-otel-dots",
-			"namespace":         "edge-tests",
-			"k8s.cluster.name":  "us-east-1",
+			"namespace":          "edge-tests",
+			"k8s.cluster.name":   "us-east-1",
 			"k8s.namespace.name": "production",
-			"service.name":      "payment-api",
-			"level":             "info",
+			"service.name":       "payment-api",
+			"level":              "info",
 		},
 		Lines: []string{
 			`{"msg":"processing payment","amount":42.50,"currency":"USD"}`,
@@ -239,6 +239,27 @@ func TestEdge_DottedLabelNames(t *testing.T) {
 	score.report(t)
 }
 
+func TestEdge_OTelUnderscoreQueryTranslation(t *testing.T) {
+	score := &CompatScore{}
+
+	result := queryRange(t, proxyUnderscoreURL, `{service_name="payment-api"}`)
+	if len(result) > 0 {
+		score.pass("otel_underscore_query", "underscore query matches dotted OTel field through translation")
+	} else {
+		score.fail("otel_underscore_query", "underscore query did not match dotted OTel field")
+	}
+
+	valuesResp := getJSON(t, proxyUnderscoreURL+"/loki/api/v1/label/service_name/values")
+	values := extractStrings(valuesResp, "data")
+	if contains(values, "payment-api") {
+		score.pass("otel_underscore_query", "translated label values expose service_name")
+	} else {
+		score.fail("otel_underscore_query", fmt.Sprintf("service_name label values missing payment-api: %v", values))
+	}
+
+	score.report(t)
+}
+
 // =============================================================================
 // Edge Case: Multiline logs (stack traces)
 // =============================================================================
@@ -256,6 +277,26 @@ func TestEdge_MultilineLogs(t *testing.T) {
 		score.pass("multiline", "proxy can search multiline stack traces")
 	} else {
 		score.fail("multiline", "proxy cannot find multiline logs")
+	}
+
+	score.report(t)
+}
+
+func TestEdge_EmptyMessageBody(t *testing.T) {
+	score := &CompatScore{}
+	q := `{app="edge-empty-msg"}`
+
+	proxyResult := queryProxy(t, q)
+	if checkStatus(proxyResult) {
+		score.pass("empty_msg", "proxy returns success for empty-message logs")
+	} else {
+		score.fail("empty_msg", "proxy returned error for empty-message logs")
+	}
+
+	if countLogLines(proxyResult) > 0 {
+		score.pass("empty_msg", "proxy returns the empty-message log entry")
+	} else {
+		score.fail("empty_msg", "proxy dropped the empty-message log entry")
 	}
 
 	score.report(t)

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,18 @@ func TestPeerCache_StaticDiscovery(t *testing.T) {
 	defer pc.Close()
 	if pc.PeerCount() != 2 {
 		t.Errorf("expected 2 peers (excluding self), got %d", pc.PeerCount())
+	}
+}
+
+func TestPeerCache_SetAndGossipHaveKey_NoOp(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{SelfAddr: "10.0.0.1:3100"})
+	defer pc.Close()
+
+	pc.Set("key", []byte("value"))
+	pc.GossipHaveKey("key")
+
+	if stats := pc.Stats(); stats["peer_hits"].(int64) != 0 || stats["peer_misses"].(int64) != 0 || stats["peer_errors"].(int64) != 0 {
+		t.Fatalf("expected no-op methods to leave stats unchanged, got %+v", stats)
 	}
 }
 
@@ -235,6 +248,81 @@ func TestPeerCache_CircuitBreaker(t *testing.T) {
 	if pc.peerAllowed("dead:9999") {
 		t.Error("should be circuit-broken after failures")
 	}
+}
+
+func TestDiscoverDNS_UsesLookupHostAndSortsPeers(t *testing.T) {
+	oldLookupHost := lookupHost
+	lookupHost = func(name string) ([]string, error) {
+		if name != "proxy-headless.ns.svc.cluster.local" {
+			t.Fatalf("unexpected lookup name %q", name)
+		}
+		return []string{"10.0.0.3", "10.0.0.1", "10.0.0.2"}, nil
+	}
+	t.Cleanup(func() { lookupHost = oldLookupHost })
+
+	peers, err := discoverDNS("proxy-headless.ns.svc.cluster.local", 3100)
+	if err != nil {
+		t.Fatalf("discoverDNS: %v", err)
+	}
+
+	want := []string{"10.0.0.1:3100", "10.0.0.2:3100", "10.0.0.3:3100"}
+	if strings.Join(peers, ",") != strings.Join(want, ",") {
+		t.Fatalf("unexpected peers: got %v want %v", peers, want)
+	}
+}
+
+func TestDiscoverDNS_WrapsLookupErrors(t *testing.T) {
+	oldLookupHost := lookupHost
+	lookupHost = func(string) ([]string, error) {
+		return nil, errors.New("dns boom")
+	}
+	t.Cleanup(func() { lookupHost = oldLookupHost })
+
+	_, err := discoverDNS("proxy-headless.ns.svc.cluster.local", 3100)
+	if err == nil || !strings.Contains(err.Error(), `DNS lookup "proxy-headless.ns.svc.cluster.local": dns boom`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPeerCache_DiscoveryLoop_RefreshesPeers(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{SelfAddr: "10.0.0.1:3100"})
+	defer pc.Close()
+
+	updates := make(chan struct{}, 1)
+	pc.discoveryInt = 10 * time.Millisecond
+	pc.discoveryFn = func() ([]string, error) {
+		select {
+		case updates <- struct{}{}:
+		default:
+		}
+		return []string{"10.0.0.1:3100", "10.0.0.2:3100"}, nil
+	}
+
+	go pc.discoveryLoop()
+
+	select {
+	case <-updates:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("discovery loop did not trigger")
+	}
+
+	requireEventually(t, 200*time.Millisecond, func() bool {
+		peers := pc.Peers()
+		return len(peers) == 2 && peers[1] == "10.0.0.2:3100"
+	})
+}
+
+func requireEventually(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not satisfied before timeout")
 }
 
 func TestPeerCache_Singleflight(t *testing.T) {
