@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI
 
 - route release metadata sync through a dedicated PR branch with auto-merge instead of direct pushes to `main`, and keep GitHub release notes sourced from changelog section content only
+- require `100%` Loki compatibility on PR quality and dedicated Loki compatibility workflow checks
+- allow release metadata sync PRs to pass changelog gating when they materialize `Unreleased` into a versioned section
+- support `RELEASE_PR_TOKEN` in release workflows so metadata PRs trigger required pull_request checks under branch protection
 
 ## [0.27.4] - 2026-04-07
 
