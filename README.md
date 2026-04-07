@@ -21,36 +21,52 @@ HTTP proxy that exposes a **Loki-compatible API** on the frontend and translates
 
 ```mermaid
 flowchart TD
-    subgraph Clients
-        G["Grafana<br/>(Loki datasource)"]
+    subgraph L1["Clients"]
+        G["Grafana<br/>Explore / Drilldown / Dashboards"]
         M["MCP Servers<br/>LLM Agents"]
-        D["Dashboards<br/>Explore / Drilldown"]
+        C["CLI / API Consumers"]
     end
 
-    subgraph Fleet["Proxy Fleet"]
-        subgraph PA["Proxy A :3100"]
-            L1a["L1 Memory"]
-            L2a["L2 Disk"]
-        end
-        subgraph PB["Proxy B :3100"]
-            L1b["L1 Memory"]
-            L2b["L2 Disk"]
-        end
+    subgraph L2["Loki Compatibility Layer"]
+        API["Loki HTTP + WebSocket API<br/>query / labels / tail / rules"]
+        GUARD["Tenant mapping, auth passthrough,<br/>rate limits, concurrency guards"]
     end
 
-    HR["Hash Ring<br/>SHA256 · 150 vnodes"]
-    VL["VictoriaLogs :9428"]
+    subgraph L3["Proxy Execution Layer"]
+        TR["LogQL -> LogsQL<br/>translation"]
+        EVAL["Proxy-side evaluation<br/>joins, without(), subqueries,<br/>synthetic tail fallback"]
+        SHAPE["Metadata + response shaping<br/>streams, labels, drilldown, rules"]
+    end
 
-    G --> PA
-    M --> PB
-    D --> PA
-    PA <-->|"/_cache/get"| PB
-    PA --> VL
-    PB --> VL
+    subgraph L4["Cache Layer"]
+        MEM["L1 memory cache"]
+        DISK["L2 disk cache"]
+        PEER["L3 peer cache<br/>consistent hash ring"]
+    end
 
-    style Fleet fill:#1a1a2e,stroke:#e94560,color:#fff
-    style VL fill:#0f3460,stroke:#16213e,color:#fff
-    style HR fill:#e94560,stroke:#fff,color:#fff
+    subgraph L5["Backends + Outputs"]
+        VL["VictoriaLogs"]
+        RULES["vmalert / ruler reads"]
+        OBS["Prometheus metrics<br/>OTLP export<br/>JSON logs"]
+    end
+
+    G --> API
+    M --> API
+    C --> API
+    API --> GUARD --> TR --> EVAL --> SHAPE
+    SHAPE --> MEM
+    MEM -->|miss| DISK
+    DISK -->|miss| PEER
+    PEER -->|miss| VL
+    VL --> SHAPE
+    SHAPE --> RULES
+    GUARD --> OBS
+    EVAL --> OBS
+
+    style L2 fill:#1a1a2e,stroke:#e94560,color:#fff
+    style L3 fill:#16213e,stroke:#4cc9f0,color:#fff
+    style L4 fill:#0f3460,stroke:#90e0ef,color:#fff
+    style L5 fill:#1b4332,stroke:#52b788,color:#fff
 ```
 
 ## Request Flow
