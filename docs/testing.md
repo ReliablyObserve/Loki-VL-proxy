@@ -215,6 +215,8 @@ Pull requests also get a dedicated `pr-quality-report.yaml` workflow. It compare
 - Loki / Logs Drilldown / VictoriaLogs compatibility deltas
 - sampled benchmark and load-test deltas
 
+The report job now collects test count and coverage from the same Go test pass, uses a shallow checkout plus explicit base-SHA fetch, and uses 3-sample benchmark medians to keep the PR gate faster without dropping the tracked signals.
+
 That report is part of the required PR gate. It is still a smoke signal rather than a full benchmark lab run, but it now blocks obvious regressions in coverage, compatibility, and the tracked performance signals.
 
 See [compatibility-matrix.md](/tmp/Loki-VL-proxy/docs/compatibility-matrix.md), [compatibility-loki.md](/tmp/Loki-VL-proxy/docs/compatibility-loki.md), [compatibility-drilldown.md](/tmp/Loki-VL-proxy/docs/compatibility-drilldown.md), [compatibility-victorialogs.md](/tmp/Loki-VL-proxy/docs/compatibility-victorialogs.md), and [compatibility-matrix.json](/tmp/Loki-VL-proxy/test/e2e-compat/compatibility-matrix.json).

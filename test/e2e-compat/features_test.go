@@ -809,6 +809,7 @@ func TestFeature_Tail_NativeModeClosesWhenBackendTailUnavailable(t *testing.T) {
 	}
 	defer conn.Close()
 
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, _, err = conn.ReadMessage()
 	if err == nil {
 		t.Fatal("expected native-only tail to close when backend native tail is unavailable")

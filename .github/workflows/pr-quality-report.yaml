@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
       - uses: actions/setup-go@v5
         with:
@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           git worktree add /tmp/loki-vl-proxy-base "$BASE_SHA"
 
           bash "$WORKSPACE/scripts/ci/collect_quality_metrics.sh" /tmp/pr-head-quality.json
