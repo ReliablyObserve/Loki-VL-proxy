@@ -57,6 +57,95 @@ func benchmarkRequest(rawURL string) *http.Request {
 	}
 }
 
+func buildBenchmarkNDJSONLines(lines int) []byte {
+	body := make([]byte, 0, lines*220)
+	for i := range lines {
+		line := fmt.Sprintf(`{"_time":"2026-01-01T00:%02d:%02d.000Z","_msg":"{\"trace_id\":\"trace-%04d\",\"http.status_code\":%d,\"custom.team\":\"payments\",\"custom.region\":\"eu-west-1\"}","_stream":"{app=\"api\",env=\"prod\",service_name=\"checkout\"}","app":"api","env":"prod","service.name":"checkout","trace_id":"trace-%04d","custom.team":"payments","custom.region":"eu-west-1","level":"info"}`+"\n", (i/60)%60, i%60, i, 200+i%5, i)
+		body = append(body, line...)
+	}
+	return body
+}
+
+func buildFieldNamesResponse(names ...string) []byte {
+	type item struct {
+		Value string `json:"value"`
+		Hits  int    `json:"hits"`
+	}
+	resp := struct {
+		Values []item `json:"values"`
+	}{
+		Values: make([]item, 0, len(names)),
+	}
+	for i, name := range names {
+		resp.Values = append(resp.Values, item{Value: name, Hits: 100 - i})
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func buildFieldValuesResponse(field string, total int) []byte {
+	type item struct {
+		Value string `json:"value"`
+		Hits  int    `json:"hits"`
+	}
+	resp := struct {
+		Values []item `json:"values"`
+	}{
+		Values: make([]item, 0, total),
+	}
+	for i := range total {
+		resp.Values = append(resp.Values, item{
+			Value: fmt.Sprintf("%s-%03d", field, i),
+			Hits:  total - i,
+		})
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func newCompatBenchmarkProxy(b *testing.B, backend http.HandlerFunc, compatEnabled bool) (*http.ServeMux, *httptest.Server) {
+	b.Helper()
+
+	vlBackend := httptest.NewServer(backend)
+	b.Cleanup(vlBackend.Close)
+
+	cfg := Config{
+		BackendURL: vlBackend.URL,
+		Cache:      cache.New(60*time.Second, 10000),
+		LogLevel:   "error",
+		TenantMap: map[string]TenantMapping{
+			"team-a": {AccountID: "10", ProjectID: "0"},
+		},
+	}
+	if compatEnabled {
+		cfg.CompatCache = cache.New(60*time.Second, 1000)
+	}
+
+	p, err := New(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+	return mux, vlBackend
+}
+
+func warmRoute(mux *http.ServeMux, rawURL string, headers map[string]string) {
+	req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+}
+
 func BenchmarkProxy_QueryRange_CacheHit(b *testing.B) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"_time":"2024-01-15T10:30:00Z","_msg":"test","app":"nginx"}` + "\n"))
@@ -237,6 +326,211 @@ func BenchmarkProxy_Series_NoCompatCache(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		w := newBenchmarkResponseWriter()
 		r := benchmarkRequest(`/loki/api/v1/series?match[]=%7Bapp%3D%22api%22%7D&start=1&end=2`)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		for pb.Next() {
+			w.reset()
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_QueryRange_ColdMiss_DelayedBackend(b *testing.B) {
+	responseBody := buildBenchmarkNDJSONLines(300)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		_, _ = w.Write(responseBody)
+	}, false)
+
+	urls := make([]string, 128)
+	for i := range urls {
+		urls[i] = fmt.Sprintf(`/loki/api/v1/query_range?query={app="api"}&start=%d&end=%d&step=30s&limit=300`, i+1, i+301)
+	}
+	requests := make([]*http.Request, len(urls))
+	for i, rawURL := range urls {
+		requests[i] = benchmarkRequest(rawURL)
+		requests[i].Header.Set("X-Scope-OrgID", "team-a")
+	}
+	var idx atomic.Uint64
+
+	b.ResetTimer()
+	for b.Loop() {
+		w := newBenchmarkResponseWriter()
+		r := requests[int(idx.Add(1)-1)%len(requests)]
+		w.reset()
+		mux.ServeHTTP(w, r)
+	}
+}
+
+func BenchmarkProxy_QueryRange_PrimaryCacheHit_DelayedBackend(b *testing.B) {
+	responseBody := buildBenchmarkNDJSONLines(300)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		_, _ = w.Write(responseBody)
+	}, false)
+
+	rawURL := `/loki/api/v1/query_range?query={app="api"}&start=1&end=301&step=30s&limit=300`
+	warmRoute(mux, rawURL, map[string]string{"X-Scope-OrgID": "team-a"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		for pb.Next() {
+			w.reset()
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_QueryRange_CompatCacheHit_DelayedBackend(b *testing.B) {
+	responseBody := buildBenchmarkNDJSONLines(300)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		_, _ = w.Write(responseBody)
+	}, true)
+
+	rawURL := `/loki/api/v1/query_range?query={app="api"}&start=1&end=301&step=30s&limit=300`
+	warmRoute(mux, rawURL, map[string]string{"X-Scope-OrgID": "team-a"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		for pb.Next() {
+			w.reset()
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_DetectedFields_PrimaryCacheHit_DelayedBackend(b *testing.B) {
+	queryBody := buildBenchmarkNDJSONLines(240)
+	fieldNames := buildFieldNamesResponse(
+		"trace_id",
+		"service.name",
+		"custom.team",
+		"custom.region",
+		"http.status_code",
+	)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldNames)
+		case "/select/logsql/query":
+			_, _ = w.Write(queryBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}, false)
+
+	rawURL := `/loki/api/v1/detected_fields?query={app="api"}&start=1&end=301&line_limit=500`
+	warmRoute(mux, rawURL, map[string]string{"X-Scope-OrgID": "team-a"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		for pb.Next() {
+			w.reset()
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_DetectedFields_CompatCacheHit_DelayedBackend(b *testing.B) {
+	queryBody := buildBenchmarkNDJSONLines(240)
+	fieldNames := buildFieldNamesResponse(
+		"trace_id",
+		"service.name",
+		"custom.team",
+		"custom.region",
+		"http.status_code",
+	)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldNames)
+		case "/select/logsql/query":
+			_, _ = w.Write(queryBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}, true)
+
+	rawURL := `/loki/api/v1/detected_fields?query={app="api"}&start=1&end=301&line_limit=500`
+	warmRoute(mux, rawURL, map[string]string{"X-Scope-OrgID": "team-a"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		for pb.Next() {
+			w.reset()
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+func BenchmarkProxy_DetectedFieldValues_NoCompatCache_DelayedBackend(b *testing.B) {
+	fieldNames := buildFieldNamesResponse("trace_id", "service.name", "custom.team")
+	fieldValues := buildFieldValuesResponse("trace", 80)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldNames)
+		case "/select/logsql/field_values":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldValues)
+		default:
+			http.NotFound(w, r)
+		}
+	}, false)
+
+	rawURL := `/loki/api/v1/detected_field/trace_id/values?query={app="api"}&start=1&end=301&line_limit=500`
+	b.ResetTimer()
+	for b.Loop() {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
+		r.Header.Set("X-Scope-OrgID", "team-a")
+		w.reset()
+		mux.ServeHTTP(w, r)
+	}
+}
+
+func BenchmarkProxy_DetectedFieldValues_CompatCacheHit_DelayedBackend(b *testing.B) {
+	fieldNames := buildFieldNamesResponse("trace_id", "service.name", "custom.team")
+	fieldValues := buildFieldValuesResponse("trace", 80)
+	mux, _ := newCompatBenchmarkProxy(b, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond)
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldNames)
+		case "/select/logsql/field_values":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(fieldValues)
+		default:
+			http.NotFound(w, r)
+		}
+	}, true)
+
+	rawURL := `/loki/api/v1/detected_field/trace_id/values?query={app="api"}&start=1&end=301&line_limit=500`
+	warmRoute(mux, rawURL, map[string]string{"X-Scope-OrgID": "team-a"})
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		w := newBenchmarkResponseWriter()
+		r := benchmarkRequest(rawURL)
 		r.Header.Set("X-Scope-OrgID", "team-a")
 		for pb.Next() {
 			w.reset()

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,71 @@ func BenchmarkCache_SetWithTTL(b *testing.B) {
 	value := []byte(`{"data":"test"}`)
 	for b.Loop() {
 		c.SetWithTTL(fmt.Sprintf("key-%d", b.N), value, 30*time.Second)
+	}
+}
+
+func benchmarkDiskPayload() []byte {
+	return []byte(`{"status":"success","data":{"resultType":"streams","result":[{"stream":{"app":"api","env":"prod","service_name":"checkout"},"values":[["1735689600000000000","{\"trace_id\":\"trace-0001\",\"custom.team\":\"payments\",\"custom.region\":\"eu-west-1\",\"msg\":\"bench\"}"]]}]}}`)
+}
+
+func BenchmarkDiskCache_SetFlush_Compressed(b *testing.B) {
+	dc, err := NewDiskCache(DiskCacheConfig{
+		Path:        filepath.Join(b.TempDir(), "disk-cache.db"),
+		Compression: true,
+		FlushSize:   1,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = dc.Close() })
+
+	value := benchmarkDiskPayload()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dc.Set(fmt.Sprintf("disk-key-%d", i), value, 30*time.Second)
+	}
+}
+
+func BenchmarkDiskCache_Get_Hit_Compressed(b *testing.B) {
+	dc, err := NewDiskCache(DiskCacheConfig{
+		Path:        filepath.Join(b.TempDir(), "disk-cache.db"),
+		Compression: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = dc.Close() })
+
+	dc.Set("bench-key", benchmarkDiskPayload(), 30*time.Second)
+	dc.Flush()
+
+	b.ResetTimer()
+	for b.Loop() {
+		if _, ok := dc.Get("bench-key"); !ok {
+			b.Fatal("expected disk-cache hit")
+		}
+	}
+}
+
+func BenchmarkDiskCache_Get_Hit_Uncompressed(b *testing.B) {
+	dc, err := NewDiskCache(DiskCacheConfig{
+		Path:        filepath.Join(b.TempDir(), "disk-cache.db"),
+		Compression: false,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = dc.Close() })
+
+	dc.Set("bench-key", benchmarkDiskPayload(), 30*time.Second)
+	dc.Flush()
+
+	b.ResetTimer()
+	for b.Loop() {
+		if _, ok := dc.Get("bench-key"); !ok {
+			b.Fatal("expected disk-cache hit")
+		}
 	}
 }
 
