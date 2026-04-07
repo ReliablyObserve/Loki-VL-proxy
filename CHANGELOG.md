@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - make the PR labeler fail-soft when optional repository labels are missing
 - split Grafana UI smoke coverage into stable shards, add PR-time current-family and previous-family Grafana smoke plus scheduled/manual runtime profiles, and move browser-independent Grafana checks into cheaper non-browser gates
 - prebuild and cache proxy images in Docker-backed CI jobs, run compose stacks with `--no-build`, and keep grouped compatibility gates with a legacy `e2e-compat` aggregate shim for required-check compatibility
+- fix release workflow parsing by using env-based Docker Hub secret gating in `auto-release` and `release` workflows
 
 ### Tests
 
