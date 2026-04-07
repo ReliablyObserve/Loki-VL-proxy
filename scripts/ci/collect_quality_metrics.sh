@@ -69,12 +69,13 @@ capture_async() {
   local fallback="$2"
   local timeout_seconds="$3"
   local output_file="$4"
-  shift 4
+  local pid_var="$5"
+  shift 5
 
   (
     capture_or_default "$name" "$fallback" "$timeout_seconds" "$@"
   ) >"$output_file" &
-  echo $!
+  printf -v "$pid_var" '%s' "$!"
 }
 
 collect_tests_and_coverage() {
@@ -214,10 +215,10 @@ compat_file="$TMP_DIR/compat.json"
 benchmarks_file="$TMP_DIR/benchmarks.json"
 load_file="$TMP_DIR/load.json"
 
-tests_pid="$(capture_async tests_and_coverage '{"count":0,"coverage_pct":0}' 900 "$tests_file" collect_tests_and_coverage)"
-compat_pid="$(capture_async compat '{"loki":{"passed":0,"total":0,"pct":0},"drilldown":{"passed":0,"total":0,"pct":0},"vl":{"passed":0,"total":0,"pct":0}}' 1800 "$compat_file" collect_compat)"
-benchmarks_pid="$(capture_async benchmarks '{"query_range_cache_hit_ns_per_op":0,"query_range_cache_hit_bytes_per_op":0,"query_range_cache_hit_allocs_per_op":0,"query_range_cache_bypass_ns_per_op":0,"query_range_cache_bypass_bytes_per_op":0,"query_range_cache_bypass_allocs_per_op":0,"labels_cache_hit_ns_per_op":0,"labels_cache_hit_bytes_per_op":0,"labels_cache_hit_allocs_per_op":0,"labels_cache_bypass_ns_per_op":0,"labels_cache_bypass_bytes_per_op":0,"labels_cache_bypass_allocs_per_op":0}' 900 "$benchmarks_file" collect_benchmarks)"
-load_pid="$(capture_async load '{"high_concurrency_req_per_s":0,"high_concurrency_memory_growth_mb":0}' 600 "$load_file" collect_load)"
+capture_async tests_and_coverage '{"count":0,"coverage_pct":0}' 900 "$tests_file" tests_pid collect_tests_and_coverage
+capture_async compat '{"loki":{"passed":0,"total":0,"pct":0},"drilldown":{"passed":0,"total":0,"pct":0},"vl":{"passed":0,"total":0,"pct":0}}' 1800 "$compat_file" compat_pid collect_compat
+capture_async benchmarks '{"query_range_cache_hit_ns_per_op":0,"query_range_cache_hit_bytes_per_op":0,"query_range_cache_hit_allocs_per_op":0,"query_range_cache_bypass_ns_per_op":0,"query_range_cache_bypass_bytes_per_op":0,"query_range_cache_bypass_allocs_per_op":0,"labels_cache_hit_ns_per_op":0,"labels_cache_hit_bytes_per_op":0,"labels_cache_hit_allocs_per_op":0,"labels_cache_bypass_ns_per_op":0,"labels_cache_bypass_bytes_per_op":0,"labels_cache_bypass_allocs_per_op":0}' 900 "$benchmarks_file" benchmarks_pid collect_benchmarks
+capture_async load '{"high_concurrency_req_per_s":0,"high_concurrency_memory_growth_mb":0}' 600 "$load_file" load_pid collect_load
 
 for pid in "$tests_pid" "$compat_pid" "$benchmarks_pid" "$load_pid"; do
   wait "$pid"
