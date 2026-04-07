@@ -16,6 +16,8 @@ import (
 // ansiEscapeRe matches ANSI escape sequences (color codes, cursor movement, etc.)
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
+const maxPatternResponseLimit = 1000
+
 type patternBucket struct {
 	pattern string
 	level   string
@@ -229,6 +231,9 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 	// Sort by count descending
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > maxPatternResponseLimit {
+		limit = maxPatternResponseLimit
 	}
 	entries := make([]*patternBucket, 0, min(limit, len(patterns)))
 	if len(patterns) <= limit {

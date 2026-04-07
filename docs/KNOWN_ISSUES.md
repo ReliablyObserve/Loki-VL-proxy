@@ -26,8 +26,7 @@ The proxy now supports datasource-facing headers, cookie forwarding, backend tim
 
 `/loki/api/v1/tail` is now covered by handler tests plus compose-backed native and synthetic streaming e2e, but a few real-world gaps remain:
 
-- reverse-proxy and ingress websocket idle-timeout behavior still needs dedicated e2e
-- browser-path Grafana Explore live-tail coverage should be run in CI consistently, not just locally or in ad hoc compose runs
+- browser-path Grafana Explore live-tail recovery is covered, but broader CI coverage for more native-tail failure permutations is still worth expanding
 - backend-native close/error propagation still needs broader coverage for `401`, `403`, and upstream `5xx`
 - `/tail` remains intentionally single-tenant; Loki-style `tenant-a|tenant-b` fanout and `__tenant_id__` filtering are not supported there
 
@@ -35,7 +34,6 @@ The proxy now supports datasource-facing headers, cookie forwarding, backend tim
 
 Read/query fanout now supports Loki-style `X-Scope-OrgID: tenant-a|tenant-b` plus `__tenant_id__` selector narrowing, but some edges still need tightening:
 
-- more live e2e for `/labels`, `/label/{name}/values`, `/series`, `detected_fields`, and `detected_labels` under fanout
 - Drilldown and Explore browser coverage for multi-tenant datasources still trails the API/resource coverage
 - merged field/label cardinality across tenants is still approximate in a few Drilldown-oriented surfaces
 - `*` remains a proxy-specific default/global bypass mode, not a Loki-compatible all-tenants shorthand
@@ -58,6 +56,14 @@ When `-label-style=underscores` and `-metadata-field-mode=hybrid` are used toget
 - both dotted OTel names and translated aliases on field-oriented APIs
 
 This is the expected compatibility model for Drilldown and Explore. It is not a bug if `service_name` appears in label pickers while `service.name` appears in fields/details.
+
+### Native-First Drilldown Discovery
+
+The proxy now prefers VictoriaLogs-native metadata lookups for field names, field values, and streams where that is safe and accurate enough, then falls back to bounded raw-log sampling for parsed and derived fields.
+
+Remaining caveat:
+
+- parsed-only fields can still require fallback sampling, so very new or highly dynamic fields may appear with slightly different freshness than indexed/native metadata
 
 ### Large Body Fields
 

@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - add ingress-backed and native-only `/tail` compatibility coverage for Grafana Explore and compose e2e
 - extend multi-tenant Explore and Logs Drilldown coverage for `__tenant_id__`, label breakdowns, and service drilldowns
+- prefer native VictoriaLogs field names, field values, and streams metadata for Drilldown discovery, with bounded fallback scanning for parsed and derived fields
+
+### Performance
+
+- harden proxy cache and fanout hot paths with tighter response capture, typed multi-tenant merges, translation caching, capped pattern extraction, and safer synthetic-tail state bounds
+- enforce bounded allocation on pattern responses and keep expensive metadata paths warm without stretching live query and tail freshness
 
 ### CI
 
@@ -21,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - add `/tail` ingress, idle-window, and native-failure regressions against the live compose stack
 - add browser-level Explore live-tail and multi-tenant Logs Drilldown regressions
 - raise `cmd/proxy` startup/server-loop coverage with more direct unit tests
+
+### Documentation
+
+- document native-first Drilldown discovery, multi-tenant safety caps, metadata-vs-live cache freshness, and tail mode behavior across README and operator docs
 
 ## [0.27.0] - 2026-04-06
 
