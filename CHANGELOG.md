@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- add safe Tier0 compatibility-cache controls and route-level guardrails for cacheable Loki read endpoints
+
+### Performance
+
+- expand cache benchmark coverage for query and Drilldown metadata paths, including delayed-backend hit-path comparisons and fleet peer-cache warm-hit behavior
+
+### Tests
+
+- extend proxy, middleware, cache, metrics, and e2e fleet/ui coverage to harden cache behavior, race-prone paths, and runtime regressions
+
+### Documentation
+
+- refresh README, architecture, and performance guidance with clearer operator-facing cache topology, Tier0 mapping, and value-focused messaging
+
 ## [0.27.6] - 2026-04-07
 
 ### CI
