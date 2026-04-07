@@ -15,6 +15,12 @@ The proxy is stateless (except optional disk cache). Scale horizontally without 
 ### Helm Deployment
 
 ```bash
+helm install loki-vl-proxy oci://ghcr.io/szibis/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set extraArgs.label-style=underscores
+
+# Local chart (development)
 helm install loki-vl-proxy ./charts/loki-vl-proxy \
   --set extraArgs.backend=http://victorialogs:9428 \
   --set extraArgs.label-style=underscores
