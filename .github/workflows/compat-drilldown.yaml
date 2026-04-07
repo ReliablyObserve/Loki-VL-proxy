@@ -22,7 +22,7 @@ jobs:
         run: |
           echo "drilldown_versions=$(jq -c '.stack.logs_drilldown_contract.matrix_versions' test/e2e-compat/compatibility-matrix.json)" >> "$GITHUB_OUTPUT"
           echo "grafana_runtime_profiles=$(jq -c '.stack.grafana.runtime_profiles' test/e2e-compat/compatibility-matrix.json)" >> "$GITHUB_OUTPUT"
-          echo "grafana_pr_runtime_profiles=$(jq -c '.stack.grafana.runtime_profiles | map(select(.profile == \"smoke\"))' test/e2e-compat/compatibility-matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "grafana_pr_runtime_profiles=$(jq -c '.stack.grafana.runtime_profiles | map(select((.run_on_pr // false) == true))' test/e2e-compat/compatibility-matrix.json)" >> "$GITHUB_OUTPUT"
 
   drilldown-pinned-runtime:
     if: github.event_name != 'schedule'
@@ -68,14 +68,14 @@ jobs:
         with:
           go-version: "1.26.1"
           cache: true
-      - name: Start previous-family Grafana smoke stack (${{ matrix.version }})
+      - name: Start Grafana PR smoke stack (${{ matrix.profile }} / ${{ matrix.version }})
         working-directory: test/e2e-compat
         run: |
           docker compose up -d --build
           sleep 30
-      - name: Run previous-family Grafana smoke profile
+      - name: Run Grafana PR smoke profile
         run: go test -v -tags=e2e -run '${{ matrix.test_regex }}' ./test/e2e-compat/
-      - name: Tear down previous-family smoke stack
+      - name: Tear down Grafana PR smoke stack
         if: always()
         working-directory: test/e2e-compat
         run: docker compose down -v

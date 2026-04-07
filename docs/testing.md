@@ -150,7 +150,7 @@ Moved out of Playwright:
 | `service drilldown field filter survives reload from URL state` | Drilldown URL state persists across reloads |
 
 Moved out of Playwright:
-`test/e2e-compat/drilldown_compat_test.go` now owns detected-fields contracts, dotted metadata exposure, filtered labels/fields resource behavior, parsed-field freshness, Grafana datasource resource parity, and multi-tenant Drilldown resource behavior.
+`test/e2e-compat/drilldown_compat_test.go` now owns detected-fields contracts, dotted metadata exposure, filtered labels/fields resource behavior, parsed-field freshness, unknown field/label empty-success behavior, Grafana datasource resource parity, and multi-tenant Drilldown resource behavior including regex and no-match tenant filters.
 
 ### `drilldown-multitenant` shard
 
@@ -184,14 +184,15 @@ Field-surface defaults in the pinned stack:
 Support window policy:
 
 - Loki: current minor family plus one minor behind
-- Grafana runtime: pinned current family gets the fuller Drilldown runtime contract, previous family gets a PR-time smoke plus scheduled/manual matrix coverage
+- Grafana runtime: pinned current family gets the fuller Drilldown runtime contract, and pull requests also run smaller current-family and previous-family smoke profiles; the full runtime matrix stays on scheduled/manual coverage
 - Logs Drilldown: current family plus one family behind
 - VictoriaLogs: `v1.3x.x` and `v1.4x.x`
 
 Grafana runtime profiles from the manifest:
 
 - `12.4.2` runs the full Drilldown runtime score on scheduled and manual compatibility checks
-- `11.6.6` runs a smaller datasource-plus-Drilldown smoke profile on pull requests, pushes, and the scheduled/manual matrix
+- `12.4.1` runs a smaller current-family datasource-plus-Drilldown smoke profile on pull requests, and it must include the runtime-family contract checks
+- `11.6.6` runs a smaller previous-family datasource-plus-Drilldown smoke profile on pull requests, and it must include the runtime-family contract checks
 
 Logs Drilldown family assertions are explicit in the contract matrix:
 
@@ -207,7 +208,7 @@ GRAFANA_IMAGE=grafana/grafana:12.4.2 \
 docker compose -f test/e2e-compat/docker-compose.yml up -d --build
 ```
 
-GitHub Actions uses the same manifest as the source of truth. The compatibility workflows load their version matrices from [compatibility-matrix.json](/tmp/Loki-VL-proxy/test/e2e-compat/compatibility-matrix.json) instead of duplicating version lists in workflow YAML.
+GitHub Actions uses the same manifest as the source of truth. The compatibility workflows load their version matrices from `test/e2e-compat/compatibility-matrix.json` instead of duplicating version lists in workflow YAML.
 
 Pull requests also get a dedicated `pr-quality-report.yaml` workflow. It compares the PR branch against the base branch and posts a sticky PR comment with:
 

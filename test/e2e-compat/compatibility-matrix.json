@@ -64,8 +64,8 @@
       "pinned_version": "12.4.2",
       "role": "runtime hosting the Loki datasource and bundled Drilldown app",
       "support_window": {
-        "policy": "latest_full_plus_previous_smoke",
-        "description": "Run the fuller Drilldown compatibility track on the pinned current Grafana family, and keep a smaller datasource-plus-Drilldown smoke profile on the previous supported family so browser/runtime regressions are caught without exploding schedule cost.",
+        "policy": "latest_full_plus_current_and_previous_smoke",
+        "description": "Run the fuller Drilldown compatibility track on the pinned current Grafana family, and keep smaller current-family and previous-family datasource-plus-Drilldown smoke profiles on pull requests so browser/runtime regressions are caught across real Grafana builds without exploding cost.",
         "current_family": "12.x",
         "previous_family": "11.x"
       },
@@ -73,12 +73,19 @@
         {
           "version": "12.4.2",
           "profile": "full",
-          "test_regex": "^TestDrilldownTrackScore$"
+          "test_regex": "^(TestDrilldownTrackScore|TestDrilldown_RuntimeFamilyContracts)$"
+        },
+        {
+          "version": "12.4.1",
+          "profile": "current_smoke",
+          "run_on_pr": true,
+          "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts|TestDrilldown_RuntimeFamilyContracts)$"
         },
         {
           "version": "11.6.6",
-          "profile": "smoke",
-          "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts)$"
+          "profile": "previous_smoke",
+          "run_on_pr": true,
+          "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts|TestDrilldown_RuntimeFamilyContracts)$"
         }
       ]
     },

@@ -53,6 +53,7 @@ func TestPinnedCompatibilityMatrixMatchesCompose(t *testing.T) {
 				RuntimeProfiles []struct {
 					Version   string `json:"version"`
 					Profile   string `json:"profile"`
+					RunOnPR   bool   `json:"run_on_pr"`
 					TestRegex string `json:"test_regex"`
 				} `json:"runtime_profiles"`
 			} `json:"grafana"`
@@ -185,7 +186,8 @@ func TestPinnedCompatibilityMatrixMatchesCompose(t *testing.T) {
 		t.Fatalf("grafana runtime profiles must not be empty")
 	}
 	fullProfileSeen := false
-	smokeProfileSeen := false
+	currentSmokeSeen := false
+	previousSmokeSeen := false
 	for _, profile := range matrix.Stack.Grafana.RuntimeProfiles {
 		if profile.Version == "" || profile.Profile == "" || profile.TestRegex == "" {
 			t.Fatalf("grafana runtime profile must define version, profile, and test_regex: %+v", profile)
@@ -196,17 +198,40 @@ func TestPinnedCompatibilityMatrixMatchesCompose(t *testing.T) {
 			if profile.Version != matrix.Stack.Grafana.PinnedVersion {
 				t.Fatalf("grafana full profile must run on pinned version %q, got %q", matrix.Stack.Grafana.PinnedVersion, profile.Version)
 			}
-		case "smoke":
-			smokeProfileSeen = true
+			if profile.RunOnPR {
+				t.Fatalf("grafana full profile should stay out of PR smoke selection: %+v", profile)
+			}
+		case "current_smoke":
+			currentSmokeSeen = true
+			if !profile.RunOnPR {
+				t.Fatalf("grafana current-family smoke must run on PRs: %+v", profile)
+			}
+			if !strings.HasPrefix(profile.Version, familyPrefix(matrix.Stack.Grafana.SupportWindow.CurrentFamily)) {
+				t.Fatalf("grafana current-family smoke %q must stay within current family %q", profile.Version, matrix.Stack.Grafana.SupportWindow.CurrentFamily)
+			}
+			if profile.Version == matrix.Stack.Grafana.PinnedVersion {
+				t.Fatalf("grafana current-family smoke must cover a distinct runtime from pinned full profile: %+v", profile)
+			}
+			if !strings.Contains(profile.TestRegex, "TestDrilldown_RuntimeFamilyContracts") {
+				t.Fatalf("grafana current-family smoke must exercise runtime-family assertions: %+v", profile)
+			}
+		case "previous_smoke":
+			previousSmokeSeen = true
+			if !profile.RunOnPR {
+				t.Fatalf("grafana previous-family smoke must run on PRs: %+v", profile)
+			}
 			if !strings.HasPrefix(profile.Version, familyPrefix(matrix.Stack.Grafana.SupportWindow.PreviousFamily)) {
-				t.Fatalf("grafana smoke profile %q must stay within previous family %q", profile.Version, matrix.Stack.Grafana.SupportWindow.PreviousFamily)
+				t.Fatalf("grafana previous-family smoke %q must stay within previous family %q", profile.Version, matrix.Stack.Grafana.SupportWindow.PreviousFamily)
+			}
+			if !strings.Contains(profile.TestRegex, "TestDrilldown_RuntimeFamilyContracts") {
+				t.Fatalf("grafana previous-family smoke must exercise runtime-family assertions: %+v", profile)
 			}
 		default:
 			t.Fatalf("unsupported grafana runtime profile %q", profile.Profile)
 		}
 	}
-	if !fullProfileSeen || !smokeProfileSeen {
-		t.Fatalf("grafana runtime profiles must include both full and smoke coverage: %+v", matrix.Stack.Grafana.RuntimeProfiles)
+	if !fullProfileSeen || !currentSmokeSeen || !previousSmokeSeen {
+		t.Fatalf("grafana runtime profiles must include full, current-family smoke, and previous-family smoke coverage: %+v", matrix.Stack.Grafana.RuntimeProfiles)
 	}
 	for name, track := range matrix.Tracks {
 		if track.Workflow == "" || track.ScoreTest == "" {
