@@ -239,6 +239,7 @@ The quality gate compares base/head with relative and absolute regression thresh
 The high-concurrency load threshold remains strict locally (`>10k req/s`) and uses a CI floor (`>5k req/s`) on shared race-enabled runners to avoid flaky non-regression failures.
 Loki compatibility is additionally enforced as a hard floor at `100%` on PR quality and on the dedicated Loki compatibility workflow.
 Release automation also materializes `CHANGELOG.md` `Unreleased` into the new version section and uses that same section as the GitHub release notes body, then syncs README tests/coverage/Go LOC badges on `main`.
+For reliable metadata PR auto-merge under branch protection, set repository secret `RELEASE_PR_TOKEN` (PAT/App token with repo scope) so release-created metadata PRs trigger required `pull_request` checks.
 
 Required-check note:
 
