@@ -28,20 +28,20 @@ flowchart TD
     end
 
     subgraph L2["Loki Compatibility Layer"]
-        API["Loki HTTP + WebSocket API<br/>query / labels / tail / rules"]
-        GUARD["Tenant mapping, auth passthrough,<br/>rate limits, concurrency guards"]
+        API["Loki HTTP + WebSocket API<br/>query / labels / detected_* / tail / rules / alerts"]
+        GUARD["Security headers + tenant validation<br/>auth checks + rate limits + request logging"]
     end
 
-    subgraph L3["Proxy Execution Layer"]
-        TR["LogQL -> LogsQL<br/>translation"]
-        EVAL["Proxy-side evaluation<br/>joins, without(), subqueries,<br/>synthetic tail fallback"]
-        SHAPE["Metadata + response shaping<br/>streams, labels, drilldown, rules"]
+    subgraph L3["Route Execution Paths"]
+        Q["Query + metadata path<br/>fanout / cache / translation / shaping"]
+        T["/tail path<br/>origin checks + native/synthetic streaming"]
+        R["Rules + alerts read path<br/>Loki / Prom-compatible views"]
     end
 
     subgraph L4["Cache Layer"]
         MEM["L1 memory cache"]
-        DISK["L2 disk cache"]
-        PEER["L3 peer cache<br/>consistent hash ring"]
+        DISK["optional L2 disk cache"]
+        PEER["optional L3 peer cache<br/>consistent hash ring"]
     end
 
     subgraph L5["Backends + Outputs"]
@@ -53,15 +53,20 @@ flowchart TD
     G --> API
     M --> API
     C --> API
-    API --> GUARD --> TR --> EVAL --> SHAPE
-    SHAPE --> MEM
+    API --> GUARD
+    GUARD --> Q
+    GUARD --> T
+    GUARD --> R
+    Q --> MEM
     MEM -->|miss| DISK
     DISK -->|miss| PEER
     PEER -->|miss| VL
-    VL --> SHAPE
-    SHAPE --> RULES
+    VL --> Q
+    T --> VL
+    R --> RULES
     GUARD --> OBS
-    EVAL --> OBS
+    Q --> OBS
+    T --> OBS
 
     style L2 fill:#1a1a2e,stroke:#e94560,color:#fff
     style L3 fill:#16213e,stroke:#4cc9f0,color:#fff

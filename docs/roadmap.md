@@ -57,6 +57,7 @@
 - [x] Performance: 39K req/s (buffer pools, sync.Pool, GOGC=200, connection pool)
 - [x] Complete Helm chart: 11 templates, GOMEMLIMIT auto-calc, HTTPRoute
 - [x] 542 tests, CI bench job, regression gates
+- [x] Repository coverage raised above 90% with additional runtime, middleware, cache, and proxy-path tests
 
 ## Planned
 
@@ -69,6 +70,6 @@
 - [x] System metrics in /metrics (CPU, memory, IO, network via /proc) (v0.19.0)
 - [x] Native VL stream selector optimization for known `_stream_fields` (v0.23.0)
 - [x] PR quality report workflow with coverage, compatibility, and performance delta comments (v0.26.0)
-- [ ] Raise total repository coverage toward 95%+ by extracting `main()` and remaining low-level system readers into smaller testable units
+- [ ] Tighten remaining merged-tenant Drilldown metadata accuracy for field and label cardinality surfaces
 - [ ] Convert more upstream Loki, Logs Drilldown, and VictoriaLogs edge cases into regression tests
-- [ ] Push `cmd/proxy` coverage further by extracting more startup/config/runtime wiring out of `main()`
+- [ ] Expand browser-level multi-tenant Explore and Drilldown scenarios where API parity already exists but UI combinations still need live regression coverage

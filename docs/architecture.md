@@ -2,63 +2,82 @@
 
 ## Overview
 
-Loki-VL-proxy is an HTTP proxy that sits between Grafana (or any Loki API client) and VictoriaLogs. It translates Loki's LogQL API into VictoriaLogs' LogsQL API, allowing Grafana's native Loki datasource to query VictoriaLogs without a custom plugin.
+Loki-VL-proxy is a read-only Loki compatibility proxy that sits between Grafana (or any Loki API client) and VictoriaLogs. It exposes Loki-compatible HTTP and WebSocket routes on the frontend, translates LogQL into LogsQL where needed, shapes VictoriaLogs responses back into Loki-compatible structures, and optionally exposes rules and alerts reads from a separate backend such as `vmalert`.
 
-## Request Flow
+## Runtime Paths
 
 ```mermaid
 flowchart TD
-    subgraph Clients
-        G["Grafana<br/>(Loki datasource)"]
-        M["MCP Servers<br/>LLM Agents"]
-        D["Dashboards<br/>Explore / Drilldown"]
+    subgraph Clients["Clients"]
+        G["Grafana<br/>Explore / Drilldown / Dashboards"]
+        M["MCP / Agents"]
+        C["CLI / API Consumers"]
     end
 
-    subgraph Proxy["Loki-VL-proxy :3100"]
-        RL["Rate Limiter<br/>per-client token bucket<br/>+ global concurrency"]
-        CO["Request Coalescer<br/>singleflight: N queries → 1"]
-        NM["Query Normalizer<br/>sort matchers, collapse ws"]
-        TR["LogQL → LogsQL<br/>Translator"]
-        CA["TTL Cache (L1)<br/>per-endpoint TTLs<br/>max 256MB"]
-        RC["Response Converter<br/>VL NDJSON → Loki streams<br/>VL stats → Prom matrix"]
-        CB["Circuit Breaker<br/>closed→open→half-open"]
-        OB["/metrics + JSON logs"]
+    subgraph Front["Loki-VL-proxy :3100"]
+        API["Loki HTTP + WebSocket surface<br/>query / labels / detected_* / tail / rules / alerts"]
+        GUARD["Security headers + tenant validation<br/>auth checks + rate limits + request logging"]
+        ROUTE["Route-specific execution"]
     end
 
-    VL["VictoriaLogs<br/>:9428"]
+    subgraph Query["Query + Metadata Path"]
+        FAN["Optional multi-tenant fanout<br/>and __tenant_id__ narrowing"]
+        CACHE["L1 memory -> optional L2 disk -> optional L3 peer cache"]
+        CO["Coalescing + query normalization"]
+        TR["LogQL -> LogsQL translation"]
+        SHAPE["Response shaping<br/>streams / labels / stats / drilldown"]
+    end
 
-    G --> RL
-    M --> RL
-    D --> RL
-    RL --> CO
-    CO --> NM
-    NM --> CA
-    CA -->|miss| TR
-    TR --> CB
-    CB --> VL
-    VL --> RC
-    RC --> CA
-    CA -->|hit| G
+    subgraph Tail["/tail WebSocket Path"]
+        ORIGIN["Origin allowlist + websocket upgrade"]
+        MODE["tail.mode = auto | native | synthetic"]
+        NATIVE["Native VL tail stream"]
+        SYN["Synthetic polling fallback"]
+    end
 
-    style Proxy fill:#1a1a2e,stroke:#e94560,color:#fff
-    style VL fill:#0f3460,stroke:#16213e,color:#fff
-    style RL fill:#533483,stroke:#e94560,color:#fff
-    style CO fill:#533483,stroke:#e94560,color:#fff
-    style CA fill:#0f3460,stroke:#16213e,color:#fff
-    style TR fill:#e94560,stroke:#fff,color:#fff
-    style CB fill:#533483,stroke:#e94560,color:#fff
+    subgraph Reads["Rules + Alerts Read Path"]
+        ALERT["Read-compatible Loki / Prometheus rules and alerts views"]
+    end
+
+    subgraph Backends["Backends + Outputs"]
+        VL["VictoriaLogs"]
+        VMR["vmalert / ruler read backend"]
+        OBS["Prometheus metrics + OTLP + JSON logs"]
+    end
+
+    G --> API
+    M --> API
+    C --> API
+    API --> GUARD --> ROUTE
+    ROUTE --> FAN --> CACHE
+    CACHE -->|miss| CO --> TR --> VL
+    VL --> SHAPE --> CACHE
+    ROUTE --> ORIGIN --> MODE
+    MODE --> NATIVE --> VL
+    MODE --> SYN --> VL
+    ROUTE --> ALERT --> VMR
+    GUARD --> OBS
+    SHAPE --> OBS
+
+    style Front fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Query fill:#16213e,stroke:#4cc9f0,color:#fff
+    style Tail fill:#0f3460,stroke:#90e0ef,color:#fff
+    style Reads fill:#1b4332,stroke:#52b788,color:#fff
+    style Backends fill:#3b1c32,stroke:#ff7f50,color:#fff
 ```
 
 ## Protection Layers
 
 | Layer | Purpose | Default Config |
 |---|---|---|
+| Tenant validation | Enforce Loki-style tenant header policy and mapping rules before backend access | Enabled on tenant-scoped routes |
 | Per-client rate limiter | Prevent individual client abuse | 50 req/s, burst 100 |
 | Global concurrent limit | Cap total backend load | 100 concurrent queries |
 | Request coalescing | Deduplicate identical queries | Automatic (singleflight) |
 | Query normalization | Improve cache hit rate | Sort matchers, collapse whitespace |
-| In-memory TTL cache | Reduce backend calls | Per-endpoint TTLs, 256MB max |
+| Tiered cache | Reduce backend calls with local, disk, and peer reuse | L1 memory, optional L2 disk, optional L3 peer cache |
 | Circuit breaker | Protect VL from cascading failure | Opens after 5 failures, 10s backoff |
+| Tail origin allowlist | Reject browser websocket origins unless explicitly trusted | Deny browser origins by default |
 
 ### How Coalescing Works
 
@@ -79,6 +98,54 @@ flowchart LR
 ```
 
 Only **1** request reaches VictoriaLogs. All clients get the same response. Coalescing keys include the tenant header to prevent cross-tenant data leaks.
+
+## Query And Metadata Flow
+
+```mermaid
+flowchart TD
+    REQ["Loki read request"] --> WRAP["securityHeaders -> tenantMiddleware<br/>-> limiter -> requestLogger"]
+    WRAP --> FAN{"Multi-tenant<br/>query path?"}
+    FAN -->|yes| MT["Fan out per tenant<br/>apply __tenant_id__ narrowing<br/>merge Loki-shaped responses"]
+    FAN -->|no| ONE["Single-tenant request"]
+    MT --> CACHE
+    ONE --> CACHE["L1 memory -> optional L2 disk<br/>-> optional L3 peer cache"]
+    CACHE -->|hit| RESP["Return cached Loki-shaped response"]
+    CACHE -->|miss| CO["Coalesce identical backend reads"]
+    CO --> TR["Translate LogQL / selectors / metadata queries"]
+    TR --> VL["VictoriaLogs"]
+    VL --> SHAPE["Shape response<br/>streams / labels / stats / drilldown"]
+    SHAPE --> STORE["Store cacheable result"]
+    STORE --> RESP
+```
+
+## Tail Flow
+
+```mermaid
+flowchart TD
+    WS["GET /loki/api/v1/tail"] --> WRAP["tenant validation + rate limit<br/>+ websocket upgrade checks"]
+    WRAP --> ORIGIN{"Browser Origin allowed?"}
+    ORIGIN -->|no| DENY["403"]
+    ORIGIN -->|yes| MODE{"tail.mode"}
+    MODE -->|native| NATIVE["Open native VL tail stream"]
+    MODE -->|synthetic| SYN["Poll VL query API<br/>emit Loki tail frames"]
+    MODE -->|auto| PREFLIGHT["Try native tail<br/>fallback on backend unavailable"]
+    PREFLIGHT --> NATIVE
+    PREFLIGHT --> SYN
+    NATIVE --> FRAME["Write Loki websocket frames<br/>ping / close handling"]
+    SYN --> FRAME
+```
+
+## Rules And Alerts Read Flow
+
+```mermaid
+flowchart LR
+    REQ["/loki/api/v1/rules<br/>/api/prom/rules<br/>/loki/api/v1/alerts"] --> WRAP["tenant validation + logging"]
+    WRAP --> BACKEND{"Configured read backend?"}
+    BACKEND -->|no| EMPTY["Return empty Loki / Prom-compatible stub"]
+    BACKEND -->|yes| PROXY["Forward read request with mapped tenant headers"]
+    PROXY --> VMR["vmalert / ruler-compatible backend"]
+    VMR --> SHAPE["Return legacy Loki YAML or Prometheus JSON view"]
+```
 
 ## Data Model Mapping
 
@@ -119,7 +186,7 @@ flowchart LR
         LOKI["Loki :3101<br/>(ground truth)"]
         VLP["Loki-VL-proxy<br/>:3100"]
         VL["VictoriaLogs<br/>:9428"]
-        GF["Grafana :3000<br/>3 datasources"]
+        GF["Grafana :3000<br/>Loki / Drilldown / tail datasources"]
     end
 
     INGEST -->|push| LOKI
@@ -127,6 +194,7 @@ flowchart LR
     COMPARE -->|GET /loki/api/v1/*| LOKI
     COMPARE -->|GET /loki/api/v1/*| VLP
     VLP --> VL
+    VLP -. rules / alerts .-> VM["vmalert"]
     COMPARE --> SCORE
     GF -.->|manual compare| LOKI
     GF -.->|manual compare| VLP
@@ -138,7 +206,10 @@ flowchart LR
 Pure string manipulation parser — no external LogQL parser library. Converts LogQL to LogsQL left-to-right using prefix matching and regex for templates.
 
 ### Proxy (`internal/proxy/`)
-HTTP handlers for all Loki API endpoints. Each handler: validates input, translates the query, calls VL, converts the response to Loki format.
+HTTP handlers for Loki-compatible read endpoints. The main execution paths are:
+- query and metadata handlers with tenant validation, optional fanout, translation, cache reuse, and response shaping
+- `/tail` websocket handling with native and synthetic modes
+- rules and alerts read-through compatibility against a configured backend such as `vmalert`
 
 ### Middleware (`internal/middleware/`)
 - **Rate limiter**: per-client token bucket + global semaphore

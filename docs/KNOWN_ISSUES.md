@@ -32,7 +32,12 @@ Current coverage closes several older compatibility concerns that no longer need
 - compose and browser e2e cover synthetic tail, ingress tail, reconnect behavior, idle windows, browser-origin rejection, and native-to-ingress recovery
 - multi-tenant coverage includes query fanout, labels, series, `__tenant_id__` narrowing, Drilldown resource contracts, and browser smoke for Explore and Logs Drilldown landing, service, and fields flows
 
-Remaining follow-up work is now mostly coverage growth and runtime extraction, which stays tracked in [Roadmap](roadmap.md).
+## Remaining Multi-Tenant Differences
+
+Read/query fanout now supports Loki-style `X-Scope-OrgID: tenant-a|tenant-b` plus `__tenant_id__` selector narrowing. The remaining differences are:
+
+- merged field/label cardinality across tenants is still approximate in a few Drilldown-oriented surfaces
+- `*` remains a proxy-specific default/global bypass mode, not a Loki-compatible all-tenants shorthand
 
 ## Data Model Differences
 
@@ -77,7 +82,7 @@ These were previously listed as gaps and have been resolved:
 - ~~`absent_over_time()`~~ -> Fixed: mapped to `count()`
 - ~~Binary metric expressions~~ -> Fixed: proxy-side evaluation
 - ~~`quantile_over_time()`~~ -> Fixed: mapped to VL `quantile(phi, field)`
-- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Fixed for the read path: the proxy exposes Loki-compatible rules and alerts reads, while writes remain intentionally unsupported because the proxy is read-only
+- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Fixed for read-path compatibility: legacy Loki YAML rules plus Prometheus-style JSON rules and alerts are exposed from configured backends; ruler writes remain intentionally out of scope for this read proxy
 - ~~Coalescer cross-tenant data leak~~ -> Fixed: tenant included in coalescing key
 - ~~Stats detection false-positive~~ -> Fixed: quote-aware parsing
 - ~~Metrics always recording 200~~ -> Fixed: actual status code captured
