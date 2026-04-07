@@ -73,53 +73,43 @@ See [Architecture](docs/architecture.md) for component design, [Observability](d
 
 ## Key Features
 
-### User Compatibility
+### Loki + Grafana Compatibility
 See [Getting Started](docs/getting-started.md), [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md), [Loki Compatibility](docs/compatibility-loki.md), and [Logs Drilldown Compatibility](docs/compatibility-drilldown.md).
 
-- **100% LogQL coverage** -- stream selectors, line filters, parsers, metric queries, binary expressions, subqueries
-- **Proxy-side evaluation** for features VL doesn't support natively: `without()`, `on()`/`ignoring()`, `group_left()`/`group_right()`, subquery `[range:step]`, `bool` modifier, `| decolorize`, `| line_format`
-- **OTel label translation** -- bidirectional dot/underscore conversion for 50+ semantic convention fields
-- **Hybrid metadata fields by default** -- keep Loki-compatible labels while exposing both dotted OTel fields and underscore aliases for Drilldown, Explore, and correlation paths
-- **Grafana-native workflows** -- Explore, Logs Drilldown, dashboards, live tail, and datasource-side multi-tenant reads work through the standard Loki datasource
-- **Rules and alerts read compatibility** -- surface `vmalert` rules and alerts on Loki-compatible read endpoints and migrate existing files with the built-in converter
-- **VL stream selector optimization** -- known `_stream_fields` bypass full-text scan for native performance
+- **Loki-compatible frontend** -- use the standard Loki datasource, API shape, and WebSocket tail entrypoints against VictoriaLogs without a custom plugin
+- **Full LogQL execution surface** -- stream selectors, filters, parsers, metric queries, binary expressions, and subqueries are supported, with proxy-side evaluation for the parts VictoriaLogs does not natively provide
+- **Grafana-native workflows** -- Explore, Logs Drilldown, dashboards, live tail, and datasource-side multi-tenant reads work through the same datasource model operators already know
+- **OTel-aware label and metadata translation** -- bidirectional dot/underscore conversion plus hybrid field exposure keeps Loki labels usable while preserving dotted OTel-style metadata for field-oriented flows
+- **Read-path rules and alerts compatibility** -- surface `vmalert` rules and alerts on Loki-compatible read endpoints and migrate Loki-style rule files with the built-in converter
+- **Indexed fast path where possible** -- known VictoriaLogs `_stream_fields` can stay on native stream selectors instead of dropping to slower field scans
 
 ### Security & Hardening
 See [Security](docs/security.md), [Configuration](docs/configuration.md), [Observability](docs/observability.md), and [Known Issues](docs/KNOWN_ISSUES.md).
 
-- **Admin/debug endpoints closed by default** -- `/debug/queries`, `pprof`, and peer-cache internals require explicit enablement and optional admin auth
-- **Tail origin protection** -- `/tail` rejects browser origins unless explicitly allowlisted
-- **Tenant hardening** -- explicit tenant mapping, default-tenant aliases for VL `0:0`, and query-only multi-tenant fanout on `X-Scope-OrgID: tenant-a|tenant-b`
-- **6-layer protection** -- rate limiting, concurrency cap, coalescing, normalization, cache, circuit breaker
-- **Secret redaction** -- all log output passes through a redacting handler that masks API keys, bearer tokens, passwords, AWS credentials, and URL-embedded secrets
-- **Delete with safeguards** -- confirmation header, tenant scoping, time range limits, audit logging
-- **TLS support** -- server-side HTTPS, backend TLS, OTLP TLS, and optional client-certificate auth
+- **Closed-by-default admin surface** -- `/debug/queries`, `pprof`, and peer-cache internals require explicit enablement and can be additionally protected with admin auth
+- **Tenant isolation controls** -- explicit tenant mapping, default-tenant aliases for VL `0:0`, and bounded read fanout on `X-Scope-OrgID: tenant-a|tenant-b`
+- **Layered request protection** -- rate limiting, concurrency caps, request coalescing, normalization, cache boundaries, and circuit breaking all apply before backend pressure cascades
+- **Origin, delete, and secret safeguards** -- browser-origin checks for `/tail`, confirmation-gated deletes, tenant-scoped destructive paths, and log redaction for sensitive values
+- **TLS and identity passthrough support** -- server-side HTTPS, backend TLS, OTLP TLS, optional client cert auth, and controlled header/cookie forwarding to the backend
 
 ### Performance & Scale
 See [Performance Guide](docs/performance.md), [Scaling](docs/scaling.md), [Fleet Cache](docs/fleet-cache.md), and [Observability](docs/observability.md).
 
-- **3-tier cache**: L1 in-memory (LRU + TTL) → L2 on-disk (bbolt + gzip) → L3 peer (consistent hash ring)
-- **Fleet-distributed cache** -- consistent hashing across proxy replicas, shadow copies with TTL preservation, per-peer circuit breakers ([details](docs/fleet-cache.md))
-- **Request coalescing** -- N identical queries become 1 backend request (singleflight)
-- **Query normalization** -- sort matchers, collapse whitespace for better cache hit rates
-- **Query-range response caching** -- final Loki-shaped cached responses for hot query paths, including merged multi-tenant reads
-- **Native-first Drilldown discovery** -- prefer VictoriaLogs field names, field values, and streams metadata where it is safe, then fall back to bounded log-line sampling for parsed and derived fields
-- **Synthetic live tail fallback** -- keep `/tail` usable when native backend tail support is missing or disabled
-- **Bounded fanout and merge safety** -- multi-tenant query fanout, merged response size, synthetic-tail dedup state, and expensive metadata scans all have explicit safety caps
-- **Cache-hit and bypass regression gates** -- PR quality checks track CPU, memory, allocations, throughput, and memory growth across hot and uncached paths
-- **Faster PR quality snapshots** -- base/head quality metrics are collected in parallel with bounded per-metric timeouts so required report gating stays informative without stalling whole PR checks
-- **CI noise-tolerant report gate** -- base/head quality comparisons use relative plus absolute thresholds with low-baseline guards, so small runner jitter does not block PRs
-- **Release metadata sync** -- release automation promotes `Unreleased` changelog notes into the version section and refreshes README tests/coverage/Go LOC badges on `main` (configure `RELEASE_PR_TOKEN` secret so metadata PRs trigger required `pull_request` checks automatically)
+- **Three cache tiers** -- in-memory LRU + TTL, disk-backed bbolt cache, and fleet peer-cache provide progressively wider reuse before a VictoriaLogs miss
+- **Fleet-aware scaling** -- consistent hashing, shadow copies with TTL preservation, headless-service peer discovery, and per-peer circuit breakers keep multi-replica fleets efficient under HPA churn
+- **Hot-path backend reduction** -- request coalescing, query normalization, and cached Loki-shaped query-range responses reduce duplicate backend work for repeated dashboards and shared reads
+- **Bounded expensive paths** -- multi-tenant fanout, merge size, synthetic-tail dedup state, and metadata/discovery fallbacks all have explicit safety caps
+- **Graceful fallback behavior** -- native-first metadata discovery and synthetic tail fallback keep user-facing flows working when backend-native paths are absent or incomplete
+- **Measured regression control** -- compatibility, performance, and quality gates track cache-hit versus bypass behavior, throughput, allocations, and memory growth across hot paths
 
 ### Operations
 See [Getting Started](docs/getting-started.md), [Configuration](docs/configuration.md), [Scaling](docs/scaling.md), [Observability](docs/observability.md), [Testing](docs/testing.md), [Compatibility Matrix](docs/compatibility-matrix.md), and [Rules And Alerts Migration](docs/rules-alerts-migration.md).
 
-- **Multitenancy** -- Loki `X-Scope-OrgID` mapped to VL `AccountID`/`ProjectID`, SIGHUP hot-reload
-- **Observability** -- Prometheus `/metrics`, OTLP push with matching core metric names, OTel-friendly JSON logs, per-tenant breakdowns, per-client offender metrics, fleet peer-cache metrics
-- **Rules and alerts migration tool** -- convert Loki-style rule files into `vmalert` `type: vlogs` rule files for read-compatible Grafana alert visibility through the proxy
-- **WebSocket tail** -- live log tailing via Loki's WebSocket protocol with fast handshake, origin controls, and synthetic fallback when native VL tail streaming is unavailable
-- **GOMEMLIMIT auto-tuning** -- Helm chart calculates Go memory limit as % of k8s resource limits
-- **Versioned compatibility windows** -- pinned and matrix-tested Loki, VictoriaLogs, and Logs Drilldown support bands with dedicated CI badges
+- **Multitenant deployment model** -- Loki tenant headers map to VictoriaLogs `AccountID` and `ProjectID`, with hot-reloadable tenant configuration
+- **Operational observability** -- Prometheus `/metrics`, OTLP export, structured JSON logs, per-tenant and per-client breakdowns, and peer-cache metrics are available out of the box
+- **Rules migration support** -- convert Loki-style rule files into `vmalert` `type: vlogs` definitions for read-compatible Grafana alert visibility
+- **Production Helm support** -- OCI chart publishing, `Deployment` or `StatefulSet` modes, persistent disk cache, headless peer discovery, HPA support, and GOMEMLIMIT auto-tuning
+- **Versioned compatibility tracks** -- Loki, VictoriaLogs, and Logs Drilldown are validated as separate compatibility tracks with dedicated CI signals
 
 ## Quick Start
 
