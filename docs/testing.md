@@ -109,6 +109,19 @@ CI prefers the runner's existing Chrome/Chromium binary for these shards and fal
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke and single-tenant Logs Drilldown smoke |
 | `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown service smoke |
 
+## E2E Compatibility Matrix
+
+The Docker-backed `test/e2e-compat` suite now runs as four functional PR shards instead of one monolithic job. Each shard builds the stack, waits on explicit HTTP readiness checks, and runs only its own test family.
+
+| Shard | Primary scope |
+|---|---|
+| `e2e-compat (core)` | Loki/VL surface parity, alerting, chaining, Explore HTTP contracts, control-plane endpoints |
+| `e2e-compat (drilldown)` | Drilldown contracts, Drilldown runtime-family checks, track-score summaries |
+| `e2e-compat (otel-edge)` | OTel label translation, complex queries, edge-case payloads and parser behavior |
+| `e2e-compat (tail-multitenancy)` | multi-tenant behavior, tail transport semantics, response/security edge checks |
+
+Stack startup now uses [`wait_e2e_stack.sh`](../scripts/ci/wait_e2e_stack.sh) instead of `docker compose --wait` or fixed sleeps. That avoids false failures from services without Docker healthchecks and lets UI and compat jobs share the same readiness logic.
+
 ### `datasource` shard
 
 | Test | Purpose |
