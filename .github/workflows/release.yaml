@@ -47,22 +47,7 @@ jobs:
           chmod +x scripts/ci/extract_changelog_section.sh
           VERSION="${{ steps.version.outputs.version }}"
           NOTES_FILE="$(mktemp)"
-          if scripts/ci/extract_changelog_section.sh "${VERSION}" CHANGELOG.md > "$NOTES_FILE" 2>/dev/null; then
-            :
-          else
-            PREV_TAG="${{ steps.version.outputs.prev_tag }}"
-            {
-              echo "## [${VERSION}]"
-              echo ""
-              echo "### Changes"
-              echo ""
-              if [ -n "$PREV_TAG" ]; then
-                git log "${PREV_TAG}..${{ steps.version.outputs.tag }}" --pretty=format:'- %s'
-              else
-                git log "${{ steps.version.outputs.tag }}" --pretty=format:'- %s'
-              fi
-            } > "$NOTES_FILE"
-          fi
+          scripts/ci/extract_changelog_section.sh "${VERSION}" CHANGELOG.md > "$NOTES_FILE"
           echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binaries
@@ -104,14 +89,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve Docker image tags
+        id: image-tags
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "docker.io/${DOCKERHUB_USERNAME}/loki-vl-proxy:${VERSION}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${{ steps.version.outputs.version }}
+          tags: ${{ steps.image-tags.outputs.tags }}
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -141,7 +150,7 @@ jobs:
           git checkout -B main origin/main
 
           chmod +x scripts/ci/sync_release_metadata.sh
-          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "" .
+          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "" "" "" .
 
           if git diff --quiet --exit-code -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml; then
             echo "release metadata already synced"
@@ -150,6 +159,6 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml
+          git add -f -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml
           git commit -m "docs: sync release metadata for v${VERSION} [skip ci]"
           git push origin HEAD:main

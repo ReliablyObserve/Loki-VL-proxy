@@ -134,7 +134,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test_count: ${{ steps.metrics.outputs.tests }}
-      coverage: ${{ steps.metrics.outputs.coverage }}
+      coverage_pct: ${{ steps.metrics.outputs.coverage_pct }}
+      code_lines: ${{ steps.metrics.outputs.code_lines }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -168,9 +169,11 @@ jobs:
           set -euo pipefail
           TESTS=$(go test ./... -count=1 -json 2>/dev/null | jq -r 'select(.Action=="pass" and .Test != null) | .Test' | wc -l | tr -d ' ')
           go test ./... -coverprofile=coverage.out -count=1 >/dev/null 2>&1
-          COV=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}')
+          COV=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          CODE_LINES=$(git ls-files '*.go' | xargs wc -l | tail -1 | awk '{print $1}')
           echo "tests=${TESTS}" >> "$GITHUB_OUTPUT"
-          echo "coverage=${COV}" >> "$GITHUB_OUTPUT"
+          echo "coverage_pct=${COV}" >> "$GITHUB_OUTPUT"
+          echo "code_lines=${CODE_LINES}" >> "$GITHUB_OUTPUT"
 
       - name: Helm lint
         run: helm lint charts/loki-vl-proxy/
@@ -194,6 +197,9 @@ jobs:
 
       - name: Extract release metadata
         id: meta
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${{ needs.prepare-release.outputs.next_version }}"
@@ -212,13 +218,19 @@ jobs:
             echo "### Release Validation"
             echo ""
             echo "- Tests: ${{ needs.validate-release.outputs.test_count }}"
-            echo "- Coverage: ${{ needs.validate-release.outputs.coverage }}"
+            echo "- Coverage: ${{ needs.validate-release.outputs.coverage_pct }}%"
+            echo "- Go LOC: ${{ needs.validate-release.outputs.code_lines }}"
             echo ""
             echo "### Installation"
             echo ""
             echo '```bash'
-            echo "# Docker"
+            echo "# Docker (GHCR)"
             echo "docker pull ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo ""
+              echo "# Docker (Docker Hub)"
+              echo "docker pull docker.io/${DOCKERHUB_USERNAME}/loki-vl-proxy:${VERSION}"
+            fi
             echo ""
             echo "# Helm (OCI)"
             echo "helm install loki-vl-proxy oci://ghcr.io/${{ github.repository_owner }}/charts/loki-vl-proxy \\"
@@ -232,6 +244,9 @@ jobs:
             echo "- SHA256 checksums"
             echo "- Versioned Helm chart package"
             echo "- Multi-arch GHCR image"
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "- Multi-arch Docker Hub image"
+            fi
           } >> "$NOTES_FILE"
           {
             echo "tag=${TAG}"
@@ -290,14 +305,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve Docker image tags
+        id: image-tags
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "docker.io/${DOCKERHUB_USERNAME}/loki-vl-proxy:${VERSION}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${{ steps.meta.outputs.version }}
+          tags: ${{ steps.image-tags.outputs.tags }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -322,10 +361,12 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           TEST_COUNT: ${{ needs.validate-release.outputs.test_count }}
+          COVERAGE_PCT: ${{ needs.validate-release.outputs.coverage_pct }}
+          CODE_LINES: ${{ needs.validate-release.outputs.code_lines }}
         run: |
           set -euo pipefail
           chmod +x scripts/ci/sync_release_metadata.sh
-          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "${TEST_COUNT}" .
+          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "${TEST_COUNT}" "${COVERAGE_PCT}" "${CODE_LINES}" .
 
           if git diff --quiet --exit-code -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml; then
             echo "release metadata already synced"
@@ -334,6 +375,6 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml
+          git add -f -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml
           git commit -m "docs: sync release metadata for v${VERSION} [skip ci]"
           git push origin HEAD:main
