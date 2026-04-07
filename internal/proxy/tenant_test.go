@@ -790,6 +790,69 @@ func TestTenant_MultiTenantDetectedFieldsUsesExactValueUnion(t *testing.T) {
 	}
 }
 
+func TestTenant_MultiTenantDetectedFieldsKeepsNativeCardinalityFloor(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/select/logsql/field_names"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"values":[{"value":"native.only","hits":1}]}`))
+		case strings.HasPrefix(r.URL.Path, "/select/logsql/query"):
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(""))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, _ := New(Config{
+		BackendURL: vlBackend.URL,
+		Cache:      c,
+		LogLevel:   "error",
+		TenantMap: map[string]TenantMapping{
+			"tenant-a": {AccountID: "10", ProjectID: "0"},
+			"tenant-b": {AccountID: "20", ProjectID: "0"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", `/loki/api/v1/detected_fields?query={app="api"}&start=1&end=2&limit=50`, nil)
+	r.Header.Set("X-Scope-OrgID", "tenant-a|tenant-b")
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for multi-tenant detected_fields, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Fields []struct {
+			Label       string `json:"label"`
+			Cardinality int    `json:"cardinality"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	foundNativeOnly := false
+	for _, field := range resp.Fields {
+		if field.Label != "native.only" {
+			continue
+		}
+		foundNativeOnly = true
+		if field.Cardinality != 1 {
+			t.Fatalf("expected native.only cardinality floor=1, got %d body=%s", field.Cardinality, w.Body.String())
+		}
+	}
+	if !foundNativeOnly {
+		t.Fatalf("expected native.only field in detected_fields response, got %v", resp.Fields)
+	}
+}
+
 func TestTenant_MultiTenantDetectedLabelsUsesExactValueUnion(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")

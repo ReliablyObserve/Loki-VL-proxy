@@ -108,9 +108,9 @@ CI prefers the runner's existing Chrome/Chromium binary for these shards and fal
 |---|---|---|
 | `datasource` | `npx playwright test tests/datasource.spec.ts` | Grafana datasource settings smoke |
 | `explore-core` | `npx playwright test --grep @explore-core` | one default Explore browser smoke |
-| `explore-tail` | `npx playwright test --grep @explore-tail` | browser-only multi-tenant and live-tail recovery |
+| `explore-tail` | `npx playwright test --grep @explore-tail` | browser-only multi-tenant (`__tenant_id__` exact and negative regex) plus live-tail recovery |
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke and single-tenant Logs Drilldown smoke |
-| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | multi-tenant Logs Drilldown landing, service, and fields-view smoke |
+| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | multi-tenant Logs Drilldown landing/service/fields plus URL filter-reload persistence |
 
 ## E2E Compatibility Matrix
 
@@ -127,8 +127,7 @@ Stack startup now uses [`wait_e2e_stack.sh`](../scripts/ci/wait_e2e_stack.sh) in
 
 The GitHub-hosted Docker jobs now also prebuild the proxy image once per job through BuildKit cache and start compose stacks with `--no-build`. That keeps the grouped compat shards and UI shards parallel without paying the full Docker rebuild cost every time a stack starts inside the same job.
 
-Next step:
-promote compose-backed e2e cache and fleet-smoke coverage into GitHub Actions for both pull requests and post-merge `main` runs, so the Tier0 compatibility cache and 3-node peer-cache behavior are exercised against the full stack automatically.
+Compose-backed fleet cache smoke now runs on pull requests and post-merge `main` in CI (`e2e-fleet`), using the dedicated `TestFleetSmoke_*` suite.
 
 ### `datasource` shard
 
@@ -154,6 +153,7 @@ Moved out of Playwright:
 | Test | Purpose |
 |---|---|
 | `multi-tenant query respects __tenant_id__ filter in Explore` | tenant narrowing in Explore |
+| `multi-tenant negative regex excludes fake tenant in Explore` | tenant negative-regex narrowing stays browser-visible |
 | `live tail works through the browser-allowed synthetic datasource` | browser-safe synthetic live tail |
 | `native-tail failure can recover through ingress live tail` | failure recovery after native-tail path breaks |
 
@@ -180,6 +180,7 @@ Moved out of Playwright:
 | `multi-tenant landing shows service buckets without browser errors` | multi-tenant landing-page browser smoke |
 | `multi-tenant service drilldown loads without browser errors` | multi-tenant service logs browser smoke |
 | `multi-tenant service field view loads detected fields without browser errors` | multi-tenant service fields browser smoke |
+| `multi-tenant service filter survives reload from URL state` | multi-tenant URL state keeps `__tenant_id__` filter after reload |
 
 ## Compatibility Tracks
 

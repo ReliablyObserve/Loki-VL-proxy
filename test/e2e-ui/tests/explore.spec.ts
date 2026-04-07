@@ -38,6 +38,46 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     await guards.assertClean();
   });
 
+  test("multi-tenant negative regex excludes fake tenant in Explore @explore-tail", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page, {
+      allowedAlertErrors: [/^Unknown error$/i],
+    });
+
+    await openExplore(page, PROXY_MULTI_DS, '{app="api-gateway", __tenant_id__!~"f.*"}');
+    await waitForGrafanaReady(page);
+
+    const queryResponsePromise = page.waitForResponse(
+      (response) => {
+        if (!response.url().includes("/loki/api/v1/query_range")) {
+          return false;
+        }
+        try {
+          const query = new URL(response.url()).searchParams.get("query") ?? "";
+          return query.includes('__tenant_id__!~"f.*"');
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 20_000 }
+    );
+
+    await runQuery(page);
+    await assertLogsVisible(page);
+
+    const queryResponse = await queryResponsePromise;
+    expect(queryResponse.status()).toBe(200);
+    const payload = await queryResponse.json();
+    const result = payload?.data?.result ?? [];
+    expect(Array.isArray(result)).toBeTruthy();
+    expect(result.length).toBeGreaterThan(0);
+    for (const item of result) {
+      expect(item?.stream?.__tenant_id__).not.toBe("fake");
+    }
+    await guards.assertClean();
+  });
+
   test("live tail works through the browser-allowed synthetic datasource @explore-tail", async ({
     page,
   }) => {

@@ -166,4 +166,25 @@ test.describe("Grafana Logs Drilldown", () => {
     expect(JSON.stringify(fieldsResponse?.json)).toContain('"fields"');
     await guards.assertClean();
   });
+
+  test("multi-tenant service filter survives reload from URL state @drilldown-mt", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page);
+    const uid = await resolveDatasourceUid(page, PROXY_MULTI_DS);
+
+    await page.goto(
+      buildServiceDrilldownUrl(uid, "api-gateway", "logs", {
+        "var-filters": "service_name|=|api-gateway,__tenant_id__|=|fake",
+      })
+    );
+    await waitForDrilldownDetails(page);
+    await expectFilterApplied(page, "Filter by labels", "__tenant_id__", "fake");
+
+    await page.reload();
+    await waitForDrilldownDetails(page);
+    await expectFilterApplied(page, "Filter by labels", "__tenant_id__", "fake");
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    await guards.assertClean();
+  });
 });

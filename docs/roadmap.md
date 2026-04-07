@@ -75,4 +75,4 @@
 - [ ] Tighten remaining merged-tenant Drilldown metadata accuracy for field and label cardinality surfaces
 - [ ] Convert more upstream Loki, Logs Drilldown, and VictoriaLogs edge cases into regression tests
 - [ ] Expand browser-level multi-tenant Explore and Drilldown scenarios where API parity already exists but UI combinations still need live regression coverage
-- [ ] Promote compose-backed e2e cache and fleet-smoke coverage into GitHub Actions for pull requests and post-merge `main` runs
+- [x] Promote compose-backed e2e fleet cache smoke coverage into required GitHub Actions for pull requests and post-merge `main` runs (v0.27.7)

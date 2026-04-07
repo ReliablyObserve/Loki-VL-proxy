@@ -4764,11 +4764,12 @@ func mergeDetectedFieldsResponses(recorders []*httptest.ResponseRecorder) ([]byt
 func (p *Proxy) multiTenantDetectedFieldsResponse(r *http.Request, tenantIDs []string) ([]byte, string, error) {
 	lineLimit := parseDetectedLineLimit(r)
 	type mergedField struct {
-		Label    string
-		Type     string
-		Parsers  map[string]struct{}
-		JSONPath []interface{}
-		Values   map[string]struct{}
+		Label            string
+		Type             string
+		Parsers          map[string]struct{}
+		JSONPath         []interface{}
+		Values           map[string]struct{}
+		CardinalityFloor int
 	}
 	merged := map[string]*mergedField{}
 	for _, tenantID := range tenantIDs {
@@ -4799,6 +4800,9 @@ func (p *Proxy) multiTenantDetectedFieldsResponse(r *http.Request, tenantIDs []s
 				}
 				merged[label] = mf
 			}
+			if card, ok := numberToInt(item["cardinality"]); ok && card > mf.CardinalityFloor {
+				mf.CardinalityFloor = card
+			}
 			if parsers, ok := item["parsers"].([]interface{}); ok {
 				for _, parser := range parsers {
 					mf.Parsers[fmt.Sprintf("%v", parser)] = struct{}{}
@@ -4824,10 +4828,14 @@ func (p *Proxy) multiTenantDetectedFieldsResponse(r *http.Request, tenantIDs []s
 			parsers = append(parsers, parser)
 		}
 		sort.Strings(parsers)
+		cardinality := len(mf.Values)
+		if mf.CardinalityFloor > cardinality {
+			cardinality = mf.CardinalityFloor
+		}
 		item := map[string]interface{}{
 			"label":       mf.Label,
 			"type":        mf.Type,
-			"cardinality": len(mf.Values),
+			"cardinality": cardinality,
 			"parsers":     parsers,
 		}
 		if len(mf.JSONPath) > 0 {
