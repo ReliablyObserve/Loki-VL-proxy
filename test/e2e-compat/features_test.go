@@ -544,6 +544,11 @@ func TestFeature_Tail_WebSocketStreamsLiveData_ProxyMatchesLoki(t *testing.T) {
 	}
 	defer lokiConn.Close()
 
+	// Give both backends a short window to finish tail subscription setup before
+	// the first log line is pushed. Real Loki is more timing-sensitive here than
+	// the proxy and can otherwise miss the first frame on loaded CI runners.
+	time.Sleep(750 * time.Millisecond)
+
 	pushCustomToVL(t, now.Add(500*time.Millisecond), map[string]string{
 		"app":   app,
 		"env":   "test",
@@ -555,8 +560,8 @@ func TestFeature_Tail_WebSocketStreamsLiveData_ProxyMatchesLoki(t *testing.T) {
 		"level": "info",
 	}, []logLine{{Msg: msg, Level: "info"}})
 
-	proxyFrame := readTailFrame(t, proxyConn, msg, 10*time.Second)
-	lokiFrame := readTailFrame(t, lokiConn, msg, 10*time.Second)
+	proxyFrame := readTailFrame(t, proxyConn, msg, 15*time.Second)
+	lokiFrame := readTailFrame(t, lokiConn, msg, 15*time.Second)
 
 	if _, ok := proxyFrame["streams"]; !ok {
 		t.Fatalf("expected proxy tail frame to contain streams, got %v", proxyFrame)

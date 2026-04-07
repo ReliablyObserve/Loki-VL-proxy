@@ -100,7 +100,8 @@ start_compat_stack() {
   (
     cd "$ROOT_DIR/test/e2e-compat"
     docker compose down -v >&2 || true
-    docker compose up -d --build --wait --wait-timeout 180 >&2
+    docker compose up -d --build >&2
+    "$ROOT_DIR/scripts/ci/wait_e2e_stack.sh" 180 >&2
   )
 }
 
