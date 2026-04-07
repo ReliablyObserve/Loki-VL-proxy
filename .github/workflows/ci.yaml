@@ -124,8 +124,7 @@ jobs:
       - name: Start e2e stack
         working-directory: test/e2e-compat
         run: |
-          docker compose up -d --build
-          timeout 90 bash -c 'until curl -fsS http://127.0.0.1:8080/ready >/dev/null && curl -fsS http://127.0.0.1:9428/health >/dev/null; do sleep 2; done'
+          docker compose up -d --build --wait --wait-timeout 180
           docker compose ps
 
       - name: Run compatibility tests
