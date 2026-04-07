@@ -19,7 +19,7 @@ export async function openExplore(page: Page, datasource: string, expr = "") {
   await expect(exploreQueryEditor(page)).toBeVisible({ timeout: 15_000 });
 }
 
-async function resolveDatasourceUid(page: Page, datasource: string): Promise<string> {
+export async function resolveDatasourceUid(page: Page, datasource: string): Promise<string> {
   const deadline = Date.now() + 30_000;
   let lastStatus = "unreachable";
 

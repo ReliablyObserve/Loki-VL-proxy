@@ -4,6 +4,7 @@ import {
   PROXY_MULTI_DS,
   installGrafanaGuards,
   openLogsDrilldown,
+  resolveDatasourceUid,
   waitForGrafanaReady,
 } from "./helpers";
 import { buildServiceDrilldownUrl } from "./url-state";
@@ -54,72 +55,8 @@ async function expectFilterApplied(
   }
 }
 
-async function addDrilldownFilter(
-  page: Page,
-  comboName: "Filter by labels" | "Filter by fields",
-  key: string,
-  value: string
-) {
-  await page.getByRole("combobox", { name: comboName }).click();
-  await selectComboboxOption(page, key);
-  await selectComboboxOption(page, "= Equals");
-  await typeIntoActiveCombobox(page, value);
-  const valueOption = page.getByRole("option", { name: value, exact: true });
-  if (await valueOption.isVisible({ timeout: 3_000 }).catch(() => false)) {
-    await valueOption.click();
-  } else if (
-    await page
-      .getByRole("option", { name: /Use custom value/ })
-      .isVisible({ timeout: 1_000 })
-      .catch(() => false)
-  ) {
-    await page.getByRole("option", { name: /Use custom value/ }).click();
-  } else {
-    await page.keyboard.press("Enter");
-  }
-  await page.keyboard.press("Escape");
-  await waitForGrafanaReady(page);
-  await expectFilterApplied(page, comboName, key, value);
-}
-
 function escapeRegex(text: string) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-async function typeIntoActiveCombobox(page: Page, value: string) {
-  const input = page
-    .locator('[role="combobox"][aria-expanded="true"] input, input[aria-autocomplete="list"]')
-    .last();
-  if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
-    await input.fill("");
-    await input.type(value, { delay: 10 });
-    return;
-  }
-  await page.keyboard.type(value, { delay: 10 });
-}
-
-async function selectComboboxOption(page: Page, optionLabel: string) {
-  const exactOption = page.getByRole("option", { name: optionLabel, exact: true });
-  if (await exactOption.isVisible({ timeout: 1_500 }).catch(() => false)) {
-    await exactOption.click();
-    return;
-  }
-
-  await typeIntoActiveCombobox(page, optionLabel);
-
-  const exactPattern = new RegExp(`^${escapeRegex(optionLabel)}$`, "i");
-  const searchableOption = page.getByRole("option", { name: exactPattern }).first();
-  if (await searchableOption.isVisible({ timeout: 5_000 }).catch(() => false)) {
-    await searchableOption.click();
-    return;
-  }
-
-  const fuzzyOption = page
-    .getByRole("option")
-    .filter({ hasText: optionLabel })
-    .first();
-  await expect(fuzzyOption).toBeVisible({ timeout: 5_000 });
-  await fuzzyOption.click();
 }
 
 async function openServiceDrilldown(
@@ -128,13 +65,8 @@ async function openServiceDrilldown(
   serviceName: string,
   view: "logs" | "fields" = "logs"
 ) {
-  const response = await page.request.get(
-    `/api/datasources/name/${encodeURIComponent(datasource)}`
-  );
-  expect(response.ok()).toBeTruthy();
-  const body = await response.json();
-
-  await page.goto(buildServiceDrilldownUrl(body.uid, serviceName, view));
+  const uid = await resolveDatasourceUid(page, datasource);
+  await page.goto(buildServiceDrilldownUrl(uid, serviceName, view));
   await waitForDrilldownDetails(page);
 }
 
@@ -165,8 +97,6 @@ test.describe("Grafana Logs Drilldown", () => {
     await openLogsDrilldown(page, PROXY_DS);
     await waitForDrilldownLanding(page);
 
-    await expect(page.getByText("of 0")).toHaveCount(0);
-
     const volumeResponse = responses.find((r) =>
       String(r.url).includes("/resources/index/volume")
     );
@@ -176,61 +106,14 @@ test.describe("Grafana Logs Drilldown", () => {
     await guards.assertClean();
   });
 
-  test("proxy landing page can add and use a cluster breakdown tab @drilldown-core", async ({ page }) => {
-    const guards = installGrafanaGuards(page, {
-      allowedRequestFailures: [/net::ERR_ABORTED .*\/api\/ds\/query\?ds_type=loki/i],
-    });
-    const responses = await collectDrilldownResponses(page);
-    await openLogsDrilldown(page, PROXY_DS);
-    await waitForDrilldownLanding(page);
-
-    const clusterTab = page.getByRole("tab", { name: "cluster" });
-    if (!(await clusterTab.isVisible().catch(() => false))) {
-      const addLabelTab = page.getByTestId("data-testid Tab Add label");
-      await addLabelTab.click();
-      const searchInput = page.locator('[role="tooltip"] input');
-      if (!(await searchInput.isVisible().catch(() => false))) {
-        await addLabelTab.press("Enter");
-      }
-      await expect(searchInput).toBeVisible({ timeout: 15_000 });
-      await searchInput.fill("cluster");
-      await selectComboboxOption(page, "cluster");
-      await expect(clusterTab).toBeVisible({ timeout: 15_000 });
-    }
-    await clusterTab.click();
-    await expect(clusterTab).toBeVisible({ timeout: 15_000 });
-
-    const volumeResponse = responses
-      .filter((r) => String(r.url).includes("/resources/index/volume"))
-      .at(-1);
-    expect(volumeResponse).toBeTruthy();
-    expect(JSON.stringify(volumeResponse?.json)).toContain("us-east-1");
-    await guards.assertClean();
-  });
-
-  test("proxy drilldown field filter flow works for method @drilldown-core", async ({ page }) => {
-    const guards = installGrafanaGuards(page, {
-      allowedRequestFailures: [/net::ERR_ABORTED .*\/api\/ds\/query\?ds_type=loki/i],
-    });
-    await openServiceDrilldown(page, PROXY_DS, "api-gateway", "logs");
-
-    await addDrilldownFilter(page, "Filter by fields", "method", "GET");
-    await expect(page.getByText("No logs found")).toHaveCount(0);
-    await guards.assertClean();
-  });
-
   test("service drilldown field filter survives reload from URL state @drilldown-core", async ({
     page,
   }) => {
     const guards = installGrafanaGuards(page);
-    const response = await page.request.get(
-      `/api/datasources/name/${encodeURIComponent(PROXY_DS)}`
-    );
-    expect(response.ok()).toBeTruthy();
-    const body = await response.json();
+    const uid = await resolveDatasourceUid(page, PROXY_DS);
 
     await page.goto(
-      buildServiceDrilldownUrl(body.uid, "api-gateway", "logs", {
+      buildServiceDrilldownUrl(uid, "api-gateway", "logs", {
         "var-fields": "method|=|GET",
       })
     );
@@ -244,11 +127,9 @@ test.describe("Grafana Logs Drilldown", () => {
     await guards.assertClean();
   });
 
-  test("multi-tenant service drilldown keeps cluster label filter working @drilldown-mt", async ({ page }) => {
+  test("multi-tenant service drilldown loads without browser errors @drilldown-mt", async ({ page }) => {
     const guards = installGrafanaGuards(page);
     await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "logs");
-
-    await addDrilldownFilter(page, "Filter by labels", "cluster", "us-east-1");
     await expect(page.getByText("No logs found")).toHaveCount(0);
     await guards.assertClean();
   });

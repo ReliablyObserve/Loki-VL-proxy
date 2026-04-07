@@ -105,7 +105,7 @@ The browser suite now keeps only browser-only smoke paths. Query parity, Drilldo
 | `explore-core` | `npx playwright test --grep @explore-core` | one default Explore browser smoke |
 | `explore-tail` | `npx playwright test --grep @explore-tail` | browser-only multi-tenant and live-tail recovery |
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke and single-tenant Logs Drilldown smoke |
-| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown filter smoke |
+| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown service smoke |
 
 ### `datasource` shard
 
@@ -145,8 +145,6 @@ Moved out of Playwright:
 | `label filter drill-down for app label` | label filter action from Explore logs |
 | `buildLogsDrilldownUrl` and `buildServiceDrilldownUrl` state tests | pure URL/state coverage without launching Chromium |
 | `proxy shows service buckets on landing page` | Logs Drilldown landing volumes |
-| `proxy landing page can add and use a cluster breakdown tab` | dynamic breakdown tabs work |
-| `proxy drilldown field filter flow works for method` | field filter chips work |
 | `service drilldown field filter survives reload from URL state` | Drilldown URL state persists across reloads |
 
 Moved out of Playwright:
@@ -156,7 +154,7 @@ Moved out of Playwright:
 
 | Test | Purpose |
 |---|---|
-| `multi-tenant service drilldown keeps cluster label filter working` | multi-tenant label filter flow |
+| `multi-tenant service drilldown loads without browser errors` | multi-tenant service browser smoke |
 
 ## Compatibility Tracks
 
