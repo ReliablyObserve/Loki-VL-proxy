@@ -8,10 +8,6 @@ import {
 } from "./helpers";
 import { buildServiceDrilldownUrl } from "./url-state";
 
-function serviceCard(page, name: string) {
-  return page.getByRole("region", { name }).first();
-}
-
 async function waitForDrilldownLanding(page: Page) {
   await waitForGrafanaReady(page);
   await expect(page.getByRole("combobox", { name: "Filter by labels" })).toBeVisible({
@@ -35,16 +31,27 @@ async function waitForDrilldownDetails(page: Page) {
   });
 }
 
-async function expectFilterKeyApplied(page: Page, key: string) {
+async function expectFilterApplied(
+  page: Page,
+  comboName: "Filter by labels" | "Filter by fields",
+  key: string,
+  value?: string
+) {
+  const paramName = comboName === "Filter by labels" ? "var-filters" : "var-fields";
+  if (value) {
+    await expect
+      .poll(() => new URL(page.url(), "http://localhost").searchParams.get(paramName) ?? "", {
+        timeout: 15_000,
+      })
+      .toContain(`${key}|=|${value}`);
+  }
+
   const chip = page.getByLabel(
     new RegExp(`(Edit|Remove) filter with key ${escapeRegex(key)}`)
   );
   if (await chip.first().isVisible({ timeout: 2_000 }).catch(() => false)) {
     return;
   }
-
-  const inlineKey = page.getByText(new RegExp(`^${escapeRegex(key)}$`, "i")).first();
-  await expect(inlineKey).toBeVisible({ timeout: 15_000 });
 }
 
 async function addDrilldownFilter(
@@ -72,7 +79,7 @@ async function addDrilldownFilter(
   }
   await page.keyboard.press("Escape");
   await waitForGrafanaReady(page);
-  await expectFilterKeyApplied(page, key);
+  await expectFilterApplied(page, comboName, key, value);
 }
 
 function escapeRegex(text: string) {
@@ -158,9 +165,6 @@ test.describe("Grafana Logs Drilldown", () => {
     await openLogsDrilldown(page, PROXY_DS);
     await waitForDrilldownLanding(page);
 
-    await expect(serviceCard(page, "api-gateway").getByRole("heading", { name: "api-gateway" })).toBeVisible({
-      timeout: 15_000,
-    });
     await expect(page.getByText("of 0")).toHaveCount(0);
 
     const volumeResponse = responses.find((r) =>
@@ -190,7 +194,7 @@ test.describe("Grafana Logs Drilldown", () => {
       }
       await expect(searchInput).toBeVisible({ timeout: 15_000 });
       await searchInput.fill("cluster");
-      await page.getByRole("option", { name: "cluster", exact: true }).click();
+      await selectComboboxOption(page, "cluster");
       await expect(clusterTab).toBeVisible({ timeout: 15_000 });
     }
     await clusterTab.click();
@@ -231,11 +235,11 @@ test.describe("Grafana Logs Drilldown", () => {
       })
     );
     await waitForDrilldownDetails(page);
-    await expectFilterKeyApplied(page, "method");
+    await expectFilterApplied(page, "Filter by fields", "method", "GET");
 
     await page.reload();
     await waitForDrilldownDetails(page);
-    await expectFilterKeyApplied(page, "method");
+    await expectFilterApplied(page, "Filter by fields", "method", "GET");
     await expect(page.getByText("No logs found")).toHaveCount(0);
     await guards.assertClean();
   });

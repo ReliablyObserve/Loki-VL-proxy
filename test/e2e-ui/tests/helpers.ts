@@ -20,20 +20,43 @@ export async function openExplore(page: Page, datasource: string, expr = "") {
 }
 
 async function resolveDatasourceUid(page: Page, datasource: string): Promise<string> {
-  const response = await page.request.get(
-    `/api/datasources/name/${encodeURIComponent(datasource)}`
-  );
-  if (!response.ok()) {
-    const listResponse = await page.request.get("/api/datasources");
-    const available = listResponse.ok()
-      ? (await listResponse.json()).map((ds: { name?: string }) => ds.name).filter(Boolean)
-      : [];
-    throw new Error(
-      `failed to resolve datasource "${datasource}" (status=${response.status()}); available=${available.join(", ")}`
-    );
+  const deadline = Date.now() + 30_000;
+  let lastStatus = "unreachable";
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await page.request.get(
+        `/api/datasources/name/${encodeURIComponent(datasource)}`
+      );
+      lastStatus = String(response.status());
+      if (response.ok()) {
+        const body = await response.json();
+        if (body.uid) {
+          return body.uid;
+        }
+      }
+    } catch {
+      lastStatus = "unreachable";
+    }
+
+    await page.waitForTimeout(1_000);
   }
-  const body = await response.json();
-  return body.uid;
+
+  let available: string[] = [];
+  try {
+    const listResponse = await page.request.get("/api/datasources");
+    if (listResponse.ok()) {
+      available = (await listResponse.json())
+        .map((ds: { name?: string }) => ds.name)
+        .filter(Boolean);
+    }
+  } catch {
+    available = [];
+  }
+
+  throw new Error(
+    `failed to resolve datasource "${datasource}" (lastStatus=${lastStatus}); available=${available.join(", ")}`
+  );
 }
 
 /**
