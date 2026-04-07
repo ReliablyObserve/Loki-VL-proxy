@@ -192,10 +192,10 @@ func TestDrilldown_DetectLabels_SupplementsLevelFromScannedLogs(t *testing.T) {
 	if !seen["level"] {
 		t.Fatalf("expected detectLabels output to include level, got %v", labels)
 	}
-	if !(seen["service_namespace"] || seen["service.namespace"]) {
+	if !seen["service_namespace"] && !seen["service.namespace"] {
 		t.Fatalf("expected detectLabels output to include service namespace label, got %v", labels)
 	}
-	if !(seen["k8s_pod_name"] || seen["k8s.pod.name"]) {
+	if !seen["k8s_pod_name"] && !seen["k8s.pod.name"] {
 		t.Fatalf("expected detectLabels output to include pod label, got %v", labels)
 	}
 }
