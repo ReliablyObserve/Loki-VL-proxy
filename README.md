@@ -6,8 +6,9 @@
 [![VictoriaLogs Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/szibis/Loki-VL-proxy)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/szibis/Loki-VL-proxy)](https://github.com/szibis/Loki-VL-proxy/releases)
-[![Lines of Code](https://sloc.xyz/github/szibis/Loki-VL-proxy/?category=code)](https://github.com/szibis/Loki-VL-proxy)
-[![Tests](https://img.shields.io/github/actions/workflow/status/szibis/Loki-VL-proxy/ci.yaml?label=tests)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml)
+[![Lines of Code](https://img.shields.io/badge/go%20loc-updating-lightgrey)](https://github.com/szibis/Loki-VL-proxy)
+[![Tests](https://img.shields.io/badge/tests-updating-lightgrey)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-updating-lightgrey)](#tests)
 [![LogQL Coverage](https://img.shields.io/badge/LogQL%20coverage-100%25-brightgreen)](#logql-compatibility)
 [![License](https://img.shields.io/github/license/szibis/Loki-VL-proxy)](LICENSE)
 [![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
@@ -137,6 +138,7 @@ See [Performance Guide](docs/performance.md), [Scaling](docs/scaling.md), [Fleet
 - **Cache-hit and bypass regression gates** -- PR quality checks track CPU, memory, allocations, throughput, and memory growth across hot and uncached paths
 - **Faster PR quality snapshots** -- base/head quality metrics are collected in parallel with bounded per-metric timeouts so required report gating stays informative without stalling whole PR checks
 - **CI noise-tolerant report gate** -- base/head quality comparisons use relative plus absolute thresholds with low-baseline guards, so small runner jitter does not block PRs
+- **Release metadata sync** -- release automation promotes `Unreleased` changelog notes into the version section and refreshes README tests/coverage/Go LOC badges on `main`
 
 ### Operations
 See [Getting Started](docs/getting-started.md), [Configuration](docs/configuration.md), [Scaling](docs/scaling.md), [Observability](docs/observability.md), [Testing](docs/testing.md), [Compatibility Matrix](docs/compatibility-matrix.md), and [Rules And Alerts Migration](docs/rules-alerts-migration.md).
@@ -158,6 +160,10 @@ go build -o loki-vl-proxy ./cmd/proxy
 # Docker
 docker build -t loki-vl-proxy .
 docker run -p 3100:3100 loki-vl-proxy -backend=http://victorialogs:9428
+
+# Pull published release images
+docker pull ghcr.io/szibis/loki-vl-proxy:<release>
+docker pull docker.io/<dockerhub-user>/loki-vl-proxy:<release>
 
 # Docker Compose (dev/test with Grafana)
 docker-compose up -d

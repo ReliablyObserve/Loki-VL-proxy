@@ -237,6 +237,7 @@ The report job now collects test count and coverage from the same Go test pass, 
 The collector runs test/coverage, compatibility scores, benchmark medians, and load metrics in parallel with bounded fallbacks so a single slow signal does not block the whole report gate.
 The quality gate compares base/head with relative and absolute regression thresholds and ignores low-baseline noise, so tiny shared-runner jitter does not fail required checks.
 The high-concurrency load threshold remains strict locally (`>10k req/s`) and uses a CI floor (`>5k req/s`) on shared race-enabled runners to avoid flaky non-regression failures.
+Release automation also materializes `CHANGELOG.md` `Unreleased` into the new version section and uses that same section as the GitHub release notes body, then syncs README tests/coverage/Go LOC badges on `main`.
 
 Required-check note:
 

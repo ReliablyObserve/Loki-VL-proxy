@@ -37,10 +37,12 @@ class CheckChangelogPRTests(unittest.TestCase):
         self.assertTrue(should_require_changelog(["test: add coverage"], ["internal/proxy/proxy.go"]))
         self.assertTrue(should_require_changelog(["docs: mention thing"], ["go.mod"]))
 
-    def test_should_skip_for_docs_ci_and_tests_only(self):
+    def test_should_skip_for_docs_only(self):
         self.assertFalse(should_require_changelog(["docs: update guide"], ["docs/getting-started.md"]))
-        self.assertFalse(should_require_changelog(["ci: tune workflow"], [".github/workflows/ci.yaml"]))
-        self.assertFalse(should_require_changelog(["test: add coverage"], ["test/e2e-compat/features_test.go"]))
+
+    def test_should_require_for_ci_and_tests_changes(self):
+        self.assertTrue(should_require_changelog(["ci: tune workflow"], [".github/workflows/ci.yaml"]))
+        self.assertTrue(should_require_changelog(["test: add coverage"], ["test/e2e-compat/features_test.go"]))
 
 
 if __name__ == "__main__":

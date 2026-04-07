@@ -35,9 +35,6 @@ IMPACTFUL_FILES = {
 
 NON_RELEASE_PATH_PREFIXES = (
     "docs/",
-    ".github/",
-    "scripts/",
-    "test/",
 )
 
 NON_RELEASE_FILES = {
