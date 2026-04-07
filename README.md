@@ -316,6 +316,17 @@ See [Compatibility Matrix](docs/compatibility-matrix.md), [Loki Compatibility](d
 
 All features produce correct results. Implementation details for advanced features in [Known Issues](docs/KNOWN_ISSUES.md).
 
+## Release Automation
+
+`Auto Release` on `main` now uses a precedence order aligned with common OSS patterns:
+
+1. explicit release labels on merged PR: `release:major`, `release:minor`, `release:patch`, `no-release`
+2. semantic PR labels: `breaking-change`, `feature`, `bugfix`, `performance`
+3. conventional commit subjects (`feat`, `fix`, `perf`, `refactor`, `revert`, breaking markers)
+4. fallback patch bump for non-doc/non-ci changes when no explicit signal is present
+
+Release is skipped when the change-set since the latest tag is docs/metadata/CI only (`README`, `CHANGELOG`, `docs/`, `.github/`, chart metadata file), which prevents recursive release loops from metadata sync commits.
+
 ## Documentation
 
 | Document | Contents |
