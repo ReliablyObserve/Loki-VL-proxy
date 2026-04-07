@@ -73,7 +73,7 @@ See [Architecture](docs/architecture.md) for component design, [Observability](d
 
 ## Key Features
 
-### Loki + Grafana Compatibility
+### Loki Compatibility Layer
 See [Getting Started](docs/getting-started.md), [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md), [Loki Compatibility](docs/compatibility-loki.md), and [Logs Drilldown Compatibility](docs/compatibility-drilldown.md).
 
 - **Loki-compatible frontend** -- use the standard Loki datasource, API shape, and WebSocket tail entrypoints against VictoriaLogs without a custom plugin
