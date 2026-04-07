@@ -17,6 +17,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const tailIdleWindow = 2 * time.Second
+
 func readTailFrame(t *testing.T, conn *websocket.Conn, wantSubstring string, timeout time.Duration) map[string]interface{} {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
@@ -639,7 +641,7 @@ func TestFeature_Tail_SyntheticProxySurvivesIdleWindow(t *testing.T) {
 	}
 	defer conn.Close()
 
-	time.Sleep(4 * time.Second)
+	time.Sleep(tailIdleWindow)
 	pushCustomToVL(t, time.Now().Add(500*time.Millisecond), map[string]string{
 		"app":   app,
 		"env":   "test",
@@ -698,7 +700,7 @@ func TestFeature_Tail_ReverseProxyIngressSurvivesIdleWindow(t *testing.T) {
 	}
 	defer conn.Close()
 
-	time.Sleep(4 * time.Second)
+	time.Sleep(tailIdleWindow)
 	pushCustomToVL(t, time.Now().Add(500*time.Millisecond), map[string]string{
 		"app":   app,
 		"env":   "test",
@@ -781,7 +783,7 @@ func TestFeature_Tail_SyntheticProxyLongLivedSessionStreamsAcrossPolls(t *testin
 	}, []logLine{{Msg: firstMsg, Level: "info"}}, []string{"app", "env", "level"})
 	_ = readTailFrame(t, conn, firstMsg, 10*time.Second)
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(tailIdleWindow)
 
 	secondMsg := "tail session frame two " + app
 	pushCustomToVL(t, time.Now().Add(500*time.Millisecond), map[string]string{

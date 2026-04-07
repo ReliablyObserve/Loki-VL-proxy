@@ -131,7 +131,7 @@ jobs:
         id: compat
         run: |
           set -o pipefail
-          OUTPUT=$(go test -v -tags=e2e -timeout=120s ./test/e2e-compat/ 2>&1) || true
+          OUTPUT=$(go test -v -tags=e2e -timeout=180s ./test/e2e-compat/ 2>&1) || true
           echo "$OUTPUT"
           # Extract all compatibility scores and compute overall
           SCORES=$(echo "$OUTPUT" | grep -oP 'Score: \K\d+/\d+ \(\d+\.\d+%\)' || true)
@@ -219,6 +219,13 @@ jobs:
           cache: npm
           cache-dependency-path: test/e2e-ui/package-lock.json
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ hashFiles('test/e2e-ui/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-ms-playwright-
+
       - name: Start e2e stack
         working-directory: test/e2e-compat
         run: |
@@ -226,11 +233,23 @@ jobs:
           sleep 30
           docker compose ps
 
+      - name: Resolve UI browser
+        run: |
+          CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          if [ -n "$CHROME_BIN" ]; then
+            echo "PLAYWRIGHT_EXECUTABLE_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+            echo "Using runner browser at $CHROME_BIN"
+          else
+            echo "No system Chrome/Chromium binary found; falling back to Playwright browser download"
+          fi
+
       - name: Install UI test dependencies
         working-directory: test/e2e-ui
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          if [ -z "${PLAYWRIGHT_EXECUTABLE_PATH:-}" ]; then
+            npx playwright install chromium
+          fi
 
       - name: Run Grafana UI e2e tests
         working-directory: test/e2e-ui

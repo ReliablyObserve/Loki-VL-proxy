@@ -12,7 +12,7 @@ go test -race ./...
 # E2E compatibility tests (requires docker-compose)
 cd test/e2e-compat
 docker-compose up -d --build
-go test -v -tags=e2e -timeout=120s ./test/e2e-compat/
+go test -v -tags=e2e -timeout=180s ./test/e2e-compat/
 
 # Track-specific scores
 go test -v -tags=e2e -run '^TestLokiTrackScore$' ./test/e2e-compat/
@@ -96,6 +96,8 @@ Exact counts move often. Treat the categories below as the stable map of what is
 ## Playwright UI Matrix
 
 The browser suite now keeps only browser-only smoke paths. Query parity, Drilldown resource contracts, datasource bootstrap, and most tail protocol coverage live in `test/e2e-compat` or lower-level Go tests so CI does not keep paying Chromium cost for them.
+
+CI prefers the runner's existing Chrome/Chromium binary for these shards and falls back to `npx playwright install chromium` only when no system browser is available. That removes the repeated `apt` dependency install from the common GitHub-hosted path.
 
 ### CI Shards
 

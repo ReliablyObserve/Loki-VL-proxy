@@ -63,6 +63,8 @@ The GitHub Actions `e2e-ui` job runs as five shards:
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke, URL-state unit coverage, and single-tenant Logs Drilldown smoke |
 | `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown service smoke |
 
+CI prefers the runner's existing Chrome/Chromium binary and only falls back to `npx playwright install chromium` if no system browser is present. That avoids repeated `apt` dependency downloads on normal GitHub-hosted runners while keeping a safe fallback path.
+
 Run any shard locally with the same command CI uses:
 
 ```bash
