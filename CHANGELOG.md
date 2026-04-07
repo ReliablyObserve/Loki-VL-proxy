@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.5] - 2026-04-07
+
 ### CI
 
 - route release metadata sync through a dedicated PR branch with auto-merge instead of direct pushes to `main`, and keep GitHub release notes sourced from changelog section content only

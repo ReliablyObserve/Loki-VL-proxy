@@ -8,7 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/szibis/Loki-VL-proxy)](https://github.com/szibis/Loki-VL-proxy/releases)
 [![Lines of Code](https://img.shields.io/badge/go%20loc-43.3k-blue)](https://github.com/szibis/Loki-VL-proxy)
 [![Tests](https://img.shields.io/badge/tests-1227%20passed-brightgreen)](#tests)
-[![Coverage](https://img.shields.io/badge/coverage-90.0%25-brightgreen)](#tests)
+[![Coverage](https://img.shields.io/badge/coverage-90.1%25-brightgreen)](#tests)
 [![LogQL Coverage](https://img.shields.io/badge/LogQL%20coverage-100%25-brightgreen)](#logql-compatibility)
 [![License](https://img.shields.io/github/license/szibis/Loki-VL-proxy)](LICENSE)
 [![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
