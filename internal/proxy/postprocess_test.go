@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -273,6 +274,25 @@ func TestExtractLogPatterns(t *testing.T) {
 	}
 }
 
+func TestExtractLogPatterns_RespectsTopNLimit(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms"}`,
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 16ms"}`,
+		`{"_time":"2026-04-04T10:00:02Z","_msg":"POST /api/orders 201 42ms"}`,
+		`{"_time":"2026-04-04T10:00:03Z","_msg":"POST /api/orders 201 43ms"}`,
+		`{"_time":"2026-04-04T10:00:04Z","_msg":"POST /api/orders 201 44ms"}`,
+		`{"_time":"2026-04-04T10:00:05Z","_msg":"DELETE /api/users/42 204 5ms"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody, "1m", 2)
+	if len(patterns) != 2 {
+		t.Fatalf("expected top 2 patterns, got %d", len(patterns))
+	}
+	if patterns[0]["pattern"] == patterns[1]["pattern"] {
+		t.Fatalf("expected distinct top patterns, got %#v", patterns)
+	}
+}
+
 func TestExtractLogPatternsRespectsLimit(t *testing.T) {
 	vlBody := []byte(strings.Join([]string{
 		`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}`,
@@ -283,6 +303,49 @@ func TestExtractLogPatternsRespectsLimit(t *testing.T) {
 	patterns := extractLogPatterns(vlBody, "15s", 1)
 	if len(patterns) != 1 {
 		t.Fatalf("expected a single pattern with limit=1, got %d", len(patterns))
+	}
+}
+
+func TestExtractLogPatterns_DefaultAndMaxLimitPaths(t *testing.T) {
+	lines := make([]string, 0, maxPatternResponseLimit+25)
+	for i := 0; i < maxPatternResponseLimit+25; i++ {
+		lines = append(lines, `{"_time":"2026-04-04T10:00:00Z","_msg":"route /item-`+strconv.Itoa(i)+` 200","level":"info"}`)
+	}
+	vlBody := []byte(strings.Join(lines, "\n"))
+
+	defaultLimited := extractLogPatterns(vlBody, "1m", 0)
+	if len(defaultLimited) != 50 {
+		t.Fatalf("expected default limit of 50, got %d", len(defaultLimited))
+	}
+
+	capped := extractLogPatterns(vlBody, "1m", maxPatternResponseLimit+500)
+	if len(capped) != maxPatternResponseLimit {
+		t.Fatalf("expected capped limit of %d, got %d", maxPatternResponseLimit, len(capped))
+	}
+}
+
+func TestExtractLogPatterns_GroupsByBucketAndDetectedLevel(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 15ms","detected_level":"warn"}`,
+		`{"_time":"2026-04-04T10:00:09Z","_msg":"GET /api/users 200 16ms","detected_level":"warn"}`,
+		`{"_time":"2026-04-04T10:00:12Z","_msg":"GET /api/users 200 17ms","level":"info"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody, "10s", 10)
+	if len(patterns) != 2 {
+		t.Fatalf("expected two grouped patterns, got %d", len(patterns))
+	}
+
+	first := patterns[0]
+	if first["level"] != "warn" {
+		t.Fatalf("expected detected_level to win, got %#v", first)
+	}
+	samples, ok := first["samples"].([][]interface{})
+	if !ok || len(samples) != 1 {
+		t.Fatalf("expected warn entries to collapse into one bucket, got %#v", first["samples"])
+	}
+	if got := samples[0][1]; got != 2 {
+		t.Fatalf("expected warn bucket count 2, got %#v", got)
 	}
 }
 

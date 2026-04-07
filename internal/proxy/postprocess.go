@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/heap"
 	"encoding/json"
 	"net"
 	"regexp"
@@ -14,6 +15,15 @@ import (
 
 // ansiEscapeRe matches ANSI escape sequences (color codes, cursor movement, etc.)
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+const maxPatternResponseLimit = 1000
+
+type patternBucket struct {
+	pattern string
+	level   string
+	buckets map[int64]int
+	total   int
+}
 
 // decolorizeStreams strips ANSI escape sequences from all log lines in streams.
 // Implements Loki's `| decolorize` pipe at the proxy level.
@@ -170,12 +180,6 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 	}
 
 	lines := strings.Split(string(vlBody), "\n")
-	type patternBucket struct {
-		pattern string
-		level   string
-		buckets map[int64]int
-		total   int
-	}
 	patterns := make(map[string]*patternBucket)
 
 	for _, line := range lines {
@@ -225,19 +229,43 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 	}
 
 	// Sort by count descending
-	entries := make([]*patternBucket, 0, len(patterns))
-	for _, entry := range patterns {
-		entries = append(entries, entry)
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].total > entries[j].total
-	})
-
 	if limit <= 0 {
 		limit = 50
 	}
-	if len(entries) > limit {
-		entries = entries[:limit]
+	if limit > maxPatternResponseLimit {
+		limit = maxPatternResponseLimit
+	}
+	entryCap := len(patterns)
+	if entryCap > maxPatternResponseLimit {
+		entryCap = maxPatternResponseLimit
+	}
+	entries := make([]*patternBucket, 0, entryCap)
+	if len(patterns) <= limit {
+		for _, entry := range patterns {
+			entries = append(entries, entry)
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].total > entries[j].total
+		})
+	} else {
+		h := &patternBucketHeap{}
+		heap.Init(h)
+		for _, entry := range patterns {
+			if h.Len() < limit {
+				heap.Push(h, entry)
+				continue
+			}
+			if (*h)[0].total < entry.total {
+				(*h)[0] = entry
+				heap.Fix(h, 0)
+			}
+		}
+		for h.Len() > 0 {
+			entries = append(entries, heap.Pop(h).(*patternBucket))
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].total > entries[j].total
+		})
 	}
 
 	result := make([]map[string]interface{}, 0, len(entries))
@@ -263,6 +291,22 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 		result = append(result, item)
 	}
 	return result
+}
+
+type patternBucketHeap []*patternBucket
+
+func (h patternBucketHeap) Len() int           { return len(h) }
+func (h patternBucketHeap) Less(i, j int) bool { return h[i].total < h[j].total }
+func (h patternBucketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *patternBucketHeap) Push(x interface{}) {
+	*h = append(*h, x.(*patternBucket))
+}
+func (h *patternBucketHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 // tokenizeToPattern converts a log line into a pattern by replacing variable parts with <_>.

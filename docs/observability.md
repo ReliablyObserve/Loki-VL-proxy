@@ -18,6 +18,12 @@ The intent is parity, not two separate products. Prometheus scrape and OTLP push
 - client status and query-length outliers
 - process/runtime and host-level health
 
+The proxy also now keeps more expensive metadata paths deliberately warmer than live log queries:
+
+- live query and tail paths stay on short TTLs so fresh log visibility is not stretched unnecessarily
+- slower-changing metadata such as labels, field lists, field values, and patterns are cached more aggressively
+- Drilldown prefers backend-native metadata discovery where it is safe, which reduces proxy-side rescans and lowers CPU pressure on repeated field/label browsing
+
 ## Logs
 
 ### JSON Log Shape
@@ -137,6 +143,12 @@ These flags shape both OTLP metric exports and structured logs:
 | `loki_vl_proxy_uptime_seconds` | gauge | none | process uptime |
 | `loki_vl_proxy_active_requests` | gauge | none | current in-flight requests |
 | `loki_vl_proxy_circuit_breaker_state` | gauge | none | `0=closed`, `1=open`, `2=half-open` |
+
+Operational notes for these hot paths:
+
+- `query_range` and `labels` benchmarks in CI track both cache-hit and cache-bypass behavior
+- multi-tenant read fanout and merged response bodies are capped to keep a single request from exhausting proxy memory
+- synthetic tail keeps bounded dedup state so long-running websocket sessions do not grow without limit
 
 ### Tenant and Client Metrics
 

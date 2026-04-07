@@ -131,7 +131,9 @@ See [Performance Guide](docs/performance.md), [Scaling](docs/scaling.md), [Fleet
 - **Request coalescing** -- N identical queries become 1 backend request (singleflight)
 - **Query normalization** -- sort matchers, collapse whitespace for better cache hit rates
 - **Query-range response caching** -- final Loki-shaped cached responses for hot query paths, including merged multi-tenant reads
+- **Native-first Drilldown discovery** -- prefer VictoriaLogs field names, field values, and streams metadata where it is safe, then fall back to bounded log-line sampling for parsed and derived fields
 - **Synthetic live tail fallback** -- keep `/tail` usable when native backend tail support is missing or disabled
+- **Bounded fanout and merge safety** -- multi-tenant query fanout, merged response size, synthetic-tail dedup state, and expensive metadata scans all have explicit safety caps
 - **Cache-hit and bypass regression gates** -- PR quality checks track CPU, memory, allocations, throughput, and memory growth across hot and uncached paths
 
 ### Operations
@@ -217,7 +219,9 @@ Proxy-side datasource helpers:
 - synthetic `__tenant_id__` labels in merged query results so Explore and Drilldown filters can narrow multi-tenant reads back down
 - multi-tenant Drilldown and Explore level filters such as `detected_level="error" or detected_level="info"` are translated and regression-tested against the live Grafana stack
 - `-tenant.allow-global` to let `X-Scope-OrgID: *` use VL's default `0:0` tenant as a proxy-specific wildcard bypass
+- native-first Drilldown field and label discovery that keeps slower-changing metadata hot in cache while leaving live query and tail paths conservative
 - `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
+- `-tail.mode=auto|native|synthetic` to choose native tail, forced synthetic tail, or the default native-with-fallback behavior
 - `-tail.allowed-origins` when Grafana or another browser client must use `/tail`
 
 Current remaining gaps are tracked in [Known Issues](docs/KNOWN_ISSUES.md). The main active work areas are `/tail` browser/ingress parity, deeper multi-tenant Explore and Drilldown coverage, and further startup-path coverage in `cmd/proxy`.

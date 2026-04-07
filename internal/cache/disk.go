@@ -18,6 +18,20 @@ import (
 
 var dataBucket = []byte("cache")
 
+var gzipWriteBufferPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 4096))
+	},
+}
+
+var gzipWriterPool = sync.Pool{
+	New: func() interface{} {
+		return gzip.NewWriter(io.Discard)
+	},
+}
+
+var gzipReaderPool sync.Pool
+
 // DiskCache is an L2 on-disk cache backed by bbolt (B+ tree).
 // Optimized for sequential I/O patterns (AWS ST1 HDD-friendly):
 //   - Write-back buffer: batches writes to reduce IOPS
@@ -29,6 +43,7 @@ type DiskCache struct {
 	writeBuf    map[string]diskEntry
 	writeMu     sync.Mutex
 	flushSize   int // flush buffer after this many entries
+	maxBytes    int64
 	log         *slog.Logger
 	done        chan struct{} // signals background flusher to stop
 
@@ -88,6 +103,7 @@ func NewDiskCache(cfg DiskCacheConfig) (*DiskCache, error) {
 		compression: cfg.Compression,
 		writeBuf:    make(map[string]diskEntry),
 		flushSize:   flushSize,
+		maxBytes:    cfg.MaxBytes,
 		log:         logger,
 		done:        make(chan struct{}),
 	}
@@ -185,6 +201,13 @@ func (dc *DiskCache) Flush() {
 	dc.writeBuf = make(map[string]diskEntry)
 	dc.writeMu.Unlock()
 
+	currentBytes := int64(0)
+	if dc.maxBytes > 0 {
+		if _, bytesOnDisk := dc.Size(); bytesOnDisk > 0 {
+			currentBytes = bytesOnDisk
+		}
+	}
+
 	_ = dc.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(dataBucket)
 		for key, entry := range buf {
@@ -201,9 +224,16 @@ func (dc *DiskCache) Flush() {
 					continue
 				}
 			}
+			if dc.maxBytes > 0 {
+				if currentBytes+int64(len(encoded)) > dc.maxBytes {
+					dc.Evictions.Add(1)
+					continue
+				}
+			}
 
 			_ = b.Put([]byte(key), encoded)
 			dc.Writes.Add(1)
+			currentBytes += int64(len(encoded))
 		}
 		return nil
 	})
@@ -261,22 +291,54 @@ func (dc *DiskCache) backgroundFlush(interval time.Duration) {
 }
 
 func compress(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	w := gzip.NewWriter(&buf)
+	buf := gzipWriteBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	w := gzipWriterPool.Get().(*gzip.Writer)
+	w.Reset(buf)
 	if _, err := w.Write(data); err != nil {
+		gzipWriterPool.Put(w)
+		gzipWriteBufferPool.Put(buf)
 		return nil, err
 	}
 	if err := w.Close(); err != nil {
+		gzipWriterPool.Put(w)
+		gzipWriteBufferPool.Put(buf)
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	out := append([]byte(nil), buf.Bytes()...)
+	gzipWriterPool.Put(w)
+	if buf.Cap() <= 1<<20 {
+		buf.Reset()
+		gzipWriteBufferPool.Put(buf)
+	}
+	return out, nil
 }
 
 func decompress(data []byte) ([]byte, error) {
-	r, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
+	var (
+		r  *gzip.Reader
+		ok bool
+		err error
+	)
+	if pooled := gzipReaderPool.Get(); pooled != nil {
+		r, ok = pooled.(*gzip.Reader)
+		if ok {
+			err = r.Reset(bytes.NewReader(data))
+		}
 	}
-	defer func() { _ = r.Close() }()
-	return io.ReadAll(r)
+	if !ok || err != nil {
+		r, err = gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+	}
+	out, readErr := io.ReadAll(r)
+	closeErr := r.Close()
+	if closeErr == nil {
+		gzipReaderPool.Put(r)
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	return out, closeErr
 }

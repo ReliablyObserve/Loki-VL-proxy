@@ -72,6 +72,14 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 | `-disk-cache-flush-size` | — | `100` | Flush write buffer after N entries |
 | `-disk-cache-flush-interval` | — | `5s` | Write buffer flush interval |
 
+### Metadata vs Live Query Freshness
+
+The proxy keeps faster-changing paths conservative and slower-changing metadata slightly warmer:
+
+- `query` and `query_range` stay on short TTLs so new log lines remain visible quickly
+- `labels`, `label_values`, `series`, `patterns`, `detected_fields`, and `detected_labels` can cache longer because they change more slowly and are more expensive to rebuild
+- Drilldown now prefers native VictoriaLogs metadata (`field_names`, `field_values`, `streams`) where possible, which reduces the amount of raw log rescanning needed on cache misses
+
 
 ## Multitenancy
 
@@ -101,6 +109,8 @@ The proxy accepts Loki-style multi-tenant query headers on read/query endpoints 
 - `__tenant_id__` matchers in the leading selector narrow the tenant fanout set before backend requests are sent
 - multi-tenant `detected_fields` and `detected_labels` use exact merged value unions, so cardinality does not double-count identical values across tenants
 - Wildcard `*` is not allowed inside a multi-tenant header; use explicit tenant IDs
+- fanout is safety-capped to prevent one request from exploding into an unbounded number of backend queries
+- merged multi-tenant response bodies are also size-capped before they are returned to the client
 
 ### Configuration Examples
 
@@ -209,6 +219,9 @@ kill -HUP $(pidof loki-vl-proxy)
 | `-backend-basic-auth` | — | — | `user:password` for VL basic auth |
 | `-backend-tls-skip-verify` | — | `false` | Skip TLS on VL connection |
 | `-tail.allowed-origins` | — | — | Comma-separated WebSocket Origin allowlist for `/loki/api/v1/tail` |
+| `-tail.mode` | — | `auto` | `auto`, `native`, or `synthetic` for `/tail` streaming mode |
+
+`-tail.mode=auto` prefers native backend tailing and falls back to synthetic polling when native streaming is unavailable. `native` disables the fallback, and `synthetic` forces the polling bridge even when the backend can stream natively.
 
 ## Observability and Admin Surfaces
 

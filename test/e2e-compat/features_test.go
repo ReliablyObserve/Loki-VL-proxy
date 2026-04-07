@@ -605,10 +605,8 @@ func TestFeature_Tail_ReverseProxyIngressStreamsLiveData(t *testing.T) {
 	params.Set("query", fmt.Sprintf(`{app="%s"}`, app))
 	params.Set("start", fmt.Sprintf("%d", now.UnixNano()))
 
-	headers := http.Header{}
-	headers.Set("Origin", "http://127.0.0.1:3002")
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(tailIngressURL, "http")+"/loki/api/v1/tail?"+params.Encode(), headers)
+	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(tailIngressURL, "http")+"/loki/api/v1/tail?"+params.Encode(), nil)
 	if err != nil {
 		t.Fatalf("ingress websocket dial failed: %v (resp=%v)", err, resp)
 	}
@@ -636,10 +634,8 @@ func TestFeature_Tail_ReverseProxyIngressSurvivesIdleWindow(t *testing.T) {
 	params.Set("query", fmt.Sprintf(`{app="%s"}`, app))
 	params.Set("start", fmt.Sprintf("%d", now.UnixNano()))
 
-	headers := http.Header{}
-	headers.Set("Origin", "http://127.0.0.1:3002")
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(tailIngressURL, "http")+"/loki/api/v1/tail?"+params.Encode(), headers)
+	conn, resp, err := dialer.Dial("ws"+strings.TrimPrefix(tailIngressURL, "http")+"/loki/api/v1/tail?"+params.Encode(), nil)
 	if err != nil {
 		t.Fatalf("ingress websocket dial failed: %v (resp=%v)", err, resp)
 	}
