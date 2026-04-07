@@ -69,51 +69,6 @@ flowchart TD
     style L5 fill:#1b4332,stroke:#52b788,color:#fff
 ```
 
-## Request Flow
-
-```mermaid
-flowchart TD
-    subgraph Clients
-        G["Grafana<br/>(Loki datasource)"]
-        M["MCP Servers<br/>LLM Agents"]
-        D["Dashboards<br/>Explore / Drilldown"]
-    end
-
-    subgraph Proxy["Loki-VL-proxy :3100"]
-        RL["Rate Limiter<br/>per-client token bucket<br/>+ global concurrency"]
-        CO["Request Coalescer<br/>singleflight: N queries → 1"]
-        NM["Query Normalizer<br/>sort matchers, collapse ws"]
-        TR["LogQL → LogsQL<br/>Translator"]
-        CA["TTL Cache (L1)<br/>per-endpoint TTLs<br/>max 256MB"]
-        RC["Response Converter<br/>VL NDJSON → Loki streams<br/>VL stats → Prom matrix"]
-        CB["Circuit Breaker<br/>closed→open→half-open"]
-        OB["/metrics + JSON logs"]
-    end
-
-    VL["VictoriaLogs<br/>:9428"]
-
-    G --> RL
-    M --> RL
-    D --> RL
-    RL --> CO
-    CO --> NM
-    NM --> CA
-    CA -->|miss| TR
-    TR --> CB
-    CB --> VL
-    VL --> RC
-    RC --> CA
-    CA -->|hit| G
-
-    style Proxy fill:#1a1a2e,stroke:#e94560,color:#fff
-    style VL fill:#0f3460,stroke:#16213e,color:#fff
-    style RL fill:#533483,stroke:#e94560,color:#fff
-    style CO fill:#533483,stroke:#e94560,color:#fff
-    style CA fill:#0f3460,stroke:#16213e,color:#fff
-    style TR fill:#e94560,stroke:#fff,color:#fff
-    style CB fill:#533483,stroke:#e94560,color:#fff
-```
-
 See [Architecture](docs/architecture.md) for component design, [Observability](docs/observability.md) for metrics/logging/integration guidance, and [Fleet Cache](docs/fleet-cache.md) for distributed caching.
 
 ## Key Features
