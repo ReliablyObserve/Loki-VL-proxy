@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.6] - 2026-04-07
+
+### CI
+
 - require `100%` Loki compatibility on PR quality and dedicated Loki compatibility workflow checks
 - allow release metadata sync PRs to pass changelog gating when they materialize `Unreleased` into a versioned section
 - support `RELEASE_PR_TOKEN` in release workflows so metadata PRs trigger required pull_request checks under branch protection
 - skip PR quality performance smoke on non-perf-sensitive changes to avoid runner-jitter noise in docs/metadata/CI-only PR reports
-- add safe Tier0 compatibility-cache controls, delayed cache benchmarks for `query_range` and Drilldown metadata routes, L2 disk-cache benchmarks, and compose fleet-smoke coverage for warm-hit and cross-proxy peer-cache behavior
-- refresh README and architecture docs around the current cache topology, layered request paths, and fleet-performance validation workflow
 
 ## [0.27.5] - 2026-04-07
 
