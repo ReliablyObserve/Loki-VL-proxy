@@ -41,6 +41,8 @@
 - [x] Extended binary ops (`%`, `^`, `==`, `!=`, `>`, `<`, `>=`, `<=`)
 - [x] Datasource compatibility handlers (`/rules`, `/alerts`, `/config`)
 - [x] Playwright UI e2e tests
+- [x] `/tail` browser and ops coverage (origin policy, native fallback, ingress recovery, upstream `401`/`403`/`5xx` parity)
+- [x] Multi-tenant Explore and Logs Drilldown coverage for `__tenant_id__`, labels, series, and detected field/label browser/resource surfaces
 - [x] Delete API endpoint with safeguards (confirmation, tenant scoping, audit logging)
 - [x] `without()` clause detection and clear error message
 - [x] `IsScalar` supports negative and scientific notation
@@ -66,10 +68,7 @@
 - [x] Peer cache Phase 1 implementation (DNS discovery + peer fetch) (v0.24.0)
 - [x] System metrics in /metrics (CPU, memory, IO, network via /proc) (v0.19.0)
 - [x] Native VL stream selector optimization for known `_stream_fields` (v0.23.0)
-- [ ] Full Loki ruler / alerting API semantics beyond read-path compatibility and backend passthrough
 - [x] PR quality report workflow with coverage, compatibility, and performance delta comments (v0.26.0)
 - [ ] Raise total repository coverage toward 95%+ by extracting `main()` and remaining low-level system readers into smaller testable units
-- [ ] Finish `/tail` browser and ops compatibility: browser CI coverage, reverse-proxy websocket behavior, and backend close/error parity
-- [ ] Expand live multi-tenant Explore and Drilldown coverage for `__tenant_id__`, labels, series, and detected field/label surfaces
 - [ ] Convert more upstream Loki, Logs Drilldown, and VictoriaLogs edge cases into regression tests
 - [ ] Push `cmd/proxy` coverage further by extracting more startup/config/runtime wiring out of `main()`

@@ -1,4 +1,4 @@
-# Known Issues & VL Compatibility Gaps
+# Known Differences, Scope Boundaries, and Follow-Up Work
 
 Last updated: main
 
@@ -13,30 +13,26 @@ All LogQL features are handled. No errors, no silent failures. Minor behavioral 
 | `group_left()`/`group_right()` | Proxy-side one-to-many join via on() | Native one-to-many join validation |
 | Subquery `rate(...)[1h:5m]` | Proxy-side: runs inner query at sub-steps, aggregates | Native nested sub-step evaluation |
 
-## Grafana Datasource Gaps
+## Scope Boundaries
 
-The proxy now supports datasource-facing headers, cookie forwarding, backend timeout control, and optional HTTPS client-certificate verification. Two areas are still intentionally partial:
+The proxy supports datasource-facing headers, cookie forwarding, backend timeout control, and optional HTTPS client-certificate verification. The remaining differences here are intentional scope boundaries rather than missing read-path features:
 
 | Area | Current State |
 |---|---|
-| Alerting / ruler APIs | Read-path compatibility covers legacy Loki YAML rules routes plus Prometheus-style JSON rules and alerts, but Loki ruler write APIs and full rule lifecycle semantics are still incomplete |
+| Alerting / ruler APIs | Read-path compatibility covers legacy Loki YAML rules routes plus Prometheus-style JSON rules and alerts. The proxy is intentionally read-only; rule writes and lifecycle changes stay on the VictoriaLogs / `vmalert` side |
 | Browser-origin tailing | `/loki/api/v1/tail` rejects browser `Origin` headers unless explicitly allowlisted via `-tail.allowed-origins` |
+| Multi-tenant tailing | `/loki/api/v1/tail` remains intentionally single-tenant; Loki-style `tenant-a|tenant-b` fanout and `__tenant_id__` filtering are not supported there |
+| Global wildcard tenant | `X-Scope-OrgID: *` remains a proxy-specific default/global convenience, not a Loki all-tenants shorthand |
 
-## Remaining `/tail` Gaps
+## Coverage Status
 
-`/loki/api/v1/tail` is now covered by handler tests plus compose-backed native and synthetic streaming e2e, but a few real-world gaps remain:
+Current coverage closes several older compatibility concerns that no longer need to stay on the open-gap list:
 
-- browser-path Grafana Explore live-tail recovery is covered, but broader CI coverage for more native-tail failure permutations is still worth expanding
-- backend-native close/error propagation still needs broader coverage for `401`, `403`, and upstream `5xx`
-- `/tail` remains intentionally single-tenant; Loki-style `tenant-a|tenant-b` fanout and `__tenant_id__` filtering are not supported there
+- `/tail` handler tests cover browser-origin rejection, configured origin allowlists, native fallback, and upstream `401`, `403`, and `5xx` failure handling
+- compose and browser e2e cover synthetic tail, ingress tail, reconnect behavior, idle windows, browser-origin rejection, and native-to-ingress recovery
+- multi-tenant coverage includes query fanout, labels, series, `__tenant_id__` narrowing, Drilldown resource contracts, and browser smoke for Explore and Logs Drilldown landing, service, and fields flows
 
-## Remaining Multi-Tenant Gaps
-
-Read/query fanout now supports Loki-style `X-Scope-OrgID: tenant-a|tenant-b` plus `__tenant_id__` selector narrowing, but some edges still need tightening:
-
-- Drilldown and Explore browser coverage for multi-tenant datasources still trails the API/resource coverage
-- merged field/label cardinality across tenants is still approximate in a few Drilldown-oriented surfaces
-- `*` remains a proxy-specific default/global bypass mode, not a Loki-compatible all-tenants shorthand
+Remaining follow-up work is now mostly coverage growth and runtime extraction, which stays tracked in [Roadmap](roadmap.md).
 
 ## Data Model Differences
 
@@ -81,7 +77,7 @@ These were previously listed as gaps and have been resolved:
 - ~~`absent_over_time()`~~ -> Fixed: mapped to `count()`
 - ~~Binary metric expressions~~ -> Fixed: proxy-side evaluation
 - ~~`quantile_over_time()`~~ -> Fixed: mapped to VL `quantile(phi, field)`
-- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Partially fixed: read-path compatibility exists for legacy Loki YAML rules plus Prometheus-style JSON rules and alerts, but full ruler write semantics remain a roadmap item
+- ~~Admin endpoints (`/rules`, `/alerts`)~~ -> Fixed for the read path: the proxy exposes Loki-compatible rules and alerts reads, while writes remain intentionally unsupported because the proxy is read-only
 - ~~Coalescer cross-tenant data leak~~ -> Fixed: tenant included in coalescing key
 - ~~Stats detection false-positive~~ -> Fixed: quote-aware parsing
 - ~~Metrics always recording 200~~ -> Fixed: actual status code captured

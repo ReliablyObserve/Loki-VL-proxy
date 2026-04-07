@@ -108,7 +108,7 @@ CI prefers the runner's existing Chrome/Chromium binary for these shards and fal
 | `explore-core` | `npx playwright test --grep @explore-core` | one default Explore browser smoke |
 | `explore-tail` | `npx playwright test --grep @explore-tail` | browser-only multi-tenant and live-tail recovery |
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke and single-tenant Logs Drilldown smoke |
-| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown service smoke |
+| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | multi-tenant Logs Drilldown landing, service, and fields-view smoke |
 
 ## E2E Compatibility Matrix
 
@@ -172,7 +172,9 @@ Moved out of Playwright:
 
 | Test | Purpose |
 |---|---|
-| `multi-tenant service drilldown loads without browser errors` | multi-tenant service browser smoke |
+| `multi-tenant landing shows service buckets without browser errors` | multi-tenant landing-page browser smoke |
+| `multi-tenant service drilldown loads without browser errors` | multi-tenant service logs browser smoke |
+| `multi-tenant service field view loads detected fields without browser errors` | multi-tenant service fields browser smoke |
 
 ## Compatibility Tracks
 

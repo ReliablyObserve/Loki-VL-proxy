@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/github/license/szibis/Loki-VL-proxy)](LICENSE)
 [![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
 
-HTTP proxy that exposes a **Loki-compatible API** on the frontend and translates requests to **VictoriaLogs** on the backend. Use Grafana's native Loki datasource (Explore, Drilldown, dashboards) with VictoriaLogs -- no custom datasource plugin needed.
+HTTP proxy that exposes a **Loki-compatible read API** on the frontend and translates requests to **VictoriaLogs** on the backend. Use Grafana's native Loki datasource (Explore, Drilldown, dashboards) with VictoriaLogs -- no custom datasource plugin needed.
 
 **Single static binary**, ~10MB Docker image, zero external runtime dependencies.
 
@@ -208,15 +208,13 @@ Proxy-side datasource helpers:
 - `-tail.mode=auto|native|synthetic` to choose native tail, forced synthetic tail, or the default native-with-fallback behavior
 - `-tail.allowed-origins` when Grafana or another browser client must use `/tail`
 
-Current remaining gaps are tracked in [Known Issues](docs/KNOWN_ISSUES.md):
+Current scope boundaries and follow-up hardening are tracked in [Known Issues](docs/KNOWN_ISSUES.md):
 
-- Loki ruler write semantics still incomplete
-- `/tail` parity gaps still remain
-- deeper multi-tenant Explore and Drilldown coverage is still needed
-- some merged-tenant Drilldown metadata remains approximate
-- coverage and test hardening is still open
-- `*` tenant bypass remains proxy-specific
+- rules and alerts are exposed on read endpoints only; writes stay on the VictoriaLogs / `vmalert` side by design
+- browser `/tail` access requires explicit `-tail.allowed-origins`
 - `/tail` remains single-tenant
+- `X-Scope-OrgID: *` remains a proxy-specific default/global convenience
+- coverage and test hardening is still open
 
 ### Grafana Datasource for Multi-Tenant Read Fanout
 
