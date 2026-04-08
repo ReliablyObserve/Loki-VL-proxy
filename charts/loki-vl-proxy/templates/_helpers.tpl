@@ -87,3 +87,39 @@ Default disk cache path when persistence is enabled.
 {{- define "loki-vl-proxy.diskCachePath" -}}
 {{- printf "%s/%s" (trimSuffix "/" .Values.persistence.mountPath) .Values.persistence.fileName -}}
 {{- end }}
+
+{{/*
+Resolve effective GOMEMLIMIT value.
+Priority:
+1) explicit .Values.goMemLimit
+2) computed percentage of .Values.resources.limits.memory
+The computed value is emitted as bytes.
+*/}}
+{{- define "loki-vl-proxy.goMemLimitValue" -}}
+{{- if .Values.goMemLimit -}}
+{{- .Values.goMemLimit -}}
+{{- else -}}
+{{- $raw := toString (default "" .Values.resources.limits.memory) -}}
+{{- $pct := int64 (default 0 .Values.goMemLimitPercent) -}}
+{{- $re := "^([0-9]+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$" -}}
+{{- if and $raw (gt $pct 0) (le $pct 100) (regexMatch $re $raw) -}}
+{{- $num := int64 (regexReplaceAll $re $raw "${1}") -}}
+{{- $unit := regexReplaceAll $re $raw "${2}" -}}
+{{- $multiplier := int64 1 -}}
+{{- if eq $unit "Ki" -}}{{- $multiplier = 1024 -}}{{- end -}}
+{{- if eq $unit "Mi" -}}{{- $multiplier = 1048576 -}}{{- end -}}
+{{- if eq $unit "Gi" -}}{{- $multiplier = 1073741824 -}}{{- end -}}
+{{- if eq $unit "Ti" -}}{{- $multiplier = 1099511627776 -}}{{- end -}}
+{{- if eq $unit "Pi" -}}{{- $multiplier = 1125899906842624 -}}{{- end -}}
+{{- if eq $unit "Ei" -}}{{- $multiplier = 1152921504606846976 -}}{{- end -}}
+{{- if eq $unit "K" -}}{{- $multiplier = 1000 -}}{{- end -}}
+{{- if eq $unit "M" -}}{{- $multiplier = 1000000 -}}{{- end -}}
+{{- if eq $unit "G" -}}{{- $multiplier = 1000000000 -}}{{- end -}}
+{{- if eq $unit "T" -}}{{- $multiplier = 1000000000000 -}}{{- end -}}
+{{- if eq $unit "P" -}}{{- $multiplier = 1000000000000000 -}}{{- end -}}
+{{- if eq $unit "E" -}}{{- $multiplier = 1000000000000000000 -}}{{- end -}}
+{{- $bytes := mul $num $multiplier -}}
+{{- div (mul $bytes $pct) 100 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
