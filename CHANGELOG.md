@@ -18,11 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - make chart `goMemLimitPercent` effective at runtime by computing and injecting `GOMEMLIMIT` from `resources.limits.memory` when `goMemLimit` is not explicitly set
+- expand the packaged PrometheusRule set with backend-latency and client-bad-request alerts, and point each alert to dedicated per-alert runbook files
+- add a native VictoriaLogs offenders dashboard focused on tenant/client/cluster/env filtering to keep operator visibility when Loki/proxy query paths are degraded
 
 ### Documentation
 
 - update values and performance docs with explicit `goMemLimitPercent` behavior, precedence, supported units, and runtime output format
 - reorganize README LogQL compatibility into native-VictoriaLogs vs proxy-compatibility sections with direct VictoriaLogs references, expand documentation index links, and clarify read-only rules/alerts boundaries with `vmalert` and VictoriaLogs docs
+- split runbooks into `docs/runbooks/` per-alert files, add deployment/scaling best-practice guidance, and document dashboard roles in README/operations/observability
+
+### CI
+
+- make observability asset sync/check support multiple dashboard JSON files under `dashboard/*.json` and chart copies under `charts/loki-vl-proxy/dashboards/*.json`
 
 ## [0.27.7] - 2026-04-08
 

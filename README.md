@@ -132,9 +132,10 @@ Loki-VL-proxy ships a production-ready operations pack so teams can deploy, obse
 
 | Asset | Location | Why it matters |
 |---|---|---|
-| Dashboard | [`dashboard/loki-vl-proxy.json`](dashboard/loki-vl-proxy.json) | Fast visibility for availability, latency, cache efficiency, tenant load, and backend pressure |
+| Operations dashboard | [`dashboard/loki-vl-proxy.json`](dashboard/loki-vl-proxy.json) | Request, error, latency, cache, and tenant health from proxy metrics |
+| Offenders dashboard (native VL) | [`dashboard/loki-vl-proxy-offenders.json`](dashboard/loki-vl-proxy-offenders.json) | Tenant/client/query offenders from logs stored in VictoriaLogs with built-in `tenant`, `client`, `cluster`, and `env` filters |
 | Alert rules | [`alerting/loki-vl-proxy-prometheusrule.yaml`](alerting/loki-vl-proxy-prometheusrule.yaml) | Standardized SRE labels and actionable annotations with per-alert runbook links |
-| SRE runbooks | [`docs/runbooks/alerts.md`](docs/runbooks/alerts.md) | Concrete incident steps for each shipped alert, from triage to recovery verification |
+| SRE runbooks | [`docs/runbooks/alerts.md`](docs/runbooks/alerts.md) | Index plus dedicated per-alert incident procedures and deployment best practices |
 
 Chart templates consume synced copies of these assets from `charts/loki-vl-proxy/{dashboards,alerting}` and CI verifies they stay aligned.
 
@@ -417,6 +418,7 @@ Release is skipped only when the change-set since the latest tag is docs/metadat
 | [Scaling](docs/scaling.md) | Capacity planning, resource projections, per-tenant/client metrics, Helm sizing |
 | [Operations](docs/operations.md) | Deployment, performance tuning, troubleshooting |
 | [Alert Runbooks](docs/runbooks/alerts.md) | SRE incident runbooks linked from alert annotations |
+| [Deployment Best Practices](docs/runbooks/deployment-best-practices.md) | Scaling/deployment defaults that prevent latency, error, and availability incidents |
 | [Testing](docs/testing.md) | Test categories, running tests, fuzz testing |
 | [Rules And Alerts Migration](docs/rules-alerts-migration.md) | Converting Loki rule files and exposing vmalert reads via Loki-compatible endpoints |
 | [Compatibility Matrix](docs/compatibility-matrix.md) | Separate Loki, Drilldown, and VictoriaLogs compatibility tracks |
