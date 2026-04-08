@@ -116,9 +116,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "tags<<EOF"
-            echo "ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            echo "ghcr.io/${OWNER_LC}/loki-vl-proxy:${VERSION}"
             if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
               echo "docker.io/reliablyobserve/loki-vl-proxy:${VERSION}"
             fi
@@ -139,7 +140,8 @@ jobs:
       - name: Publish Helm chart to GHCR
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${OWNER_LC}/charts"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
