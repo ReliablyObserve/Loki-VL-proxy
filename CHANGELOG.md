@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.7] - 2026-04-08
+
 ### Features
 
 - add safe Tier0 compatibility-cache controls and route-level guardrails for cacheable Loki read endpoints
