@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- add native VictoriaLogs offenders dashboard with tenant/client/cluster/env filtering for incident analysis independent of Loki-proxy query health
+- expand packaged PrometheusRule coverage with backend-latency and client bad-request burst alerts linked to dedicated runbooks
+
+### Documentation
+
+- split runbooks into per-alert files under `docs/runbooks/` and add deployment/scaling best-practice guidance for prevention-focused operations
+- document dashboard purpose mapping in README/operations/observability and move release-process details to `docs/release-info.md`
+
+### CI
+
+- enforce canonical dashboard/alert asset sync in CI and support syncing multiple dashboard JSON files into chart assets
+
 ## [0.27.8] - 2026-04-08
 
 ### CI
