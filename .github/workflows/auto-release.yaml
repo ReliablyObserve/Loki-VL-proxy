@@ -190,7 +190,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
+          token: ${{ github.token }}
 
       - uses: actions/setup-go@v5
         with:
@@ -363,11 +363,38 @@ jobs:
           git commit -m "docs: sync release metadata for v${VERSION}"
           git push origin "${BRANCH}" --force
 
+      - name: Resolve metadata PR auth token
+        id: metadata-auth
+        if: steps.metadata.outputs.has_changes == 'true'
+        env:
+          RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+          GH_FALLBACK_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TOKEN="${GH_FALLBACK_TOKEN}"
+          SOURCE="github.token"
+          if [ -n "${RELEASE_PR_TOKEN:-}" ]; then
+            STATUS="$(curl -sS -o /tmp/release-pr-token-check.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${RELEASE_PR_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}" || echo "000")"
+            if [ "${STATUS}" = "200" ]; then
+              TOKEN="${RELEASE_PR_TOKEN}"
+              SOURCE="RELEASE_PR_TOKEN"
+            else
+              echo "::warning::RELEASE_PR_TOKEN cannot access ${GITHUB_REPOSITORY} (HTTP ${STATUS}); falling back to github.token."
+            fi
+          else
+            echo "::notice::RELEASE_PR_TOKEN not configured; using github.token."
+          fi
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "source=${SOURCE}" >> "$GITHUB_OUTPUT"
+
       - name: Create or update release metadata PR
         id: metadata-pr
         if: steps.metadata.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.metadata-auth.outputs.token }}
           VERSION: ${{ steps.meta.outputs.version }}
           BRANCH: ${{ steps.metadata.outputs.branch }}
         run: |
@@ -392,7 +419,7 @@ jobs:
       - name: Enable auto-merge for release metadata PR
         if: steps.metadata-pr.outputs.number != ''
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.metadata-auth.outputs.token }}
         run: |
           set -euo pipefail
           gh pr merge "${{ steps.metadata-pr.outputs.number }}" \
