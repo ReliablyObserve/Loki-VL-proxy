@@ -1,9 +1,9 @@
 # Loki-VL-proxy
 
 [![CI](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml)
-[![Loki Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml)
-[![Drilldown Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml)
-[![VictoriaLogs Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml)
+[![Loki Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml/badge.svg?event=pull_request)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml)
+[![Drilldown Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml/badge.svg?event=pull_request)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml)
+[![VictoriaLogs Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml/badge.svg?event=pull_request)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/szibis/Loki-VL-proxy)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/szibis/Loki-VL-proxy)](https://github.com/szibis/Loki-VL-proxy/releases)
 [![Lines](https://sloc.xyz/github/szibis/Loki-VL-proxy/?category=lines)](https://github.com/szibis/Loki-VL-proxy)
