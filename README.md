@@ -1,9 +1,9 @@
 # Loki-VL-proxy
 
-[![CI](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml)
-[![Loki Compatibility Layer](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml)
-[![Logs Drilldown Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml)
-[![VictoriaLogs Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml)
+[![CI](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/ci.yaml)
+[![Loki Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-loki.yaml)
+[![Drilldown Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-drilldown.yaml)
+[![VictoriaLogs Compatibility](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/compat-vl.yaml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/szibis/Loki-VL-proxy)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/szibis/Loki-VL-proxy)](https://github.com/szibis/Loki-VL-proxy/releases)
 [![Lines](https://sloc.xyz/github/szibis/Loki-VL-proxy/?category=lines)](https://github.com/szibis/Loki-VL-proxy)
@@ -11,7 +11,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-90.0%25-brightgreen)](#tests)
 [![LogQL Coverage](https://img.shields.io/badge/LogQL%20coverage-100%25-brightgreen)](#logql-compatibility)
 [![License](https://img.shields.io/github/license/szibis/Loki-VL-proxy)](LICENSE)
-[![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
+[![CodeQL](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg?branch=main&event=push)](https://github.com/szibis/Loki-VL-proxy/actions/workflows/codeql.yaml)
 
 HTTP proxy that exposes a **Loki-compatible read API** on the frontend and translates requests to **VictoriaLogs** on the backend. Use Grafana's native Loki datasource (Explore, Drilldown, dashboards) with VictoriaLogs -- no custom datasource plugin needed.
 

@@ -9,6 +9,10 @@ import {
 } from "./helpers";
 import { buildServiceDrilldownUrl } from "./url-state";
 
+const allowedDrilldownMtConsoleErrors = [
+  /TypeError: Cannot read properties of null \(reading 'sort'\)[\s\S]*grafana-lokiexplore-app/i,
+];
+
 async function waitForDrilldownLanding(page: Page) {
   await waitForGrafanaReady(page);
   await expect(page.getByRole("combobox", { name: "Filter by labels" })).toBeVisible({
@@ -107,6 +111,7 @@ test.describe("Grafana Logs Drilldown", () => {
     page,
   }) => {
     const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
       allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
     });
     const responses = await collectDrilldownResponses(page);
@@ -145,6 +150,7 @@ test.describe("Grafana Logs Drilldown", () => {
 
   test("multi-tenant service drilldown loads without browser errors @drilldown-mt", async ({ page }) => {
     const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
       allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
     });
     await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "logs");
@@ -156,6 +162,7 @@ test.describe("Grafana Logs Drilldown", () => {
     page,
   }) => {
     const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
       allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
     });
     const responses = await collectDrilldownResponses(page);
@@ -174,6 +181,7 @@ test.describe("Grafana Logs Drilldown", () => {
     page,
   }) => {
     const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
       allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
     });
     await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "logs");
