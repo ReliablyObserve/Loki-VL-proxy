@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI
+
+- stabilize PR performance smoke by running benchmarks/load in an isolated phase after functional checks, increasing benchmark sample depth (`-benchtime=2s`, `-count=7`), and tightening perf regression thresholds to better flag real cache-bypass regressions
+- harden release publishing for org moves by normalizing GHCR owner names to lowercase and keeping metadata-sync invocation compatible with tagged release script versions
+- add fallback manual-release notes when a tag lacks a versioned changelog section, so republish runs can still proceed
+
+### Features
+
+- make chart `goMemLimitPercent` effective at runtime by computing and injecting `GOMEMLIMIT` from `resources.limits.memory` when `goMemLimit` is not explicitly set
+
+### Documentation
+
+- update values and performance docs with explicit `goMemLimitPercent` behavior, precedence, supported units, and runtime output format
+
 ## [0.27.7] - 2026-04-08
 
 ### Features
