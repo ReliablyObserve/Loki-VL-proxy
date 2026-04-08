@@ -37,9 +37,9 @@ docker run --rm \
 | File | Coverage |
 |------|----------|
 | `datasource.spec.ts` | Grafana datasource Save & Test smoke |
-| `explore.spec.ts` | `@explore-core` default Explore smoke plus `@explore-tail` multi-tenant and live-tail browser flows |
+| `explore.spec.ts` | `@explore-core` default Explore smoke plus `@explore-tail` multi-tenant exact/negative `__tenant_id__` flows and live-tail browser flows |
 | `drilldown.spec.ts` | `@drilldown-core` Explore detail-panel smoke |
-| `logs-drilldown.spec.ts` | `@drilldown-core` Logs Drilldown landing/service smoke plus `@drilldown-mt` one multi-tenant service smoke |
+| `logs-drilldown.spec.ts` | `@drilldown-core` Logs Drilldown landing/service smoke plus `@drilldown-mt` multi-tenant landing, service, fields-view, and URL reload filter persistence smoke |
 | `url-state.spec.ts` | pure URL/state builder tests for reloadable Explore and Drilldown URLs |
 
 Most non-browser assertions moved out of Playwright:
@@ -57,9 +57,9 @@ The GitHub Actions `e2e-ui` job runs as five shards:
 |------|---------|----------|
 | `datasource` | `npx playwright test tests/datasource.spec.ts` | datasource settings smoke |
 | `explore-core` | `npx playwright test --grep @explore-core` | one default Explore smoke |
-| `explore-tail` | `npx playwright test --grep @explore-tail` | multi-tenant Explore plus browser live-tail recovery |
+| `explore-tail` | `npx playwright test --grep @explore-tail` | multi-tenant Explore exact/negative tenant filtering plus browser live-tail recovery |
 | `drilldown-core` | `npx playwright test --grep @drilldown-core` | Explore detail-panel smoke, URL-state unit coverage, and single-tenant Logs Drilldown smoke |
-| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | one multi-tenant Logs Drilldown service smoke |
+| `drilldown-multitenant` | `npx playwright test --grep @drilldown-mt` | multi-tenant Logs Drilldown landing/service/fields smoke plus filter persistence from URL state |
 
 CI prefers the runner's existing Chrome/Chromium binary and only falls back to `npx playwright install chromium` if no system browser is present. That avoids repeated `apt` dependency downloads on normal GitHub-hosted runners while keeping a safe fallback path.
 

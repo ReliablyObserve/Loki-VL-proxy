@@ -614,6 +614,19 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		if len(fields) == 0 {
 			t.Fatalf("expected multi-tenant detected_fields through Grafana resource, got %v", fieldsResp)
 		}
+		methodCardinality := -1
+		for _, item := range fields {
+			field := item.(map[string]interface{})
+			if field["label"] != "method" {
+				continue
+			}
+			if card, ok := field["cardinality"].(float64); ok {
+				methodCardinality = int(card)
+			}
+		}
+		if methodCardinality <= 0 {
+			t.Fatalf("expected multi-tenant detected_fields cardinality to stay non-zero for method, got %v", fieldsResp)
+		}
 
 		labelsResp := getJSON(t, grafanaURL+"/api/datasources/uid/"+multiUID+"/resources/detected_labels?"+params.Encode())
 		labels, _ := labelsResp["detectedLabels"].([]interface{})

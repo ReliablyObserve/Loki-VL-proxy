@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,18 @@ func TestPeerCache_StaticDiscovery(t *testing.T) {
 	defer pc.Close()
 	if pc.PeerCount() != 2 {
 		t.Errorf("expected 2 peers (excluding self), got %d", pc.PeerCount())
+	}
+}
+
+func TestPeerCache_SetAndGossipHaveKey_NoOp(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{SelfAddr: "10.0.0.1:3100"})
+	defer pc.Close()
+
+	pc.Set("key", []byte("value"))
+	pc.GossipHaveKey("key")
+
+	if stats := pc.Stats(); stats["peer_hits"].(int64) != 0 || stats["peer_misses"].(int64) != 0 || stats["peer_errors"].(int64) != 0 {
+		t.Fatalf("expected no-op methods to leave stats unchanged, got %+v", stats)
 	}
 }
 
@@ -124,6 +137,37 @@ func TestPeerCache_ServeHTTP_Miss(t *testing.T) {
 	pc.ServeHTTP(w, r, localCache)
 	if w.Code != 404 {
 		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestPeerCache_ServeHTTP_MissingKey(t *testing.T) {
+	localCache := New(60*time.Second, 1000)
+	defer localCache.Close()
+
+	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost"})
+	defer pc.Close()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_cache/get", nil)
+	pc.ServeHTTP(w, r, localCache)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing key, got %d", w.Code)
+	}
+}
+
+func TestPeerCache_ServeHTTP_RejectsNearExpiryEntry(t *testing.T) {
+	localCache := New(60*time.Second, 1000)
+	defer localCache.Close()
+	localCache.SetWithTTL("near-expiry", []byte("hello"), time.Second)
+
+	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost"})
+	defer pc.Close()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_cache/get?key=near-expiry", nil)
+	pc.ServeHTTP(w, r, localCache)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected near-expiry cache entry to be treated as miss, got %d", w.Code)
 	}
 }
 
@@ -235,6 +279,81 @@ func TestPeerCache_CircuitBreaker(t *testing.T) {
 	if pc.peerAllowed("dead:9999") {
 		t.Error("should be circuit-broken after failures")
 	}
+}
+
+func TestDiscoverDNS_UsesLookupHostAndSortsPeers(t *testing.T) {
+	oldLookupHost := lookupHost
+	lookupHost = func(name string) ([]string, error) {
+		if name != "proxy-headless.ns.svc.cluster.local" {
+			t.Fatalf("unexpected lookup name %q", name)
+		}
+		return []string{"10.0.0.3", "10.0.0.1", "10.0.0.2"}, nil
+	}
+	t.Cleanup(func() { lookupHost = oldLookupHost })
+
+	peers, err := discoverDNS("proxy-headless.ns.svc.cluster.local", 3100)
+	if err != nil {
+		t.Fatalf("discoverDNS: %v", err)
+	}
+
+	want := []string{"10.0.0.1:3100", "10.0.0.2:3100", "10.0.0.3:3100"}
+	if strings.Join(peers, ",") != strings.Join(want, ",") {
+		t.Fatalf("unexpected peers: got %v want %v", peers, want)
+	}
+}
+
+func TestDiscoverDNS_WrapsLookupErrors(t *testing.T) {
+	oldLookupHost := lookupHost
+	lookupHost = func(string) ([]string, error) {
+		return nil, errors.New("dns boom")
+	}
+	t.Cleanup(func() { lookupHost = oldLookupHost })
+
+	_, err := discoverDNS("proxy-headless.ns.svc.cluster.local", 3100)
+	if err == nil || !strings.Contains(err.Error(), `DNS lookup "proxy-headless.ns.svc.cluster.local": dns boom`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPeerCache_DiscoveryLoop_RefreshesPeers(t *testing.T) {
+	pc := NewPeerCache(PeerConfig{SelfAddr: "10.0.0.1:3100"})
+	defer pc.Close()
+
+	updates := make(chan struct{}, 1)
+	pc.discoveryInt = 10 * time.Millisecond
+	pc.discoveryFn = func() ([]string, error) {
+		select {
+		case updates <- struct{}{}:
+		default:
+		}
+		return []string{"10.0.0.1:3100", "10.0.0.2:3100"}, nil
+	}
+
+	go pc.discoveryLoop()
+
+	select {
+	case <-updates:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("discovery loop did not trigger")
+	}
+
+	requireEventually(t, 200*time.Millisecond, func() bool {
+		peers := pc.Peers()
+		return len(peers) == 2 && peers[1] == "10.0.0.2:3100"
+	})
+}
+
+func requireEventually(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not satisfied before timeout")
 }
 
 func TestPeerCache_Singleflight(t *testing.T) {
@@ -361,6 +480,86 @@ func TestPeerCache_LBScenario_ThreePeers(t *testing.T) {
 		}
 	} else if ownerIdx >= 0 {
 		t.Logf("owner is peer %d — data stored on peer 0 won't be found by others (correct: non-owner data is local only)", ownerIdx)
+	}
+}
+
+func TestPeerCache_ThreePeers_ShadowCopiesAvoidRepeatedOwnerFetches(t *testing.T) {
+	caches := make([]*Cache, 3)
+	pcs := make([]*PeerCache, 3)
+	servers := make([]*httptest.Server, 3)
+	serverCalls := make([]atomic.Int64, 3)
+
+	for i := range caches {
+		caches[i] = New(60*time.Second, 1000)
+	}
+
+	for i := range servers {
+		idx := i
+		servers[i] = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			serverCalls[idx].Add(1)
+			pcs[idx].ServeHTTP(w, r, caches[idx])
+		}))
+	}
+
+	addrs := make([]string, len(servers))
+	for i := range servers {
+		addrs[i] = servers[i].Listener.Addr().String()
+	}
+	peerList := strings.Join(addrs, ",")
+
+	for i := range pcs {
+		pcs[i] = NewPeerCache(PeerConfig{
+			SelfAddr:      addrs[i],
+			DiscoveryType: "static",
+			StaticPeers:   peerList,
+			Timeout:       2 * time.Second,
+		})
+		caches[i].SetL3(pcs[i])
+	}
+
+	defer func() {
+		for i := range servers {
+			servers[i].Close()
+			pcs[i].Close()
+			caches[i].Close()
+		}
+	}()
+
+	testKey := "query_range:team-a:{app=\"api\"}:1:2:15"
+	owner := pcs[0].ring.get(testKey)
+	ownerIdx := -1
+	for i, addr := range addrs {
+		if addr == owner {
+			ownerIdx = i
+			break
+		}
+	}
+	if ownerIdx < 0 {
+		t.Fatal("failed to resolve cache owner")
+	}
+
+	caches[ownerIdx].Set(testKey, []byte("vl-response-data"))
+
+	for round := 0; round < 30; round++ {
+		for i := range caches {
+			value, ok := caches[i].Get(testKey)
+			if !ok || string(value) != "vl-response-data" {
+				t.Fatalf("round %d peer %d failed cache lookup: ok=%v value=%q", round, i, ok, string(value))
+			}
+		}
+	}
+
+	if got := serverCalls[ownerIdx].Load(); got > 2 {
+		t.Fatalf("expected at most one peer fetch per non-owner after shadow copies warm, owner saw %d peer requests", got)
+	}
+
+	for i := range caches {
+		if i == ownerIdx {
+			continue
+		}
+		if _, ok := caches[i].Get(testKey); !ok {
+			t.Fatalf("expected peer %d to retain a shadow copy after warm-up", i)
+		}
 	}
 }
 

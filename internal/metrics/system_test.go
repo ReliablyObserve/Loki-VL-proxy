@@ -1,11 +1,48 @@
 package metrics
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func withSyntheticProcFS(t *testing.T, files map[string]string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	for rel, content := range files {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	return root
+}
+
+func setSyntheticProcEnv(t *testing.T, root string) {
+	t.Helper()
+
+	oldRoot := procRoot
+	oldReadFile := procReadFile
+	oldReadDir := procReadDir
+	oldGOOS := systemGOOS
+	procRoot = root
+	procReadFile = os.ReadFile
+	procReadDir = os.ReadDir
+	systemGOOS = "linux"
+	t.Cleanup(func() {
+		procRoot = oldRoot
+		procReadFile = oldReadFile
+		procReadDir = oldReadDir
+		systemGOOS = oldGOOS
+	})
+}
 
 func TestSystemMetrics_WritePrometheus_NoPanic(t *testing.T) {
 	sm := NewSystemMetrics()
@@ -184,6 +221,97 @@ func TestCountOpenFDs(t *testing.T) {
 	}
 	if got != -1 {
 		t.Fatalf("expected unsupported platforms to return -1, got %d", got)
+	}
+}
+
+func TestProcReaders_UseSyntheticProcFS(t *testing.T) {
+	root := withSyntheticProcFS(t, map[string]string{
+		"stat":         "cpu  100 5 20 300 7 0 1 2\n",
+		"meminfo":      "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
+		"self/status":  "Name:\tproxy\nVmRSS:\t123 kB\n",
+		"diskstats":    "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
+		"net/dev":      "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 11 0 0 0 0 0 0 0 22 0 0 0 0 0 0 0\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
+		"pressure/cpu": "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
+		"self/fd/0":    "",
+		"self/fd/1":    "",
+		"self/fd/2":    "",
+	})
+	setSyntheticProcEnv(t, root)
+
+	cpu, err := readCPUStat()
+	if err != nil {
+		t.Fatalf("readCPUStat: %v", err)
+	}
+	if cpu.user != 100 || cpu.idle != 300 {
+		t.Fatalf("unexpected cpu stat: %+v", cpu)
+	}
+
+	total, avail, free := readMemInfo()
+	if total != 1024*1024 || avail != 512*1024 || free != 128*1024 {
+		t.Fatalf("unexpected meminfo values: total=%d avail=%d free=%d", total, avail, free)
+	}
+
+	if rss := readProcessRSS(); rss != 123*1024 {
+		t.Fatalf("unexpected rss value: %d", rss)
+	}
+
+	readBytes, writeBytes := readDiskIO()
+	if readBytes != 6*512 || writeBytes != 10*512 {
+		t.Fatalf("unexpected disk io values: read=%d write=%d", readBytes, writeBytes)
+	}
+
+	rxBytes, txBytes := readNetIO()
+	if rxBytes != 101 || txBytes != 202 {
+		t.Fatalf("unexpected net io values: rx=%d tx=%d", rxBytes, txBytes)
+	}
+
+	some10, some60, some300, full10, full60, full300 := readPSI("cpu")
+	if some10 != 1 || some60 != 2 || some300 != 3 || full10 != 4 || full60 != 5 || full300 != 6 {
+		t.Fatalf("unexpected psi values: %g %g %g %g %g %g", some10, some60, some300, full10, full60, full300)
+	}
+
+	if fds := countOpenFDs(); fds != 3 {
+		t.Fatalf("expected 3 synthetic fds, got %d", fds)
+	}
+}
+
+func TestSystemMetrics_WritePrometheus_UsesSyntheticLinuxProcFS(t *testing.T) {
+	root := withSyntheticProcFS(t, map[string]string{
+		"stat":            "cpu  150 5 40 400 10 0 2 3\n",
+		"meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
+		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
+		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
+		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
+		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
+		"pressure/memory": "some avg10=0.50 avg60=1.00 avg300=1.50 total=10\nfull avg10=2.00 avg60=2.50 avg300=3.00 total=20\n",
+		"pressure/io":     "some avg10=0.25 avg60=0.50 avg300=0.75 total=10\nfull avg10=1.00 avg60=1.25 avg300=1.50 total=20\n",
+		"self/fd/0":       "",
+		"self/fd/1":       "",
+	})
+	setSyntheticProcEnv(t, root)
+
+	sm := &SystemMetrics{
+		prevCPU:  cpuStat{user: 100, nice: 5, system: 20, idle: 300, iowait: 7, irq: 0, softirq: 1, steal: 2},
+		prevTime: time.Now().Add(-1 * time.Second),
+	}
+
+	var sb strings.Builder
+	sm.WritePrometheus(&sb)
+	output := sb.String()
+
+	for _, metric := range []string{
+		"node_cpu_usage_ratio",
+		"node_memory_total_bytes",
+		"node_disk_read_bytes_total",
+		"node_network_receive_bytes_total",
+		"node_pressure_cpu_some_ratio",
+		"node_pressure_memory_full_ratio",
+		"process_open_fds",
+		"process_resident_memory_bytes",
+	} {
+		if !strings.Contains(output, metric) {
+			t.Fatalf("missing %q in output:\n%s", metric, output)
+		}
 	}
 }
 

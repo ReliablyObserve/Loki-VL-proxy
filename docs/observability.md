@@ -24,6 +24,15 @@ The proxy also now keeps more expensive metadata paths deliberately warmer than 
 - slower-changing metadata such as labels, field lists, field values, and patterns are cached more aggressively
 - Drilldown prefers backend-native metadata discovery where it is safe, which reduces proxy-side rescans and lowers CPU pressure on repeated field/label browsing
 
+## Observability Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /ready` | Readiness probe (checks backend `/health` and circuit-breaker state) |
+| `GET /metrics` | Prometheus text exposition (`-server.register-instrumentation`) |
+| `GET /debug/queries` | Query analytics endpoint (disabled by default, `-server.enable-query-analytics`) |
+| `GET /debug/pprof/` | Go pprof profiling endpoints (disabled by default, `-server.enable-pprof`) |
+
 ## Logs
 
 ### JSON Log Shape

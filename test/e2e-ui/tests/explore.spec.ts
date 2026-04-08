@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
   PROXY_DS,
   PROXY_MULTI_DS,
@@ -35,6 +35,23 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     await runQuery(page);
 
     await assertLogsVisible(page);
+    await guards.assertClean();
+  });
+
+  test("multi-tenant negative regex excludes fake tenant in Explore @explore-tail", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page, {
+      allowedAlertErrors: [/^Unknown error$/i],
+    });
+
+    await openExplore(page, PROXY_MULTI_DS, '{app="api-gateway", __tenant_id__!~"f.*"}');
+    await waitForGrafanaReady(page);
+
+    await runQuery(page);
+    await assertLogsVisible(page);
+    const queryText = await exploreQueryText(page);
+    expect(queryText).toContain('__tenant_id__!~"f.*"');
     await guards.assertClean();
   });
 
@@ -126,3 +143,10 @@ test.describe("Grafana Explore — Proxy Datasource", () => {
     await recoveryGuards.assertClean();
   });
 });
+
+function exploreQueryText(page: Page): Promise<string> {
+  return page
+    .locator('[data-testid="query-editor-rows"], [data-testid="query-editor-row"]')
+    .first()
+    .innerText();
+}

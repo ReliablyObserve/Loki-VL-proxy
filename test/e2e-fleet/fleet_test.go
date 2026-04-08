@@ -8,15 +8,24 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	cachepkg "github.com/szibis/Loki-VL-proxy/internal/cache"
 )
 
 var proxyAddrs = []string{
 	"http://localhost:3100", // proxy-a
 	"http://localhost:3101", // proxy-b
 	"http://localhost:3102", // proxy-c
+}
+
+var proxyPeerAddrs = []string{
+	"proxy-a:3100",
+	"proxy-b:3100",
+	"proxy-c:3100",
 }
 
 func init() {
@@ -41,13 +50,13 @@ func init() {
 func ingestLogs(t *testing.T) {
 	t.Helper()
 	lines := []string{
-		`{"_time":"2026-01-01T00:00:00Z","_msg":"fleet test line 1","app":"web","env":"prod"}`,
-		`{"_time":"2026-01-01T00:00:01Z","_msg":"fleet test line 2","app":"api","env":"prod"}`,
-		`{"_time":"2026-01-01T00:00:02Z","_msg":"fleet test error","app":"web","env":"staging"}`,
+		`{"_time":"2026-01-01T00:00:00Z","_msg":"{\"trace_id\":\"trace-0001\",\"custom.team\":\"payments\",\"k8s.namespace.name\":\"prod-a\"}","app":"web","env":"prod","service.name":"frontend","trace_id":"trace-0001","custom.team":"payments","k8s.namespace.name":"prod-a"}`,
+		`{"_time":"2026-01-01T00:00:01Z","_msg":"{\"trace_id\":\"trace-0002\",\"custom.team\":\"checkout\",\"k8s.namespace.name\":\"prod-b\"}","app":"api","env":"prod","service.name":"checkout","trace_id":"trace-0002","custom.team":"checkout","k8s.namespace.name":"prod-b"}`,
+		`{"_time":"2026-01-01T00:00:02Z","_msg":"{\"trace_id\":\"trace-0003\",\"custom.team\":\"payments\",\"k8s.namespace.name\":\"staging-a\"}","app":"web","env":"staging","service.name":"frontend","trace_id":"trace-0003","custom.team":"payments","k8s.namespace.name":"staging-a"}`,
 	}
 
 	body := strings.Join(lines, "\n")
-	resp, err := http.Post("http://localhost:9428/insert/jsonline?_stream_fields=app,env",
+	resp, err := http.Post("http://localhost:9428/insert/jsonline?_stream_fields=app,env,service.name",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
@@ -70,13 +79,7 @@ type lokiResponse struct {
 }
 
 func queryProxy(proxyAddr, query string) (*lokiResponse, error) {
-	params := url.Values{}
-	params.Set("query", query)
-	params.Set("start", "1735689600000000000") // 2026-01-01T00:00:00Z
-	params.Set("end", "1735776000000000000")   // 2026-01-02T00:00:00Z
-	params.Set("limit", "100")
-
-	resp, err := http.Get(proxyAddr + "/loki/api/v1/query_range?" + params.Encode())
+	resp, err := queryProxyRaw(proxyAddr, queryRangePath(query))
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +96,121 @@ func queryProxy(proxyAddr, query string) (*lokiResponse, error) {
 		return nil, err
 	}
 	return &lr, nil
+}
+
+func queryProxyRaw(proxyAddr, path string) (*http.Response, error) {
+	return http.Get(proxyAddr + path)
+}
+
+func queryRangePath(query string) string {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("start", "1735689600000000000") // 2026-01-01T00:00:00Z
+	params.Set("end", "1735776000000000000")   // 2026-01-02T00:00:00Z
+	params.Set("limit", "100")
+	return "/loki/api/v1/query_range?" + params.Encode()
+}
+
+func queryRangeCacheKey(query string) string {
+	return "query_range::" + strings.TrimPrefix(queryRangePath(query), "/loki/api/v1/query_range?")
+}
+
+func detectedFieldValuesPath(field, query string) string {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("start", "1735689600000000000")
+	params.Set("end", "1735776000000000000")
+	params.Set("line_limit", "200")
+	return fmt.Sprintf("/loki/api/v1/detected_field/%s/values?%s", url.PathEscape(field), params.Encode())
+}
+
+func metricValue(t *testing.T, proxyAddr, metricPrefix string) float64 {
+	t.Helper()
+	resp, err := http.Get(proxyAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("metrics from %s failed: %v", proxyAddr, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read metrics from %s failed: %v", proxyAddr, err)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, metricPrefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			t.Fatalf("parse metric %q failed: %v", metricPrefix, err)
+		}
+		return value
+	}
+	t.Fatalf("metric %q not found on %s", metricPrefix, proxyAddr)
+	return 0
+}
+
+func owningProxyIndexForCacheKey(t *testing.T, key string) int {
+	t.Helper()
+	staticPeers := strings.Join(proxyPeerAddrs, ",")
+	for i, peer := range proxyPeerAddrs {
+		pc := cachepkg.NewPeerCache(cachepkg.PeerConfig{
+			SelfAddr:      peer,
+			DiscoveryType: "static",
+			StaticPeers:   staticPeers,
+		})
+		isOwner := pc.IsOwner(key)
+		pc.Close()
+		if isOwner {
+			return i
+		}
+	}
+	t.Fatalf("could not determine owner for key %q", key)
+	return -1
+}
+
+func mustQuerySuccess(t *testing.T, proxyAddr, query string) time.Duration {
+	t.Helper()
+	start := time.Now()
+	lr, err := queryProxy(proxyAddr, query)
+	if err != nil {
+		t.Fatalf("query to %s failed: %v", proxyAddr, err)
+	}
+	if lr.Status != "success" {
+		t.Fatalf("query to %s returned status %s", proxyAddr, lr.Status)
+	}
+	return time.Since(start)
+}
+
+func mustDetectedFieldValues(t *testing.T, proxyAddr, field, query string) ([]string, time.Duration) {
+	t.Helper()
+	start := time.Now()
+	resp, err := queryProxyRaw(proxyAddr, detectedFieldValuesPath(field, query))
+	if err != nil {
+		t.Fatalf("detected_field_values from %s failed: %v", proxyAddr, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read detected_field_values body failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("detected_field_values returned %d: %s", resp.StatusCode, body)
+	}
+	var parsed struct {
+		Status string   `json:"status"`
+		Values []string `json:"values"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("decode detected_field_values response failed: %v", err)
+	}
+	if parsed.Status != "success" {
+		t.Fatalf("detected_field_values returned status %q", parsed.Status)
+	}
+	return parsed.Values, time.Since(start)
 }
 
 // TestFleet_AllProxiesReturnSameResults verifies that all 3 proxies return
@@ -189,6 +307,69 @@ func TestFleet_ReadyEndpoint(t *testing.T) {
 			t.Errorf("%s: ready returned %d", addr, resp.StatusCode)
 		}
 	}
+}
+
+func TestFleetSmoke_QueryRangeWarmHitIncrementsCacheMetrics(t *testing.T) {
+	ingestLogs(t)
+
+	query := `{app="web"}`
+	cacheHitsBefore := metricValue(t, proxyAddrs[0], "loki_vl_proxy_cache_hits_total")
+
+	first := mustQuerySuccess(t, proxyAddrs[0], query)
+	second := mustQuerySuccess(t, proxyAddrs[0], query)
+	cacheHitsAfter := metricValue(t, proxyAddrs[0], "loki_vl_proxy_cache_hits_total")
+
+	if cacheHitsAfter <= cacheHitsBefore {
+		t.Fatalf("expected cache hits to increase on warm query: before=%v after=%v", cacheHitsBefore, cacheHitsAfter)
+	}
+	if second > first*3 {
+		t.Fatalf("expected warm query to stay within coarse bound of cold query: first=%v second=%v", first, second)
+	}
+
+	t.Logf("query_range cache smoke: first=%v second=%v cache_hits_before=%.0f cache_hits_after=%.0f", first, second, cacheHitsBefore, cacheHitsAfter)
+}
+
+func TestFleetSmoke_DetectedFieldValuesWarmHit(t *testing.T) {
+	ingestLogs(t)
+
+	cacheHitsBefore := metricValue(t, proxyAddrs[0], "loki_vl_proxy_cache_hits_total")
+	values, first := mustDetectedFieldValues(t, proxyAddrs[0], "trace_id", `{app="web"}`)
+	if len(values) == 0 {
+		t.Fatal("expected detected_field_values to return at least one trace_id")
+	}
+	_, second := mustDetectedFieldValues(t, proxyAddrs[0], "trace_id", `{app="web"}`)
+	cacheHitsAfter := metricValue(t, proxyAddrs[0], "loki_vl_proxy_cache_hits_total")
+
+	if cacheHitsAfter <= cacheHitsBefore {
+		t.Fatalf("expected detected_field_values warm hit to increment cache metric: before=%v after=%v", cacheHitsBefore, cacheHitsAfter)
+	}
+	if second > first*3 {
+		t.Fatalf("expected warm detected_field_values request to stay within coarse bound: first=%v second=%v", first, second)
+	}
+
+	t.Logf("detected_field_values cache smoke: first=%v second=%v values=%v", first, second, values)
+}
+
+func TestFleetSmoke_CrossProxyPeerCacheHit(t *testing.T) {
+	ingestLogs(t)
+
+	query := `{app="web"}`
+	cacheKey := queryRangeCacheKey(query)
+	ownerIdx := owningProxyIndexForCacheKey(t, cacheKey)
+	consumerIdx := (ownerIdx + 1) % len(proxyAddrs)
+
+	_ = mustQuerySuccess(t, proxyAddrs[ownerIdx], query)
+	time.Sleep(200 * time.Millisecond)
+
+	peerHitsBefore := metricValue(t, proxyAddrs[consumerIdx], "loki_vl_proxy_peer_cache_hits_total")
+	duration := mustQuerySuccess(t, proxyAddrs[consumerIdx], query)
+	peerHitsAfter := metricValue(t, proxyAddrs[consumerIdx], "loki_vl_proxy_peer_cache_hits_total")
+
+	if peerHitsAfter <= peerHitsBefore {
+		t.Fatalf("expected cross-proxy query to use peer cache: owner=%s consumer=%s before=%.0f after=%.0f key=%q", proxyPeerAddrs[ownerIdx], proxyPeerAddrs[consumerIdx], peerHitsBefore, peerHitsAfter, cacheKey)
+	}
+
+	t.Logf("cross-proxy peer cache smoke: owner=%s consumer=%s duration=%v peer_hits_before=%.0f peer_hits_after=%.0f", proxyPeerAddrs[ownerIdx], proxyPeerAddrs[consumerIdx], duration, peerHitsBefore, peerHitsAfter)
 }
 
 // TestFleet_SecondQueryHitsCache verifies the second identical query across

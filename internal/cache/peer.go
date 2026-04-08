@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+var lookupHost = net.LookupHost
+
 // PeerCache implements a sharded distributed cache layer (L3).
 //
 // Simple design — no gossip, no background traffic:
@@ -364,7 +366,7 @@ func (pc *PeerCache) discoveryLoop() {
 // --- DNS Discovery ---
 
 func discoverDNS(name string, port int) ([]string, error) {
-	ips, err := net.LookupHost(name)
+	ips, err := lookupHost(name)
 	if err != nil {
 		return nil, fmt.Errorf("DNS lookup %q: %w", name, err)
 	}

@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,18 @@ type cpuStat struct {
 	user, nice, system, idle, iowait, irq, softirq, steal float64
 }
 
+var (
+	procRoot     = "/proc"
+	procReadFile = os.ReadFile
+	procReadDir  = os.ReadDir
+	systemGOOS   = runtime.GOOS
+)
+
+func procPath(parts ...string) string {
+	all := append([]string{procRoot}, parts...)
+	return filepath.Join(all...)
+}
+
 func NewSystemMetrics() *SystemMetrics {
 	sm := &SystemMetrics{prevTime: time.Now()}
 	sm.prevCPU, _ = readCPUStat()
@@ -30,7 +43,7 @@ func NewSystemMetrics() *SystemMetrics {
 
 // WritePrometheus writes system metrics in Prometheus text exposition format.
 func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
-	if runtime.GOOS != "linux" {
+	if systemGOOS != "linux" {
 		// Non-Linux: only report Go runtime metrics
 		sb.WriteString("# HELP process_resident_memory_bytes Resident memory size.\n")
 		sb.WriteString("# TYPE process_resident_memory_bytes gauge\n")
@@ -146,7 +159,7 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 // --- /proc readers ---
 
 func readCPUStat() (cpuStat, error) {
-	data, err := os.ReadFile("/proc/stat")
+	data, err := procReadFile(procPath("stat"))
 	if err != nil {
 		return cpuStat{}, err
 	}
@@ -176,7 +189,7 @@ func parseCPUStatData(data string) (cpuStat, error) {
 }
 
 func readMemInfo() (total, avail, free int64) {
-	data, err := os.ReadFile("/proc/meminfo")
+	data, err := procReadFile(procPath("meminfo"))
 	if err != nil {
 		return 0, 0, 0
 	}
@@ -203,7 +216,7 @@ func parseMemInfoData(data string) (total, avail, free int64) {
 }
 
 func readProcessRSS() int64 {
-	data, err := os.ReadFile("/proc/self/status")
+	data, err := procReadFile(procPath("self", "status"))
 	if err != nil {
 		return 0
 	}
@@ -224,7 +237,7 @@ func parseProcessRSSData(data string) int64 {
 }
 
 func readDiskIO() (readBytes, writeBytes int64) {
-	data, err := os.ReadFile("/proc/diskstats")
+	data, err := procReadFile(procPath("diskstats"))
 	if err != nil {
 		return 0, 0
 	}
@@ -246,7 +259,7 @@ func parseDiskIOData(data string) (readBytes, writeBytes int64) {
 }
 
 func readNetIO() (rxBytes, txBytes int64) {
-	data, err := os.ReadFile("/proc/net/dev")
+	data, err := procReadFile(procPath("net", "dev"))
 	if err != nil {
 		return 0, 0
 	}
@@ -282,7 +295,7 @@ func readPSI(resource string) (some10, some60, some300, full10, full60, full300 
 	some10, some60, some300 = -1, -1, -1
 	full10, full60, full300 = -1, -1, -1
 
-	data, err := os.ReadFile("/proc/pressure/" + resource)
+	data, err := procReadFile(procPath("pressure", resource))
 	if err != nil {
 		return
 	}
@@ -320,7 +333,7 @@ func parsePSILine(line string) (avg10, avg60, avg300 float64) {
 }
 
 func countOpenFDs() int {
-	entries, err := os.ReadDir("/proc/self/fd")
+	entries, err := procReadDir(procPath("self", "fd"))
 	if err != nil {
 		return -1
 	}
