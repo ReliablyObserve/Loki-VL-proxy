@@ -141,7 +141,7 @@ collect_compat() {
 
 collect_benchmarks() {
   local out="$TMP_DIR/bench.txt"
-  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=1s -count=3 -cpu=1 >"$out"
+  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=2s -count=7 -cpu=1 >"$out"
   python3 - "$out" <<'PY'
 import json
 import re
