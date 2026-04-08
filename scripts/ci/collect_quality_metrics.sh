@@ -141,7 +141,7 @@ collect_compat() {
 
 collect_benchmarks() {
   local out="$TMP_DIR/bench.txt"
-  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=1s -count=3 -cpu=1 >"$out"
+  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=2s -count=7 -cpu=1 >"$out"
   python3 - "$out" <<'PY'
 import json
 import re
@@ -228,20 +228,19 @@ fi
 capture_async tests_and_coverage '{"count":0,"coverage_pct":0}' 900 "$tests_file" tests_pid collect_tests_and_coverage
 capture_async compat '{"loki":{"passed":0,"total":0,"pct":0},"drilldown":{"passed":0,"total":0,"pct":0},"vl":{"passed":0,"total":0,"pct":0}}' 1800 "$compat_file" compat_pid collect_compat
 
-PIDS=("$tests_pid" "$compat_pid")
+for pid in "$tests_pid" "$compat_pid"; do
+  wait "$pid"
+done
+
 if [ "$PERF_MODE" = "full" ]; then
-  capture_async benchmarks "$BENCHMARKS_DEFAULT" 900 "$benchmarks_file" benchmarks_pid collect_benchmarks
-  capture_async load "$LOAD_DEFAULT" 600 "$load_file" load_pid collect_load
-  PIDS+=("$benchmarks_pid" "$load_pid")
+  log_step "running perf smoke in an isolated phase for stability"
+  capture_or_default benchmarks "$BENCHMARKS_DEFAULT" 900 collect_benchmarks >"$benchmarks_file"
+  capture_or_default load "$LOAD_DEFAULT" 600 collect_load >"$load_file"
 else
   log_step "skipping performance smoke collection (QUALITY_SKIP_PERF=1)"
   printf '%s\n' "$BENCHMARKS_DEFAULT" >"$benchmarks_file"
   printf '%s\n' "$LOAD_DEFAULT" >"$load_file"
 fi
-
-for pid in "${PIDS[@]}"; do
-  wait "$pid"
-done
 
 TESTS_AND_COVERAGE="$(cat "$tests_file")"
 COMPAT="$(cat "$compat_file")"

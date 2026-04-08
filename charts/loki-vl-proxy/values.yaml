@@ -33,7 +33,7 @@ workload:
     persistentVolumeClaimRetentionPolicy: {}
 
 image:
-  repository: ghcr.io/szibis/loki-vl-proxy
+  repository: ghcr.io/reliablyobserve/loki-vl-proxy
   tag: ""  # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
   pullSecrets: []
@@ -86,13 +86,20 @@ extraArgs:
   # Stream selector optimization — list VL _stream_fields labels for fast index path
   # stream-fields: "app,env,namespace"
 
-# Go runtime tuning — set GOMEMLIMIT to ~90% of memory limit for optimal GC
-# This prevents OOM while minimizing GC overhead. See docs/performance.md.
 # Go runtime tuning:
-# GOMEMLIMIT is auto-calculated as goMemLimitPercent% of resources.limits.memory.
-# Override with goMemLimit to set an explicit value (e.g., "500MiB").
-goMemLimitPercent: 70  # percentage of resources.limits.memory
-goMemLimit: ""         # explicit override; if set, goMemLimitPercent is ignored
+# The chart exports GOMEMLIMIT into the container env.
+# Priority:
+# 1) goMemLimit (explicit value) if set
+# 2) goMemLimitPercent% of resources.limits.memory when goMemLimit is empty
+#
+# Example with limits.memory=256Mi and goMemLimitPercent=70:
+#   GOMEMLIMIT=187904819 (bytes)
+#
+# Supported resources.limits.memory units for percentage mode:
+# Ki, Mi, Gi, Ti, Pi, Ei, K, M, G, T, P, E (integer quantities)
+# If memory limit is missing/unsupported, no computed GOMEMLIMIT is injected.
+goMemLimitPercent: 70  # Percentage of resources.limits.memory used when goMemLimit is empty
+goMemLimit: ""         # Explicit GOMEMLIMIT value (for example 500MiB); overrides goMemLimitPercent
 
 # Environment variables (alternative to flags, also for secrets)
 # Use this for secrets or env-based integration config when you don't want

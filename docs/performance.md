@@ -163,17 +163,22 @@ go tool pprof mem.prof
 
 ### GOMEMLIMIT
 
-The Helm chart auto-calculates `GOMEMLIMIT` as a percentage of `resources.limits.memory`:
+The Helm chart now injects `GOMEMLIMIT` at runtime. Resolution order:
+
+1. `goMemLimit` when explicitly set
+2. otherwise `goMemLimitPercent` of `resources.limits.memory`
+
+In percentage mode, the chart computes bytes and exports that numeric value as `GOMEMLIMIT`.
 
 ```yaml
 # Default: 70% of memory limit
-goMemLimitPercent: 70   # 256Mi * 70% = 179MiB
+goMemLimitPercent: 70   # 256Mi * 70% => GOMEMLIMIT=187904819 (bytes)
 
 # Override with explicit value
 goMemLimit: "500MiB"    # ignores goMemLimitPercent
 ```
 
-This tells Go's GC the soft memory limit, reducing OOM kills while allowing efficient memory use.
+Supported memory-limit units for percentage mode are integer quantities with `Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E`. If `resources.limits.memory` is missing or unsupported, the chart does not inject a computed `GOMEMLIMIT`.
 
 ### GOGC
 

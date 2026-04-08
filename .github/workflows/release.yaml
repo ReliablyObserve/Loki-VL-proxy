@@ -53,7 +53,14 @@ jobs:
           chmod +x scripts/ci/extract_changelog_section.sh
           VERSION="${{ steps.version.outputs.version }}"
           NOTES_FILE="$(mktemp)"
-          scripts/ci/extract_changelog_section.sh "${VERSION}" CHANGELOG.md > "$NOTES_FILE"
+          if ! scripts/ci/extract_changelog_section.sh "${VERSION}" CHANGELOG.md > "$NOTES_FILE"; then
+            echo "::warning::No changelog section found for ${VERSION}; using fallback release notes"
+            {
+              echo "## ${VERSION}"
+              echo
+              echo "- republish release artifacts and container images for existing tag ${VERSION}"
+            } > "$NOTES_FILE"
+          fi
           echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binaries
@@ -109,11 +116,12 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "tags<<EOF"
-            echo "ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            echo "ghcr.io/${OWNER_LC}/loki-vl-proxy:${VERSION}"
             if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-              echo "docker.io/${DOCKERHUB_USERNAME}/loki-vl-proxy:${VERSION}"
+              echo "docker.io/reliablyobserve/loki-vl-proxy:${VERSION}"
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
@@ -132,7 +140,8 @@ jobs:
       - name: Publish Helm chart to GHCR
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${OWNER_LC}/charts"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -159,6 +168,13 @@ jobs:
 
           chmod +x scripts/ci/sync_release_metadata.sh
           scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "" "" "" .
+
+          CHART_VERSION="$(awk -F: '/^version:/ {v=$2; gsub(/[ "]/, "", v); print v; exit}' charts/loki-vl-proxy/Chart.yaml)"
+          CHART_APP_VERSION="$(awk -F: '/^appVersion:/ {v=$2; gsub(/[ "]/, "", v); print v; exit}' charts/loki-vl-proxy/Chart.yaml)"
+          if [ "${CHART_VERSION}" != "${VERSION}" ] || [ "${CHART_APP_VERSION}" != "${VERSION}" ]; then
+            echo "::error::Chart.yaml version/appVersion mismatch after metadata sync: version=${CHART_VERSION} appVersion=${CHART_APP_VERSION} expected=${VERSION}"
+            exit 1
+          fi
 
           if git diff --quiet --exit-code -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml; then
             echo "release metadata already synced"
