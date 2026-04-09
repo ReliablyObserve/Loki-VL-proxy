@@ -3780,7 +3780,10 @@ func (p *Proxy) classifyEntryFields(entry map[string]interface{}, originalQuery 
 
 	metadata := map[string]interface{}{}
 	if len(structuredMetadataFields) > 0 {
+		// Keep canonical Loki query-response shape while exposing a snake_case alias
+		// for clients that still read structured metadata under that key.
 		metadata["structuredMetadata"] = structuredMetadataFields
+		metadata["structured_metadata"] = structuredMetadataFields
 	}
 	if len(parsedFields) > 0 {
 		metadata["parsed"] = parsedFields

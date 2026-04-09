@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - dedupe translated metric `by(...)` labels after alias mapping so queries that combine canonical and alias fields (for example `level` plus `detected_level`) do not emit duplicate stats grouping columns
 - add opt-in `-emit-structured-metadata` support for Loki-style stream 3-tuples `[timestamp, line, metadata]` while keeping default query responses on canonical 2-tuples for compatibility
+- expose `structured_metadata` as a compatibility alias alongside canonical `structuredMetadata` in emitted stream metadata payloads
 
 ### Documentation
 
