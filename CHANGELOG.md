@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- harden stream tuple metadata emission to always return a flat key/value object in tuple slot `2`, including requests with `X-Loki-Response-Encoding-Flags: categorize-labels`, so Explore/Drilldown clients that require array-safe tuple decoding do not fail on nested metadata objects
+- classify upstream transport failures more accurately: map canceled upstream requests to `499` (`errorType=canceled`) and timeout/deadline failures to `504` (`errorType=timeout`) instead of generic `502`
+
+## [0.27.11] - 2026-04-09
+
+### Bug Fixes
+
 - separate datasource/basic-auth credentials from end-user attribution: `enduser.id` now resolves from trusted user headers/tenant/client IP, while auth principals are reported separately via `auth.*` logs and `X-Loki-VL-Auth-*` upstream headers
 - make emitted 3-tuple stream metadata parser-safe by default (flat key/value third element), and emit nested Loki categorized metadata (`structuredMetadata`/`parsed`) only when clients request `X-Loki-Response-Encoding-Flags: categorize-labels`
 - enrich request logs with proxy context diagnostics, including cache result (`hit|miss|bypass`), upstream call count/status/latency, and proxy-overhead timing
