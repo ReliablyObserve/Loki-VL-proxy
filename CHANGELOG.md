@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- add a Grafana user-header forwarding guide for Loki datasource deployments, including `dataproxy.send_user_header`, trusted proxy headers, and expected `enduser.id` / `auth.*` request-log behavior
+
 ## [0.27.11] - 2026-04-09
 
 ### Bug Fixes
