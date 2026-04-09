@@ -129,6 +129,9 @@ type Config struct {
 	BackendTLSSkip   bool              // skip TLS verification for VL backend
 	DerivedFields    []DerivedField    // derived fields for trace/link extraction
 	StreamResponse   bool              // stream responses via chunked transfer (default: false)
+	// EmitStructuredMetadata enables Loki 3-tuple stream values [ts, line, metadata].
+	// Disabled by default for conservative datasource compatibility.
+	EmitStructuredMetadata bool
 
 	// Label translation
 	LabelStyle        LabelStyle        // how to translate VL field names to Loki labels
@@ -215,6 +218,7 @@ type Proxy struct {
 	backendHeaders           map[string]string // static headers on all VL requests
 	derivedFields            []DerivedField
 	streamResponse           bool
+	emitStructuredMetadata   bool
 	labelTranslator          *LabelTranslator
 	metadataFieldMode        MetadataFieldMode
 	streamFieldsMap          map[string]bool  // known _stream_fields for VL stream selector optimization
@@ -389,6 +393,7 @@ func New(cfg Config) (*Proxy, error) {
 		backendHeaders:           backendHeaders,
 		derivedFields:            cfg.DerivedFields,
 		streamResponse:           cfg.StreamResponse,
+		emitStructuredMetadata:   cfg.EmitStructuredMetadata,
 		labelTranslator:          NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
 		metadataFieldMode:        metadataFieldMode,
 		streamFieldsMap:          buildStreamFieldsMap(cfg.StreamFields),
@@ -3326,7 +3331,7 @@ func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response) {
 
 		stream := map[string]interface{}{
 			"stream": translatedLabels,
-			"values": buildStreamValues(tsNanos, msg, metadata),
+			"values": buildStreamValues(tsNanos, msg, metadata, p.emitStructuredMetadata),
 		}
 
 		chunk, _ := json.Marshal(stream)
@@ -3582,7 +3587,7 @@ func (p *Proxy) vlLogsToLokiStreams(body []byte, originalQuery string) []map[str
 			}
 			streamMap[streamKey] = se
 		}
-		se.Values = append(se.Values, buildStreamValue(tsNanos, msg, metadata))
+		se.Values = append(se.Values, buildStreamValue(tsNanos, msg, metadata, p.emitStructuredMetadata))
 		vlEntryPool.Put(entry)
 	}
 
@@ -3621,15 +3626,14 @@ func formatEntryTimestamp(timeStr string) (string, bool) {
 	return "", false
 }
 
-func buildStreamValues(ts, msg string, metadata map[string]interface{}) []interface{} {
-	return []interface{}{buildStreamValue(ts, msg, metadata)}
+func buildStreamValues(ts, msg string, metadata map[string]interface{}, emitStructuredMetadata bool) []interface{} {
+	return []interface{}{buildStreamValue(ts, msg, metadata, emitStructuredMetadata)}
 }
 
-func buildStreamValue(ts, msg string, metadata map[string]interface{}) interface{} {
-	// Current Grafana Loki datasource / Drilldown query paths still reject
-	// 3-tuple log values with metadata objects. Keep canonical 2-tuple values
-	// here and expose parsed fields through dedicated Drilldown resources.
-	_ = metadata
+func buildStreamValue(ts, msg string, metadata map[string]interface{}, emitStructuredMetadata bool) interface{} {
+	if emitStructuredMetadata && len(metadata) > 0 {
+		return []interface{}{ts, msg, metadata}
+	}
 	return []interface{}{ts, msg}
 }
 
