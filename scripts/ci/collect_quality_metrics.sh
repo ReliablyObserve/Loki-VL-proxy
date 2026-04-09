@@ -141,7 +141,7 @@ collect_compat() {
 
 collect_benchmarks() {
   local out="$TMP_DIR/bench.txt"
-  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=1s -count=3 -cpu=1 >"$out"
+  GOMAXPROCS=1 go test ./internal/proxy -run '^$' -bench 'BenchmarkProxy_(QueryRange|Labels)_(CacheHit|CacheBypass)$' -benchmem -benchtime=2s -count=7 -cpu=1 >"$out"
   python3 - "$out" <<'PY'
 import json
 import re
@@ -218,14 +218,29 @@ compat_file="$TMP_DIR/compat.json"
 benchmarks_file="$TMP_DIR/benchmarks.json"
 load_file="$TMP_DIR/load.json"
 
+BENCHMARKS_DEFAULT='{"query_range_cache_hit_ns_per_op":0,"query_range_cache_hit_bytes_per_op":0,"query_range_cache_hit_allocs_per_op":0,"query_range_cache_bypass_ns_per_op":0,"query_range_cache_bypass_bytes_per_op":0,"query_range_cache_bypass_allocs_per_op":0,"labels_cache_hit_ns_per_op":0,"labels_cache_hit_bytes_per_op":0,"labels_cache_hit_allocs_per_op":0,"labels_cache_bypass_ns_per_op":0,"labels_cache_bypass_bytes_per_op":0,"labels_cache_bypass_allocs_per_op":0}'
+LOAD_DEFAULT='{"high_concurrency_req_per_s":0,"high_concurrency_memory_growth_mb":0}'
+PERF_MODE="full"
+if [ "${QUALITY_SKIP_PERF:-0}" = "1" ]; then
+  PERF_MODE="skipped"
+fi
+
 capture_async tests_and_coverage '{"count":0,"coverage_pct":0}' 900 "$tests_file" tests_pid collect_tests_and_coverage
 capture_async compat '{"loki":{"passed":0,"total":0,"pct":0},"drilldown":{"passed":0,"total":0,"pct":0},"vl":{"passed":0,"total":0,"pct":0}}' 1800 "$compat_file" compat_pid collect_compat
-capture_async benchmarks '{"query_range_cache_hit_ns_per_op":0,"query_range_cache_hit_bytes_per_op":0,"query_range_cache_hit_allocs_per_op":0,"query_range_cache_bypass_ns_per_op":0,"query_range_cache_bypass_bytes_per_op":0,"query_range_cache_bypass_allocs_per_op":0,"labels_cache_hit_ns_per_op":0,"labels_cache_hit_bytes_per_op":0,"labels_cache_hit_allocs_per_op":0,"labels_cache_bypass_ns_per_op":0,"labels_cache_bypass_bytes_per_op":0,"labels_cache_bypass_allocs_per_op":0}' 900 "$benchmarks_file" benchmarks_pid collect_benchmarks
-capture_async load '{"high_concurrency_req_per_s":0,"high_concurrency_memory_growth_mb":0}' 600 "$load_file" load_pid collect_load
 
-for pid in "$tests_pid" "$compat_pid" "$benchmarks_pid" "$load_pid"; do
+for pid in "$tests_pid" "$compat_pid"; do
   wait "$pid"
 done
+
+if [ "$PERF_MODE" = "full" ]; then
+  log_step "running perf smoke in an isolated phase for stability"
+  capture_or_default benchmarks "$BENCHMARKS_DEFAULT" 900 collect_benchmarks >"$benchmarks_file"
+  capture_or_default load "$LOAD_DEFAULT" 600 collect_load >"$load_file"
+else
+  log_step "skipping performance smoke collection (QUALITY_SKIP_PERF=1)"
+  printf '%s\n' "$BENCHMARKS_DEFAULT" >"$benchmarks_file"
+  printf '%s\n' "$LOAD_DEFAULT" >"$load_file"
+fi
 
 TESTS_AND_COVERAGE="$(cat "$tests_file")"
 COMPAT="$(cat "$compat_file")"
@@ -237,10 +252,12 @@ jq -n \
   --argjson compat "$COMPAT" \
   --argjson benchmarks "$BENCHMARKS" \
   --argjson load "$LOAD" \
+  --arg perf_mode "$PERF_MODE" \
   '{
     tests: $tests,
     compatibility: $compat,
     performance: {
+      mode: $perf_mode,
       benchmarks: $benchmarks,
       load: $load
     }

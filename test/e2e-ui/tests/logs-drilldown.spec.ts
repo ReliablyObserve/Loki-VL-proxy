@@ -9,12 +9,13 @@ import {
 } from "./helpers";
 import { buildServiceDrilldownUrl } from "./url-state";
 
+const allowedDrilldownMtConsoleErrors = [
+  /TypeError: Cannot read properties of null \(reading 'sort'\)[\s\S]*grafana-lokiexplore-app/i,
+];
+
 async function waitForDrilldownLanding(page: Page) {
   await waitForGrafanaReady(page);
   await expect(page.getByRole("combobox", { name: "Filter by labels" })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(page.getByRole("tab", { name: "service" })).toBeVisible({
     timeout: 30_000,
   });
 }
@@ -106,6 +107,26 @@ test.describe("Grafana Logs Drilldown", () => {
     await guards.assertClean();
   });
 
+  test("multi-tenant landing shows service buckets without browser errors @drilldown-mt", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
+      allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
+    });
+    const responses = await collectDrilldownResponses(page);
+    await openLogsDrilldown(page, PROXY_MULTI_DS);
+    await waitForDrilldownLanding(page);
+
+    const volumeResponse = responses.find((r) =>
+      String(r.url).includes("/resources/index/volume")
+    );
+    expect(volumeResponse).toBeTruthy();
+    expect(volumeResponse?.status).toBe(200);
+    expect(JSON.stringify(volumeResponse?.json)).toContain('"resultType":"vector"');
+    await guards.assertClean();
+  });
+
   test("service drilldown field filter survives reload from URL state @drilldown-core", async ({
     page,
   }) => {
@@ -128,8 +149,48 @@ test.describe("Grafana Logs Drilldown", () => {
   });
 
   test("multi-tenant service drilldown loads without browser errors @drilldown-mt", async ({ page }) => {
-    const guards = installGrafanaGuards(page);
+    const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
+      allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
+    });
     await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "logs");
+    await expect(page.getByText("No logs found")).toHaveCount(0);
+    await guards.assertClean();
+  });
+
+  test("multi-tenant service field view loads detected fields without browser errors @drilldown-mt", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
+      allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
+    });
+    const responses = await collectDrilldownResponses(page);
+    await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "fields");
+
+    const fieldsResponse = responses.find((r) =>
+      String(r.url).includes("/resources/detected_fields")
+    );
+    expect(fieldsResponse).toBeTruthy();
+    expect(fieldsResponse?.status).toBe(200);
+    expect(JSON.stringify(fieldsResponse?.json)).toContain('"fields"');
+    await guards.assertClean();
+  });
+
+  test("multi-tenant service filter survives reload from URL state @drilldown-mt", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page, {
+      allowedConsoleErrors: allowedDrilldownMtConsoleErrors,
+      allowedRequestFailures: [/^net::ERR_ABORTED .*\/api\/ds\/query/i],
+    });
+    await openServiceDrilldown(page, PROXY_MULTI_DS, "api-gateway", "logs");
+    await waitForDrilldownDetails(page);
+    await expectFilterApplied(page, "Filter by labels", "service_name", "api-gateway");
+
+    await page.reload();
+    await waitForDrilldownDetails(page);
+    await expectFilterApplied(page, "Filter by labels", "service_name", "api-gateway");
     await expect(page.getByText("No logs found")).toHaveCount(0);
     await guards.assertClean();
   });

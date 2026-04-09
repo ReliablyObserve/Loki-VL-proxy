@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+var (
+	rateLimiterCleanupInterval = 5 * time.Minute
+	rateLimiterStaleAfter      = 10 * time.Minute
+)
+
 // RateLimiter provides per-client token bucket rate limiting
 // and a global concurrent query semaphore.
 type RateLimiter struct {
@@ -23,11 +28,15 @@ type RateLimiter struct {
 	ratePerSecond float64
 	burstSize     int
 
+	// Cleanup timing captured at construction time so tests do not race on package globals.
+	cleanupInterval time.Duration
+	staleAfter      time.Duration
+
 	// Shutdown signal for cleanup goroutine
 	done chan struct{}
 
 	// Stats
-	RejectedTotal atomic.Int64
+	RejectedTotal  atomic.Int64
 	ThrottledTotal atomic.Int64
 }
 
@@ -40,11 +49,13 @@ type tokenBucket struct {
 
 func NewRateLimiter(maxConcurrent int, ratePerSecond float64, burstSize int) *RateLimiter {
 	rl := &RateLimiter{
-		clients:       make(map[string]*tokenBucket),
-		maxConcurrent: maxConcurrent,
-		ratePerSecond: ratePerSecond,
-		burstSize:     burstSize,
-		done:          make(chan struct{}),
+		clients:         make(map[string]*tokenBucket),
+		maxConcurrent:   maxConcurrent,
+		ratePerSecond:   ratePerSecond,
+		burstSize:       burstSize,
+		cleanupInterval: rateLimiterCleanupInterval,
+		staleAfter:      rateLimiterStaleAfter,
+		done:            make(chan struct{}),
 	}
 	go rl.cleanupStaleClients()
 	return rl
@@ -154,7 +165,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 }
 
 func (rl *RateLimiter) cleanupStaleClients() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(rl.cleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -162,7 +173,7 @@ func (rl *RateLimiter) cleanupStaleClients() {
 			return
 		case <-ticker.C:
 			rl.mu.Lock()
-			cutoff := time.Now().Add(-10 * time.Minute)
+			cutoff := time.Now().Add(-rl.staleAfter)
 			for k, b := range rl.clients {
 				if b.lastTime.Before(cutoff) {
 					delete(rl.clients, k)

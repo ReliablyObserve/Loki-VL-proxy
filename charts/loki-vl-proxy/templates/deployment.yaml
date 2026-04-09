@@ -72,6 +72,7 @@ spec:
       {{- end }}
       containers:
         - name: loki-vl-proxy
+          {{- $goMemLimitValue := (include "loki-vl-proxy.goMemLimitValue" . | trim) }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
@@ -92,8 +93,12 @@ spec:
             - "-peer-static={{ join "," .Values.peerCache.peers }}"
             {{- end }}
             {{- end }}
-          {{- if or .Values.peerCache.enabled .Values.env }}
+          {{- if or .Values.peerCache.enabled .Values.env $goMemLimitValue }}
           env:
+            {{- if $goMemLimitValue }}
+            - name: GOMEMLIMIT
+              value: {{ $goMemLimitValue | quote }}
+            {{- end }}
             {{- if .Values.peerCache.enabled }}
             - name: POD_IP
               valueFrom:

@@ -34,6 +34,30 @@ Result: **49% memory reduction** and **9.6% faster** parsing vs original impleme
 
 When multiple clients send identical queries simultaneously, only 1 request reaches VL. Others wait for the shared result. Keys include tenant ID to prevent cross-tenant data sharing.
 
+### Cache Topology
+
+The proxy now has two cache layers in front of the backend execution path:
+
+| Layer | Scope | Primary goal |
+|---|---|---|
+| Tier0 compatibility-edge cache | Final Loki-shaped `GET` responses on safe read endpoints | Bypass translation and backend work for hot repeated reads |
+| L1/L2/L3 cache stack | Local memory, optional disk, optional peer fleet reuse | Reduce backend load and share results across replicas |
+
+Tier0 is intentionally small and bounded as a percentage of the primary L1 memory budget. The deeper L1/L2/L3 stack still handles broader reuse, peer sharing, and persistent cache warming.
+
+### What This Means For Operators
+
+The simplest way to understand the cache stack is by operational outcome:
+
+| Layer | Plain-English role | What it buys you |
+|---|---|---|
+| `Tier0` | Fast answer cache at the Loki-compatible frontend | Repeated Grafana reads can return before most proxy logic runs |
+| `L1` memory | Hot cache inside the local process | Best-case latency for repeated dashboards and Explore refreshes |
+| `L2` disk | Persistent local cache | Useful cache survives beyond RAM pressure and supports larger working sets |
+| `L3` peer cache | Fleet-wide cache reuse between replicas | One warm pod can make the rest of the fleet faster and cheaper |
+
+This is the difference between “it speaks Loki” and “it feels like Loki at runtime.” The project is designed to preserve Loki-compatible UX while reducing repeated backend work aggressively.
+
 ## Benchmark Results
 
 Measured on Apple M3 Max (14 cores), Go 1.26.1, `-benchmem`.
@@ -47,6 +71,20 @@ Measured on Apple M3 Max (14 cores), Go 1.26.1, `-benchmem`.
 | wrapAsLokiResponse | 2.8 us | 58 | 2.6 KB |
 | VL NDJSON to Loki streams (100 lines) | 170 us | 3118 | 70 KB |
 | LogQL translation | ~5 us | ~20 | ~2 KB |
+
+### Cache Story In One Table
+
+These are the numbers that matter most when you want to judge the value of the cache stack rather than the implementation details:
+
+| Path | Slow path | Fast path | What it means |
+|---|---|---|---|
+| `query_range` | `4.58 ms` cold miss with delayed backend | `0.64-0.67 us` warm cache hit | Repeated dashboards stop behaving like backend-bound requests |
+| `detected_field_values` | `2.76 ms` without Tier0 | `0.71 us` with Tier0 | Drilldown metadata becomes effectively instant after warm-up |
+| `L1` memory cache | full handler/backend path | `45 ns` hit | Local hot cache is essentially free |
+| `L2` disk cache | backend refill | `0.45 us` uncompressed read, `3.9 us` compressed read | Persistent cache is still cheap enough for hot-path reuse |
+| `L3` peer cache | backend or owner re-fetch | `52 ns` warm shadow-copy hit | A warm 3-node fleet can reuse results instead of refetching them |
+
+Tier0 is most valuable on metadata-style and Drilldown-style endpoints where the proxy still has meaningful compatibility work to skip. On `query_range`, the deeper primary cache is already so effective that Tier0 mostly preserves that win rather than multiplying it.
 
 ### Throughput
 
@@ -81,6 +119,9 @@ Under sustained load (10K requests, no cache):
 | Test | What it verifies |
 |---|---|
 | `TestOptimization_VLLogsToLokiStreams_*` (7 tests) | Correctness of byte-scanned NDJSON parser |
+| `BenchmarkProxy_Series_CompatCacheHit` / `BenchmarkProxy_Series_NoCompatCache` | Tier0 hit-path cost versus the uncached route-execution path |
+| `TestPeerCache_ThreePeers_ShadowCopiesAvoidRepeatedOwnerFetches` | 3-node fleet reuses one owner fetch per non-owner after warm-up |
+| `BenchmarkPeerCache_ThreePeers_ShadowCopyHit` | Warm non-owner reads stay local after the first peer shadow copy |
 | `TestOptimization_SyncPool_NoStateLeak` | Pool doesn't leak labels between invocations |
 | `TestOptimization_SyncPool_ConcurrentSafety` | 50 goroutines x 100 iterations, correct results |
 | `TestOptimization_ConnectionPool_HighConcurrency` | 200 concurrent, 0 errors (port exhaustion regression) |
@@ -96,6 +137,12 @@ Under sustained load (10K requests, no cache):
 ```bash
 # All proxy benchmarks
 go test ./internal/proxy/ -bench . -benchmem -run "^$" -count=3
+
+# Focus on the new Tier0 path
+go test ./internal/proxy/ -bench 'BenchmarkProxy_Series_(CompatCacheHit|NoCompatCache)$' -benchmem -run "^$" -count=3
+
+# Focus on fleet cache warm shadow-copy behavior
+go test ./internal/cache/ -bench 'BenchmarkPeerCache_ThreePeers_ShadowCopyHit$' -benchmem -run "^$" -count=3
 
 # Load tests
 go test ./internal/proxy/ -run "TestLoad" -v -timeout=120s
@@ -116,17 +163,22 @@ go tool pprof mem.prof
 
 ### GOMEMLIMIT
 
-The Helm chart auto-calculates `GOMEMLIMIT` as a percentage of `resources.limits.memory`:
+The Helm chart now injects `GOMEMLIMIT` at runtime. Resolution order:
+
+1. `goMemLimit` when explicitly set
+2. otherwise `goMemLimitPercent` of `resources.limits.memory`
+
+In percentage mode, the chart computes bytes and exports that numeric value as `GOMEMLIMIT`.
 
 ```yaml
 # Default: 70% of memory limit
-goMemLimitPercent: 70   # 256Mi * 70% = 179MiB
+goMemLimitPercent: 70   # 256Mi * 70% => GOMEMLIMIT=187904819 (bytes)
 
 # Override with explicit value
 goMemLimit: "500MiB"    # ignores goMemLimitPercent
 ```
 
-This tells Go's GC the soft memory limit, reducing OOM kills while allowing efficient memory use.
+Supported memory-limit units for percentage mode are integer quantities with `Ki|Mi|Gi|Ti|Pi|Ei|K|M|G|T|P|E`. If `resources.limits.memory` is missing or unsupported, the chart does not inject a computed `GOMEMLIMIT`.
 
 ### GOGC
 
@@ -152,5 +204,7 @@ The `bench` job in `.github/workflows/ci.yaml` runs all benchmarks and load test
 2. Runs load tests at all concurrency tiers
 3. Fails the build if load tests produce errors (regression gate)
 4. Uploads results as CI artifacts for historical tracking
+
+The next CI step is to add compose-backed e2e cache/fleet smoke runs for pull requests and post-merge `main` builds, so Tier0 behavior and 3-node peer-cache gains are validated against the full Grafana + proxy + VictoriaLogs stack rather than only unit/load environments.
 
 For `TestLoad_HighConcurrency_MemoryStability`, the throughput expectation is `>10k req/s` in local environments and `>5k req/s` on shared CI runners (`CI=true`) to reduce race-mode noise while still catching major regressions.

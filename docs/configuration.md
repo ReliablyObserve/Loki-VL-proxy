@@ -55,14 +55,29 @@ All flags follow VictoriaMetrics naming conventions (`-flagName=value`).
 |---|---|---|---|
 | `-cache-ttl` | — | `60s` | Default cache TTL |
 | `-cache-max` | — | `10000` | Maximum cache entries |
+| `-cache-max-bytes` | — | `268435456` | Maximum in-memory L1 cache size in bytes (256 MiB by default) |
+| `-compat-cache-enabled` | — | `true` | Enable the Tier0 compatibility-edge response cache for safe GET read endpoints |
+| `-compat-cache-max-percent` | — | `10` | Percent of `-cache-max-bytes` reserved for Tier0 (`0` disables, max `50`) |
+
+### Tier0 Compatibility-Edge Cache
+
+Tier0 is a separate in-memory cache instance that reuses the same cache implementation as the deeper L1/L2/L3 stack, but stores only final Loki-shaped response bodies.
+
+- It runs only after tenant validation and route classification.
+- It only applies to safe `GET` read endpoints such as `query`, `query_range`, `series`, labels, volume, patterns, and Drilldown metadata endpoints.
+- It does not apply to `/tail`, websocket upgrades, writes, deletes, admin/debug paths, or non-JSON responses.
+- Its budget is derived from `-cache-max-bytes`, so `-compat-cache-max-percent=10` means Tier0 gets 10% of the primary L1 memory budget.
+- Tenant-map and field-mapping reloads invalidate Tier0 immediately.
 
 ### Per-Endpoint TTLs
 
 | Endpoint | TTL |
 |---|---|
 | `labels`, `label_values` | 60s |
-| `series`, `detected_fields` | 30s |
+| `series`, `detected_fields`, `detected_field_values`, `detected_labels` | 30s |
+| `patterns` | 20s |
 | `query_range`, `query` | 10s |
+| `index_stats`, `volume`, `volume_range` | 10s |
 
 ## Cache (L2 On-Disk)
 
@@ -216,6 +231,7 @@ kill -HUP $(pidof loki-vl-proxy)
 | `-response-gzip` | — | `true` | Compress responses |
 | `-derived-fields` | — | — | JSON derived fields for trace linking |
 | `-forward-headers` | — | — | HTTP headers to forward to VL |
+| `-forward-authorization` | — | `false` | Forward client `Authorization` header to VL backend (adds `Authorization` to forwarded headers list) |
 | `-forward-cookies` | — | — | Cookie names to forward to VL |
 | `-backend-basic-auth` | — | — | `user:password` for VL basic auth |
 | `-backend-tls-skip-verify` | — | `false` | Skip TLS on VL connection |
@@ -248,6 +264,7 @@ These Grafana Loki datasource settings now have a direct proxy-side mapping:
 | Skip TLS certificate validation | Grafana-side only |
 | Add self-signed certificate | Grafana-side only |
 | HTTP headers (`X-Scope-OrgID`, auth headers) | `-forward-headers`, `-tenant-map`, `-auth.enabled` |
+| Forward `Authorization` specifically | `-forward-authorization=true` (or `-forward-headers=Authorization`) |
 | Allowed cookies | `-forward-cookies` |
 | Timeout | `-backend-timeout` for proxy→VL, Grafana datasource timeout for Grafana→proxy |
 | Maximum lines | `-max-lines` |

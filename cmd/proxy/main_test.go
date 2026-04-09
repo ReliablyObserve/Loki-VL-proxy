@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/szibis/Loki-VL-proxy/internal/cache"
-	"github.com/szibis/Loki-VL-proxy/internal/metrics"
-	"github.com/szibis/Loki-VL-proxy/internal/proxy"
+	"github.com/ReliablyObserve/Loki-VL-proxy/internal/cache"
+	"github.com/ReliablyObserve/Loki-VL-proxy/internal/metrics"
+	"github.com/ReliablyObserve/Loki-VL-proxy/internal/proxy"
 )
 
 type fakeReloadableProxy struct {
@@ -53,6 +53,11 @@ type runtimeRecorder struct {
 	called  bool
 	runtime *runtimeState
 	err     error
+}
+
+type exitRecorder struct {
+	code  int
+	calls int
 }
 
 func (f *fakeReloadableProxy) ReloadTenantMap(m map[string]proxy.TenantMapping) {
@@ -85,6 +90,11 @@ func (f *fakeOTLPPusher) Stop() { f.stopped = true }
 func (r *runtimeRecorder) build(_ runtimeOptions, _ *slog.Logger, _ signalNotifier, _ otlpPusherFactory) (*runtimeState, error) {
 	r.called = true
 	return r.runtime, r.err
+}
+
+func (r *exitRecorder) exit(code int) {
+	r.calls++
+	r.code = code
 }
 
 func TestBuildLogger(t *testing.T) {
@@ -211,6 +221,74 @@ func TestRun_RuntimeInitError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "failed to initialize runtime") {
 		t.Fatalf("expected wrapped runtime init error, got %v", err)
+	}
+}
+
+func TestRunMain_WritesErrorAndExits(t *testing.T) {
+	stderr := &bytes.Buffer{}
+	exits := &exitRecorder{}
+
+	runMain(
+		[]string{"-unknown-flag"},
+		func(string) string { return "" },
+		io.Discard,
+		stderr,
+		func(chan<- os.Signal, ...os.Signal) {},
+		exits.exit,
+		func(metrics.OTLPConfig, *metrics.Metrics) otlpMetricsPusher { return &fakeOTLPPusher{} },
+		func(runtimeOptions, *slog.Logger, signalNotifier, otlpPusherFactory) (*runtimeState, error) {
+			t.Fatal("runtime builder should not be called on parse error")
+			return nil, nil
+		},
+		func(httpServer, serverLoopOptions, *slog.Logger, func(string, ...any)) {
+			t.Fatal("server loop should not be called on parse error")
+		},
+		func(<-chan os.Signal, httpServer, time.Duration, *slog.Logger) {
+			t.Fatal("shutdown handler should not be called on parse error")
+		},
+	)
+
+	if exits.calls != 1 || exits.code != 1 {
+		t.Fatalf("expected one exit(1), got calls=%d code=%d", exits.calls, exits.code)
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("expected parse error on stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunMain_SuccessDoesNotExit(t *testing.T) {
+	reloadCh := make(chan os.Signal)
+	close(reloadCh)
+	shutdownCh := make(chan os.Signal, 1)
+	shutdownCh <- syscall.SIGTERM
+	exits := &exitRecorder{}
+
+	runMain(
+		nil,
+		func(string) string { return "" },
+		io.Discard,
+		&bytes.Buffer{},
+		func(chan<- os.Signal, ...os.Signal) {},
+		exits.exit,
+		func(metrics.OTLPConfig, *metrics.Metrics) otlpMetricsPusher { return &fakeOTLPPusher{} },
+		func(runtimeOptions, *slog.Logger, signalNotifier, otlpPusherFactory) (*runtimeState, error) {
+			return &runtimeState{
+				proxy:        &proxy.Proxy{},
+				server:       &fakeHTTPServer{},
+				cacheCleanup: func() {},
+				stopOTLP:     func() {},
+				reloadCh:     reloadCh,
+				shutdownCh:   shutdownCh,
+			}, nil
+		},
+		func(httpServer, serverLoopOptions, *slog.Logger, func(string, ...any)) {},
+		func(ch <-chan os.Signal, _ httpServer, _ time.Duration, _ *slog.Logger) {
+			<-ch
+		},
+	)
+
+	if exits.calls != 0 {
+		t.Fatalf("expected no exit on success, got %d calls", exits.calls)
 	}
 }
 
@@ -636,7 +714,8 @@ func TestBuildProxyConfig(t *testing.T) {
 		backendTimeout:           5 * time.Second,
 		backendBasicAuth:         "user:pass",
 		backendTLSSkip:           true,
-		forwardHeaders:           "Authorization, X-Scope-OrgID",
+		forwardHeaders:           "X-Scope-OrgID",
+		forwardAuthorization:     true,
 		forwardCookies:           "session, csrf",
 		derivedFieldsJSON:        `[{"name":"traceID","matcherRegex":"trace_id=(\\w+)","url":"http://tempo/${__value.raw}"}]`,
 		streamResponse:           true,
@@ -675,7 +754,7 @@ func TestBuildProxyConfig(t *testing.T) {
 	if len(got.TenantMap) != 1 || got.TenantMap["team-a"].AccountID != "1" {
 		t.Fatalf("unexpected tenant map: %+v", got.TenantMap)
 	}
-	if len(got.ForwardHeaders) != 2 || got.ForwardHeaders[0] != "Authorization" {
+	if len(got.ForwardHeaders) != 2 || got.ForwardHeaders[0] != "X-Scope-OrgID" || got.ForwardHeaders[1] != "Authorization" {
 		t.Fatalf("unexpected forward headers: %+v", got.ForwardHeaders)
 	}
 	if len(got.ForwardCookies) != 2 || got.ForwardCookies[1] != "csrf" {
@@ -704,6 +783,16 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if got.PeerAuthToken != "peer-secret" {
 		t.Fatalf("unexpected peer auth token: %q", got.PeerAuthToken)
+	}
+}
+
+func TestParseForwardHeaders(t *testing.T) {
+	got := parseForwardHeaders("authorization, X-Scope-OrgID, Authorization", true)
+	if len(got) != 2 {
+		t.Fatalf("expected deduplicated forward headers, got %+v", got)
+	}
+	if got[0] != "authorization" || got[1] != "X-Scope-OrgID" {
+		t.Fatalf("unexpected forward header order/content: %+v", got)
 	}
 }
 
@@ -780,7 +869,7 @@ func TestBuildCacheLayer_WithoutDiskCache(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
 
-	c, cleanup, err := buildCacheLayer(15*time.Second, 123, cache.DiskCacheConfig{}, logger)
+	c, cleanup, err := buildCacheLayer(15*time.Second, 123, defaultCacheMaxBytes, cache.DiskCacheConfig{}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -798,7 +887,7 @@ func TestBuildCacheLayer_WithDiskCache(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
 
-	c, cleanup, err := buildCacheLayer(15*time.Second, 123, cache.DiskCacheConfig{
+	c, cleanup, err := buildCacheLayer(15*time.Second, 123, defaultCacheMaxBytes, cache.DiskCacheConfig{
 		Path:          filepath.Join(t.TempDir(), "cache.db"),
 		Compression:   true,
 		FlushSize:     7,
@@ -820,7 +909,7 @@ func TestBuildCacheLayer_WithDiskCache(t *testing.T) {
 
 func TestBuildCacheLayer_InvalidDiskCache(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	if _, cleanup, err := buildCacheLayer(15*time.Second, 123, cache.DiskCacheConfig{
+	if _, cleanup, err := buildCacheLayer(15*time.Second, 123, defaultCacheMaxBytes, cache.DiskCacheConfig{
 		Path:          t.TempDir(),
 		Compression:   true,
 		FlushSize:     7,
@@ -968,8 +1057,11 @@ func TestBuildRuntime_Success(t *testing.T) {
 	fake := &fakeOTLPPusher{}
 
 	rt, err := buildRuntime(runtimeOptions{
-		cacheTTL: 10 * time.Second,
-		cacheMax: 50,
+		cacheTTL:              10 * time.Second,
+		cacheMax:              50,
+		cacheMaxBytes:         defaultCacheMaxBytes,
+		compatCacheEnabled:    true,
+		compatCacheMaxPercent: defaultCompatCachePercent,
 		proxyCfg: proxyRuntimeConfig{
 			backendURL:               "http://example.com",
 			logLevel:                 "info",
@@ -1026,8 +1118,9 @@ func TestBuildRuntime_Success(t *testing.T) {
 func TestBuildRuntime_ProxyConfigError(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	_, err := buildRuntime(runtimeOptions{
-		cacheTTL: 10 * time.Second,
-		cacheMax: 50,
+		cacheTTL:      10 * time.Second,
+		cacheMax:      50,
+		cacheMaxBytes: defaultCacheMaxBytes,
 		proxyCfg: proxyRuntimeConfig{
 			backendURL:        "http://example.com",
 			labelStyle:        "bad",
@@ -1047,8 +1140,11 @@ func TestBuildRuntime_HTTPServerErrorStopsOTLP(t *testing.T) {
 	fake := &fakeOTLPPusher{}
 
 	_, err := buildRuntime(runtimeOptions{
-		cacheTTL: 10 * time.Second,
-		cacheMax: 50,
+		cacheTTL:              10 * time.Second,
+		cacheMax:              50,
+		cacheMaxBytes:         defaultCacheMaxBytes,
+		compatCacheEnabled:    true,
+		compatCacheMaxPercent: defaultCompatCachePercent,
 		proxyCfg: proxyRuntimeConfig{
 			backendURL:               "http://example.com",
 			logLevel:                 "info",
@@ -1175,6 +1271,9 @@ func TestLogProxyStartup(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, nil))
 	c := cache.New(30*time.Second, 100)
+	compat := cache.New(30*time.Second, 10)
+	defer c.Close()
+	defer compat.Close()
 	pc := cache.NewPeerCache(cache.PeerConfig{
 		SelfAddr:      "10.0.0.1:3100",
 		DiscoveryType: "static",
@@ -1190,7 +1289,7 @@ func TestLogProxyStartup(t *testing.T) {
 		PeerCache:         pc,
 	}
 
-	logProxyStartup(logger, cfg, "10.0.0.1:3100", "static", c)
+	logProxyStartup(logger, cfg, "10.0.0.1:3100", "static", c, compat)
 
 	logs := buf.String()
 	for _, want := range []string{
@@ -1199,6 +1298,7 @@ func TestLogProxyStartup(t *testing.T) {
 		"label translation enabled",
 		"loaded derived fields",
 		"peer cache enabled",
+		"compatibility edge cache active",
 	} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected log %q in %s", want, logs)

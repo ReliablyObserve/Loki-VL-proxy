@@ -30,7 +30,6 @@ For Grafana Logs Drilldown and Explore compatibility:
 - Parsed fields and structured metadata are surfaced through `detected_fields` and `detected_field/{name}/values`.
 - With `-metadata-field-mode=hybrid` (the default), field-oriented APIs expose both native VictoriaLogs dotted names and translated Loki aliases when they differ, for example `service.name` and `service_name`.
 - Synthetic compatibility labels such as `service_name` and `detected_level` stay available on the stream and label APIs.
-
 ## Delete Endpoint (Exception)
 
 | Endpoint | Method | VL Backend |
@@ -61,7 +60,14 @@ curl -X POST 'http://proxy:3100/loki/api/v1/delete' \
 |---|---|
 | `POST /loki/api/v1/push` | 405 Method Not Allowed |
 
-This is a read-only proxy. Log ingestion should go directly to VictoriaLogs.
+This is a read-only proxy. Log ingestion should go directly to VictoriaLogs-side ingestion paths, for example:
+
+- `vlagent` pipelines targeting VictoriaLogs ([docs](https://docs.victoriametrics.com/victorialogs/data-ingestion/))
+- Loki-push-compatible ingestion endpoints handled on the VictoriaLogs side
+- OTLP log ingestion into VictoriaLogs
+- native JSON / OTel-shaped log ingestion into VictoriaLogs
+
+After ingestion, data is queryable through the proxy's Loki-compatible read API.
 
 ## Alerting and Config Compatibility
 
@@ -78,12 +84,17 @@ This is a read-only proxy. Log ingestion should go directly to VictoriaLogs.
 | `GET /api/prom/alerts` | JSON alias for `/loki/api/v1/alerts` | Loki/Grafana compatibility |
 | `GET /prometheus/api/v1/alerts` | Prometheus-style JSON passthrough when `-alerts-backend` or `-ruler-backend` is configured | Grafana alerting compatibility |
 | `GET /config` | YAML stub | Configuration endpoint |
+| `GET /loki/api/v1/drilldown-limits` | Bootstrap/capability endpoint for Grafana Logs Drilldown | Datasource capability probing |
 
-Read-path alerting compatibility follows Loki-facing routes and query parameters, including legacy YAML responses on the classic Loki rules endpoints. Write-path ruler APIs are still not implemented. If you configure a backend such as `vmalert`, the proxy forwards tenant context using VictoriaLogs-style `AccountID` and `ProjectID` headers after applying the normal tenant mapping logic.
+Behavior and scope notes for these endpoints live in:
+- [Configuration](configuration.md) for flags, tenant fanout behavior, and backend mapping
+- [Known Issues](KNOWN_ISSUES.md) for intentional compatibility boundaries
 
-Query endpoints also support Loki-style explicit multi-tenant headers such as `X-Scope-OrgID: team-a|team-b`. The proxy fans those requests out per tenant, merges the Loki-shaped responses, and injects synthetic `__tenant_id__` labels in merged results. Leading-selector `__tenant_id__` matchers such as `{app="api",__tenant_id__="team-b"}` narrow the fanout set before backend requests are issued. `/tail`, delete, and write endpoints remain single-tenant.
+Write-surface boundary for rules and alerts:
 
-`/loki/api/v1/drilldown-limits` is a bootstrap/capability endpoint for Grafana Logs Drilldown and does not require a tenant header, even when `-auth.enabled=true`.
+- These routes expose read compatibility only (Loki YAML views and Prometheus-style JSON views).
+- Rule and alert write/lifecycle operations remain on [`vmalert`](https://docs.victoriametrics.com/vmalert/) and VictoriaLogs backend systems ([VictoriaLogs docs](https://docs.victoriametrics.com/victorialogs/)).
+- The proxy does not implement Loki ruler write APIs.
 
 ## Infrastructure Endpoints
 
@@ -97,54 +108,9 @@ Query endpoints also support Loki-style explicit multi-tenant headers such as `X
 
 ## Observability
 
-### Metrics (Prometheus)
+Observability details are maintained in [Observability Guide](observability.md), including:
 
-```
-# Request tracking
-loki_vl_proxy_requests_total{endpoint, status}
-loki_vl_proxy_request_duration_seconds{endpoint}  (histogram)
-
-# Per-tenant tracking
-loki_vl_proxy_tenant_requests_total{tenant, endpoint, status}
-loki_vl_proxy_tenant_request_duration_seconds{tenant, endpoint}  (histogram)
-
-# Per-client tracking
-loki_vl_proxy_client_requests_total{client, endpoint}
-loki_vl_proxy_client_response_bytes_total{client}
-loki_vl_proxy_client_status_total{client, endpoint, status}
-loki_vl_proxy_client_inflight_requests{client}
-loki_vl_proxy_client_request_duration_seconds{client, endpoint}  (histogram)
-loki_vl_proxy_client_query_length_chars{client, endpoint}  (histogram)
-
-# Client error breakdown
-loki_vl_proxy_client_errors_total{endpoint, reason}
-
-# Cache efficiency
-loki_vl_proxy_cache_hits_total
-loki_vl_proxy_cache_misses_total
-
-# Fleet peer-cache visibility
-loki_vl_proxy_peer_cache_peers
-loki_vl_proxy_peer_cache_cluster_members
-loki_vl_proxy_peer_cache_hits_total
-loki_vl_proxy_peer_cache_misses_total
-loki_vl_proxy_peer_cache_errors_total
-
-# Translation tracking
-loki_vl_proxy_translations_total
-loki_vl_proxy_translation_errors_total
-
-# Circuit breaker
-loki_vl_proxy_circuit_breaker_state  (0=closed, 1=open, 2=half-open)
-
-# System
-loki_vl_proxy_uptime_seconds
-```
-
-### Request Logs
-
-Structured JSON to stdout:
-
-```json
-{"time":"2026-04-04T10:30:00Z","level":"INFO","msg":"request","endpoint":"query_range","method":"GET","status":200,"duration_ms":42,"tenant":"team-alpha","query":"{app=\"nginx\"} |= \"error\"","client":"10.0.1.42:5678","client_id":"alice@example.com","client_source":"grafana_user"}
-```
+- metrics and labels exposed on `/metrics`
+- OTLP push configuration
+- structured request log shape
+- recommended dashboards and alert signals

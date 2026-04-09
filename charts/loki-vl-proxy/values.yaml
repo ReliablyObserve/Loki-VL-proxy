@@ -33,7 +33,7 @@ workload:
     persistentVolumeClaimRetentionPolicy: {}
 
 image:
-  repository: ghcr.io/szibis/loki-vl-proxy
+  repository: ghcr.io/reliablyobserve/loki-vl-proxy
   tag: ""  # defaults to Chart.appVersion
   pullPolicy: IfNotPresent
   pullSecrets: []
@@ -76,6 +76,7 @@ extraArgs:
   # Backend auth to VictoriaLogs
   # backend-basic-auth: "user:password"
   # forward-headers: "Authorization"
+  # forward-authorization: "true" # convenience flag; appends Authorization to forwarded header allowlist
   # forward-cookies: "vmui_session"
   # Label translation (OTel compatibility)
   # label-style: "underscores"  # convert VL dotted fields (service.name) to Loki underscores (service_name)
@@ -86,13 +87,20 @@ extraArgs:
   # Stream selector optimization — list VL _stream_fields labels for fast index path
   # stream-fields: "app,env,namespace"
 
-# Go runtime tuning — set GOMEMLIMIT to ~90% of memory limit for optimal GC
-# This prevents OOM while minimizing GC overhead. See docs/performance.md.
 # Go runtime tuning:
-# GOMEMLIMIT is auto-calculated as goMemLimitPercent% of resources.limits.memory.
-# Override with goMemLimit to set an explicit value (e.g., "500MiB").
-goMemLimitPercent: 70  # percentage of resources.limits.memory
-goMemLimit: ""         # explicit override; if set, goMemLimitPercent is ignored
+# The chart exports GOMEMLIMIT into the container env.
+# Priority:
+# 1) goMemLimit (explicit value) if set
+# 2) goMemLimitPercent% of resources.limits.memory when goMemLimit is empty
+#
+# Example with limits.memory=256Mi and goMemLimitPercent=70:
+#   GOMEMLIMIT=187904819 (bytes)
+#
+# Supported resources.limits.memory units for percentage mode:
+# Ki, Mi, Gi, Ti, Pi, Ei, K, M, G, T, P, E (integer quantities)
+# If memory limit is missing/unsupported, no computed GOMEMLIMIT is injected.
+goMemLimitPercent: 70  # Percentage of resources.limits.memory used when goMemLimit is empty
+goMemLimit: ""         # Explicit GOMEMLIMIT value (for example 500MiB); overrides goMemLimitPercent
 
 # Environment variables (alternative to flags, also for secrets)
 # Use this for secrets or env-based integration config when you don't want
@@ -122,13 +130,30 @@ envFrom: []
   #     name: loki-vl-proxy-config
 
 # --- PrometheusRule (alert rules for Prometheus Operator) ---
+# Base rules source:
+# - canonical repo asset: /alerting/loki-vl-proxy-prometheusrule.yaml
+# - chart copy consumed by templates: charts/loki-vl-proxy/alerting/loki-vl-proxy-prometheusrule.yaml
+# Keep both files aligned with: ./scripts/ci/sync_observability_assets.sh
 prometheusRule:
   enabled: false
   namespace: ""
   labels: {}
+  # Base URL used by alert annotations.runbook_url.
+  # Each alert appends its own runbook filename.
+  runbookBaseUrl: "https://github.com/ReliablyObserve/Loki-VL-proxy/blob/main/docs/runbooks"
+  # Standardized labels merged directly into each base rule for Alertmanager/vmalert routing.
+  standardLabels:
+    team: "sre"
+    owner: "reliablyobserve"
+    source: "vmalert"
+    managedBy: "helm"
   additionalRules: []
 
 # --- Grafana Dashboard (auto-provisioned via ConfigMap) ---
+# Dashboard sources:
+# - canonical repo assets: /dashboard/*.json
+# - chart copies consumed by templates: charts/loki-vl-proxy/dashboards/*.json
+# Keep both files aligned with: ./scripts/ci/sync_observability_assets.sh
 grafanaDashboard:
   enabled: false
   namespace: ""

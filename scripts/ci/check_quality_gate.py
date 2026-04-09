@@ -25,6 +25,11 @@ def check_non_decreasing(failures, label, base, head, epsilon=0.0):
         failures.append(f"{label} regressed: base={base}, head={head}")
 
 
+def check_minimum(failures, label, head, minimum, epsilon=0.0):
+    if head < (minimum - epsilon - 1e-9):
+        failures.append(f"{label} below minimum: minimum={minimum}, head={head}")
+
+
 def check_threshold(
     failures,
     label,
@@ -87,105 +92,119 @@ def main():
             float(head["compatibility"][key]["pct"]),
         )
 
-    mem_pct_threshold = 20.0
-    alloc_pct_threshold = 25.0
-    cpu_pct_threshold = 35.0
+    check_minimum(
+        failures,
+        "Loki compatibility",
+        float(head["compatibility"]["loki"]["pct"]),
+        100.0,
+        epsilon=0.1,
+    )
+
+    mem_pct_threshold = 15.0
+    alloc_pct_threshold = 15.0
+    cpu_pct_threshold = 25.0
+    cpu_abs_threshold = 750.0
+    cpu_min_base = 500.0
+    mem_abs_threshold = 32.0
+    mem_min_base = 64.0
+    alloc_abs_threshold = 1.0
+    alloc_min_base = 1.0
     benchmarks = (
         (
             "query_range_cache_hit_ns_per_op",
             "QueryRange cache-hit CPU cost",
             "lower",
             cpu_pct_threshold,
-            5_000.0,
-            1_000.0,
+            cpu_abs_threshold,
+            cpu_min_base,
         ),
         (
             "query_range_cache_hit_bytes_per_op",
             "QueryRange cache-hit memory",
             "lower",
             mem_pct_threshold,
-            512.0,
-            256.0,
+            mem_abs_threshold,
+            mem_min_base,
         ),
         (
             "query_range_cache_hit_allocs_per_op",
             "QueryRange cache-hit allocations",
             "lower",
             alloc_pct_threshold,
-            4.0,
-            1.0,
+            alloc_abs_threshold,
+            alloc_min_base,
         ),
         (
             "query_range_cache_bypass_ns_per_op",
             "QueryRange cache-bypass CPU cost",
             "lower",
             cpu_pct_threshold,
-            5_000.0,
-            1_000.0,
+            cpu_abs_threshold,
+            cpu_min_base,
         ),
         (
             "query_range_cache_bypass_bytes_per_op",
             "QueryRange cache-bypass memory",
             "lower",
             mem_pct_threshold,
-            512.0,
-            256.0,
+            mem_abs_threshold,
+            mem_min_base,
         ),
         (
             "query_range_cache_bypass_allocs_per_op",
             "QueryRange cache-bypass allocations",
             "lower",
             alloc_pct_threshold,
-            4.0,
-            1.0,
+            alloc_abs_threshold,
+            alloc_min_base,
         ),
         (
             "labels_cache_hit_ns_per_op",
             "Labels cache-hit CPU cost",
             "lower",
             cpu_pct_threshold,
-            5_000.0,
-            1_000.0,
+            cpu_abs_threshold,
+            cpu_min_base,
         ),
         (
             "labels_cache_hit_bytes_per_op",
             "Labels cache-hit memory",
             "lower",
             mem_pct_threshold,
-            512.0,
-            256.0,
+            mem_abs_threshold,
+            mem_min_base,
         ),
         (
             "labels_cache_hit_allocs_per_op",
             "Labels cache-hit allocations",
             "lower",
             alloc_pct_threshold,
-            4.0,
-            1.0,
+            alloc_abs_threshold,
+            alloc_min_base,
         ),
         (
             "labels_cache_bypass_ns_per_op",
             "Labels cache-bypass CPU cost",
             "lower",
             cpu_pct_threshold,
-            5_000.0,
-            1_000.0,
+            cpu_abs_threshold,
+            cpu_min_base,
         ),
         (
             "labels_cache_bypass_bytes_per_op",
             "Labels cache-bypass memory",
             "lower",
             mem_pct_threshold,
-            512.0,
-            256.0,
+            mem_abs_threshold,
+            mem_min_base,
         ),
         (
             "labels_cache_bypass_allocs_per_op",
             "Labels cache-bypass allocations",
             "lower",
             alloc_pct_threshold,
-            4.0,
-            1.0,
+            alloc_abs_threshold,
+            alloc_min_base,
         ),
     )
     for (

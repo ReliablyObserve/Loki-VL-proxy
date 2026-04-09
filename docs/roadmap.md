@@ -41,6 +41,8 @@
 - [x] Extended binary ops (`%`, `^`, `==`, `!=`, `>`, `<`, `>=`, `<=`)
 - [x] Datasource compatibility handlers (`/rules`, `/alerts`, `/config`)
 - [x] Playwright UI e2e tests
+- [x] `/tail` browser and ops coverage (origin policy, native fallback, ingress recovery, upstream `401`/`403`/`5xx` parity)
+- [x] Multi-tenant Explore and Logs Drilldown coverage for `__tenant_id__`, labels, series, and detected field/label browser/resource surfaces
 - [x] Delete API endpoint with safeguards (confirmation, tenant scoping, audit logging)
 - [x] `without()` clause detection and clear error message
 - [x] `IsScalar` supports negative and scientific notation
@@ -55,6 +57,9 @@
 - [x] Performance: 39K req/s (buffer pools, sync.Pool, GOGC=200, connection pool)
 - [x] Complete Helm chart: 11 templates, GOMEMLIMIT auto-calc, HTTPRoute
 - [x] 542 tests, CI bench job, regression gates
+- [x] Repository coverage raised above 90% with additional runtime, middleware, cache, and proxy-path tests
+- [x] Tier0 compatibility-edge cache with bounded memory budget, safe GET-only guardrails, and reload invalidation
+- [x] Fleet shadow-copy validation for 3-peer cache reuse plus Tier0/fleet micro-benchmarks
 
 ## Planned
 
@@ -66,10 +71,8 @@
 - [x] Peer cache Phase 1 implementation (DNS discovery + peer fetch) (v0.24.0)
 - [x] System metrics in /metrics (CPU, memory, IO, network via /proc) (v0.19.0)
 - [x] Native VL stream selector optimization for known `_stream_fields` (v0.23.0)
-- [ ] Full Loki ruler / alerting API semantics beyond read-path compatibility and backend passthrough
 - [x] PR quality report workflow with coverage, compatibility, and performance delta comments (v0.26.0)
-- [ ] Raise total repository coverage toward 95%+ by extracting `main()` and remaining low-level system readers into smaller testable units
-- [ ] Finish `/tail` browser and ops compatibility: browser CI coverage, reverse-proxy websocket behavior, and backend close/error parity
-- [ ] Expand live multi-tenant Explore and Drilldown coverage for `__tenant_id__`, labels, series, and detected field/label surfaces
+- [ ] Tighten remaining merged-tenant Drilldown metadata accuracy for field and label cardinality surfaces
 - [ ] Convert more upstream Loki, Logs Drilldown, and VictoriaLogs edge cases into regression tests
-- [ ] Push `cmd/proxy` coverage further by extracting more startup/config/runtime wiring out of `main()`
+- [ ] Expand browser-level multi-tenant Explore and Drilldown scenarios where API parity already exists but UI combinations still need live regression coverage
+- [x] Promote compose-backed e2e fleet cache smoke coverage into required GitHub Actions for pull requests and post-merge `main` runs (v0.27.7)

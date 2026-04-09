@@ -8,11 +8,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/szibis/Loki-VL-proxy/internal/rulesmigrate"
+	"github.com/ReliablyObserve/Loki-VL-proxy/internal/rulesmigrate"
 )
 
+type exitFunc func(int)
+
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	runMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Exit)
+}
+
+func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer, exit exitFunc) {
+	exit(run(args, stdin, stdout, stderr))
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

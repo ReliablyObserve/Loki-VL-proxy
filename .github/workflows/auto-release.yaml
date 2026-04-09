@@ -185,10 +185,13 @@ jobs:
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      HAS_RELEASE_PR_TOKEN: ${{ secrets.RELEASE_PR_TOKEN != '' }}
+      HAS_GHCR_PACKAGE_ADMIN_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
 
       - uses: actions/setup-go@v5
         with:
@@ -284,11 +287,12 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "tags<<EOF"
-            echo "ghcr.io/${{ github.repository_owner }}/loki-vl-proxy:${VERSION}"
+            echo "ghcr.io/${OWNER_LC}/loki-vl-proxy:${VERSION}"
             if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-              echo "docker.io/${DOCKERHUB_USERNAME}/loki-vl-proxy:${VERSION}"
+              echo "docker.io/reliablyobserve/loki-vl-proxy:${VERSION}"
             fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
@@ -307,7 +311,24 @@ jobs:
       - name: Publish Helm chart to GHCR
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm push "dist/loki-vl-proxy-${VERSION}.tgz" "oci://ghcr.io/${OWNER_LC}/charts"
+
+      - name: Ensure GHCR Helm chart package is public
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PACKAGE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          OWNER_LC="$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          PKG="charts%2Floki-vl-proxy"
+          if [ "${HAS_GHCR_PACKAGE_ADMIN_TOKEN}" != "true" ]; then
+            echo "::warning::GHCR_PACKAGE_ADMIN_TOKEN not configured. Helm chart visibility cannot be enforced automatically."
+            echo "::warning::Set package visibility to public manually: ghcr.io/${OWNER_LC}/charts/loki-vl-proxy"
+            exit 0
+          fi
+          gh api -X PATCH "/orgs/${OWNER}/packages/container/${PKG}/visibility" -f visibility=public >/dev/null
+          echo "Ensured public visibility for ghcr.io/${OWNER_LC}/charts/loki-vl-proxy"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -329,8 +350,18 @@ jobs:
           CODE_LINES: ${{ needs.validate-release.outputs.code_lines }}
         run: |
           set -euo pipefail
+          if [ "${HAS_RELEASE_PR_TOKEN}" != "true" ]; then
+            echo "::warning::RELEASE_PR_TOKEN is not configured. Metadata PRs created by github-actions may not trigger pull_request checks automatically."
+          fi
           chmod +x scripts/ci/sync_release_metadata.sh
-          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "${TEST_COUNT}" "${COVERAGE_PCT}" "${CODE_LINES}" .
+          scripts/ci/sync_release_metadata.sh "${VERSION}" "$(date +%Y-%m-%d)" "${TEST_COUNT}" "${COVERAGE_PCT}" "${CODE_LINES}" . "${GITHUB_REPOSITORY}"
+
+          CHART_VERSION="$(awk -F: '/^version:/ {v=$2; gsub(/[ "]/, "", v); print v; exit}' charts/loki-vl-proxy/Chart.yaml)"
+          CHART_APP_VERSION="$(awk -F: '/^appVersion:/ {v=$2; gsub(/[ "]/, "", v); print v; exit}' charts/loki-vl-proxy/Chart.yaml)"
+          if [ "${CHART_VERSION}" != "${VERSION}" ] || [ "${CHART_APP_VERSION}" != "${VERSION}" ]; then
+            echo "::error::Chart.yaml version/appVersion mismatch after metadata sync: version=${CHART_VERSION} appVersion=${CHART_APP_VERSION} expected=${VERSION}"
+            exit 1
+          fi
 
           if git diff --quiet --exit-code -- CHANGELOG.md README.md docs/observability.md charts/loki-vl-proxy/Chart.yaml; then
             echo "release metadata already synced"
@@ -353,7 +384,7 @@ jobs:
         id: metadata-pr
         if: steps.metadata.outputs.has_changes == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
           BRANCH: ${{ steps.metadata.outputs.branch }}
         run: |
@@ -378,7 +409,7 @@ jobs:
       - name: Enable auto-merge for release metadata PR
         if: steps.metadata-pr.outputs.number != ''
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN != '' && secrets.RELEASE_PR_TOKEN || github.token }}
         run: |
           set -euo pipefail
           gh pr merge "${{ steps.metadata-pr.outputs.number }}" \

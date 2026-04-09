@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- add native VictoriaLogs offenders dashboard with tenant/client/cluster/env filtering for incident analysis independent of Loki-proxy query health
+- expand packaged PrometheusRule coverage with backend-latency and client bad-request burst alerts linked to dedicated runbooks
+
+### Documentation
+
+- split runbooks into per-alert files under `docs/runbooks/` and add deployment/scaling best-practice guidance for prevention-focused operations
+- document dashboard purpose mapping in README/operations/observability and move release-process details to `docs/release-info.md`
+
+### CI
+
+- enforce canonical dashboard/alert asset sync in CI and support syncing multiple dashboard JSON files into chart assets
+
+## [0.27.8] - 2026-04-08
+
+### CI
+
+- stabilize PR performance smoke by running benchmarks/load in an isolated phase after functional checks, increasing benchmark sample depth (`-benchtime=2s`, `-count=7`), and tightening perf regression thresholds to better flag real cache-bypass regressions
+- harden release publishing for org moves by normalizing GHCR owner names to lowercase and keeping metadata-sync invocation compatible with tagged release script versions
+- add fallback manual-release notes when a tag lacks a versioned changelog section, so republish runs can still proceed
+
+### Features
+
+- make chart `goMemLimitPercent` effective at runtime by computing and injecting `GOMEMLIMIT` from `resources.limits.memory` when `goMemLimit` is not explicitly set
+- expand the packaged PrometheusRule set with backend-latency and client-bad-request alerts, and point each alert to dedicated per-alert runbook files
+- add a native VictoriaLogs offenders dashboard focused on tenant/client/cluster/env filtering to keep operator visibility when Loki/proxy query paths are degraded
+
+### Documentation
+
+- update values and performance docs with explicit `goMemLimitPercent` behavior, precedence, supported units, and runtime output format
+- reorganize README LogQL compatibility into native-VictoriaLogs vs proxy-compatibility sections with direct VictoriaLogs references, expand documentation index links, and clarify read-only rules/alerts boundaries with `vmalert` and VictoriaLogs docs
+- split runbooks into `docs/runbooks/` per-alert files, add deployment/scaling best-practice guidance, and document dashboard roles in README/operations/observability
+
+### CI
+
+- make observability asset sync/check support multiple dashboard JSON files under `dashboard/*.json` and chart copies under `charts/loki-vl-proxy/dashboards/*.json`
+
+## [0.27.7] - 2026-04-08
+
+### Features
+
+- add safe Tier0 compatibility-cache controls and route-level guardrails for cacheable Loki read endpoints
+
+### Performance
+
+- expand cache benchmark coverage for query and Drilldown metadata paths, including delayed-backend hit-path comparisons and fleet peer-cache warm-hit behavior
+
+### Tests
+
+- extend proxy, middleware, cache, metrics, and e2e fleet/ui coverage to harden cache behavior, race-prone paths, and runtime regressions
+
+### CI
+
+- enforce Helm chart `version` and `appVersion` validation after release metadata sync in both auto and manual release workflows, and publish Docker Hub images to the canonical `docker.io/reliablyobserve/loki-vl-proxy` repository when credentials are configured
+
+### Documentation
+
+- refresh README, architecture, and performance guidance with clearer operator-facing cache topology, Tier0 mapping, and value-focused messaging
+- update repository links, chart metadata references, image examples, and testing/compatibility doc links to the `ReliablyObserve/Loki-VL-proxy` org namespace and current docs structure
+
+## [0.27.6] - 2026-04-07
+
+### CI
+
+- require `100%` Loki compatibility on PR quality and dedicated Loki compatibility workflow checks
+- allow release metadata sync PRs to pass changelog gating when they materialize `Unreleased` into a versioned section
+- support `RELEASE_PR_TOKEN` in release workflows so metadata PRs trigger required pull_request checks under branch protection
+- skip PR quality performance smoke on non-perf-sensitive changes to avoid runner-jitter noise in docs/metadata/CI-only PR reports
+
 ## [0.27.5] - 2026-04-07
 
 ### CI
