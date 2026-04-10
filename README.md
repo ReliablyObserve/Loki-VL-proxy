@@ -19,6 +19,29 @@ No custom Grafana datasource plugin. No sidecar translation service. One small s
 - **Production guardrails**: Tenant isolation, bounded fanout, circuit breaking, rate limits, and safe caching.
 - **Fast repeat reads**: Tiered cache with optional disk and fleet peer reuse.
 
+## Key Features
+
+### Compatibility
+
+- Loki-compatible read API for Grafana datasource, Explore, Drilldown, and API clients.
+- Strict tuple contracts: default 2-tuple, explicit 3-tuple only via `categorize-labels`.
+- Multi-tenant read fanout with tenant isolation guardrails.
+- Rules and alerts read compatibility from `vmalert`.
+
+### Performance
+
+- Query-range windowing with historical window reuse.
+- Adaptive bounded parallel fanout for long time ranges.
+- Tiered caching: compatibility-edge, memory, disk, and optional peer cache.
+- Request coalescing and protective limits to reduce backend pressure.
+
+### Operations
+
+- Structured metrics and logs for cache, latency, fanout, tenant/client visibility.
+- Helm-ready deployment model for production clusters.
+- Compatibility CI tracks for Loki, Logs Drilldown, and VictoriaLogs.
+- Runbook-backed alerting assets for operational response.
+
 ## High-Level Flow
 
 ```mermaid
@@ -28,6 +51,65 @@ flowchart LR
     C[Upstream<br/>VictoriaLogs data + vmalert rules/alerts]
 
     A --> B --> C
+```
+
+## Detailed Architecture
+
+```mermaid
+flowchart TD
+    subgraph L1["Clients"]
+        G["Grafana<br/>Explore / Drilldown / Dashboards"]
+        M["MCP / LLM / API Tools"]
+        C["CLI / SDK Consumers"]
+    end
+
+    subgraph L2["Loki Compatibility Layer (Proxy)"]
+        API["Loki HTTP + WS API<br/>query / query_range / labels / tail / rules / alerts"]
+        GUARD["Tenant guardrails + auth context + rate limits + policy checks"]
+        EDGE["Compatibility-edge cache (Tier0)<br/>safe GET response cache"]
+    end
+
+    subgraph L3["Execution Paths"]
+        Q["Query translation + shaping"]
+        T["Tail path (native or synthetic)"]
+        R["Rules / alerts read bridge"]
+        RESP["Loki-compatible response"]
+    end
+
+    subgraph L4["Cache Tiers"]
+        L1C["L1 memory cache"]
+        L2C["L2 disk cache (optional)"]
+        L3C["L3 peer cache (optional)"]
+    end
+
+    subgraph L5["Upstream Systems"]
+        VL["VictoriaLogs<br/>log data"]
+        VMA["vmalert<br/>rules / alerts state"]
+        VM["VictoriaMetrics (optional)<br/>recording rule outputs"]
+    end
+
+    G --> API
+    M --> API
+    C --> API
+
+    API --> GUARD
+    GUARD --> EDGE
+    EDGE -->|hit| RESP
+    EDGE -->|miss| Q
+
+    GUARD --> T
+    GUARD --> R
+
+    Q --> L1C
+    L1C -->|miss| L2C
+    L2C -->|miss| L3C
+    L3C -->|miss| VL
+    VL --> Q
+    Q --> RESP
+
+    T --> VL
+    R --> VMA
+    VMA -. optional remote write .-> VM
 ```
 
 ## Product Scope
