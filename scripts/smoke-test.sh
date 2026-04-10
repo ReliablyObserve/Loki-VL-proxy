@@ -5,14 +5,23 @@ PROXY_URL="${PROXY_URL:-http://127.0.0.1:3100}"
 QUERY="${SMOKE_QUERY:-{job=~\".+\"}}"
 LIMIT="${SMOKE_LIMIT:-20}"
 LOOKBACK_SECONDS="${SMOKE_LOOKBACK_SECONDS:-900}"
+RETRIES="${SMOKE_RETRIES:-15}"
+RETRY_SLEEP_SECONDS="${SMOKE_RETRY_SLEEP_SECONDS:-2}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
   exit 1
 fi
 
-now_ns="$(($(date +%s) * 1000000000))"
-start_ns="$((now_ns - LOOKBACK_SECONDS * 1000000000))"
+compute_window() {
+  now_ns="$(($(date +%s) * 1000000000))"
+  start_ns="$((now_ns - LOOKBACK_SECONDS * 1000000000))"
+}
+
+tuple_count() {
+  local payload="$1"
+  echo "$payload" | jq '[.data.result[]?.values[]?] | length'
+}
 
 check_strict_two_tuple() {
   local payload="$1"
@@ -68,6 +77,7 @@ check_categorize_three_tuple() {
 }
 
 fetch_query_range() {
+  compute_window
   curl -sS --get \
     -H 'X-Grafana-User: smoke-canary' \
     -H 'X-Grafana-Org-Id: 1' \
@@ -79,6 +89,7 @@ fetch_query_range() {
 }
 
 fetch_query() {
+  compute_window
   curl -sS --get \
     -H 'X-Grafana-User: smoke-canary' \
     -H 'X-Grafana-Org-Id: 1' \
@@ -89,6 +100,7 @@ fetch_query() {
 }
 
 fetch_query_range_categorized() {
+  compute_window
   curl -sS --get \
     -H 'X-Grafana-User: smoke-canary' \
     -H 'X-Grafana-Org-Id: 1' \
@@ -101,6 +113,7 @@ fetch_query_range_categorized() {
 }
 
 fetch_query_categorized() {
+  compute_window
   curl -sS --get \
     -H 'X-Grafana-User: smoke-canary' \
     -H 'X-Grafana-Org-Id: 1' \
@@ -111,10 +124,34 @@ fetch_query_categorized() {
     "${PROXY_URL}/loki/api/v1/query"
 }
 
-range_payload="$(fetch_query_range)"
-query_payload="$(fetch_query)"
-range_categorized_payload="$(fetch_query_range_categorized)"
-query_categorized_payload="$(fetch_query_categorized)"
+fetch_with_retry() {
+  local fetcher="$1"
+  local endpoint="$2"
+  local payload=""
+  local count=0
+  local attempt=1
+
+  while [[ "$attempt" -le "$RETRIES" ]]; do
+    payload="$($fetcher)"
+    count="$(tuple_count "$payload")"
+    if [[ "$count" -gt 0 ]]; then
+      echo "$payload"
+      return 0
+    fi
+    if [[ "$attempt" -lt "$RETRIES" ]]; then
+      sleep "$RETRY_SLEEP_SECONDS"
+    fi
+    attempt="$((attempt + 1))"
+  done
+
+  echo "no log tuples returned for ${endpoint} after ${RETRIES} attempts; cannot validate tuple contract" >&2
+  return 1
+}
+
+range_payload="$(fetch_with_retry fetch_query_range "/query_range")"
+query_payload="$(fetch_with_retry fetch_query "/query")"
+range_categorized_payload="$(fetch_with_retry fetch_query_range_categorized "/query_range categorize-labels")"
+query_categorized_payload="$(fetch_with_retry fetch_query_categorized "/query categorize-labels")"
 
 check_strict_two_tuple "$range_payload" "/query_range"
 check_strict_two_tuple "$query_payload" "/query"
