@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.22] - 2026-04-10
+
 ### Bug Fixes
 
 - segregate `query`/`query_range` cache keys by tuple mode (`default_2tuple` vs `categorize_labels_3tuple`) to prevent metadata 3-tuples from leaking into default Grafana decode paths
