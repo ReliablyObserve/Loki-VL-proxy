@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.21] - 2026-04-10
+
 ### Bug Fixes
 
 - migrate built-in system metric families from `node_*` to `process_*` so proxy-exported CPU/memory/disk/network/pressure signals are pod/container scoped instead of node-scoped by name
