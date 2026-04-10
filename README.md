@@ -19,7 +19,22 @@ HTTP proxy that exposes a **Loki-compatible read API** on the frontend and trans
 
 This project is intentionally a **read/query proxy**. Ingestion stays on VictoriaLogs-side pipelines (`vlagent`, Loki-push ingestion to VictoriaLogs, OTLP, or native JSON/OTel log ingestion). Data written through those paths is then queryable through the proxy's Loki-compatible read endpoints.
 
-## Architecture
+## High-Level Architecture
+
+```mermaid
+flowchart LR
+    A["Clients<br/>Grafana Explore, Dashboards, Logs Drilldown, Loki API tools, LLM/MCP/API consumers"]
+    B["Loki-VL-proxy (Read Compatibility Layer)<br/>Loki API contract + tenant guardrails + LogQL translation + response shaping + tiered cache"]
+    C["Data + Rules Upstream<br/>VictoriaLogs (log data) + vmalert (rules/alerts state)"]
+
+    A --> B --> C
+
+    style A fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px
+    style B fill:#dbeafe,stroke:#1d4ed8,color:#111827,stroke-width:2px
+    style C fill:#e0f2fe,stroke:#0369a1,color:#111827,stroke-width:2px
+```
+
+## Architecture (Detailed)
 
 ```mermaid
 flowchart TD
@@ -91,6 +106,7 @@ See [Getting Started](docs/getting-started.md), [Architecture](docs/architecture
 - **Loki-compatible frontend** -- use the standard Loki datasource, API shape, and WebSocket tail entrypoints against VictoriaLogs without a custom plugin
 - **Full LogQL execution surface** -- stream selectors, filters, parsers, metric queries, binary expressions, and subqueries are supported, with proxy-side evaluation for the parts VictoriaLogs does not natively provide
 - **Grafana-native workflows** -- Explore, Logs Drilldown, dashboards, live tail, and datasource-side multi-tenant reads work through the same datasource model operators already know
+- **Strict Loki tuple contract** -- default/no-flag responses stay canonical 2-tuples, while `X-Loki-Response-Encoding-Flags: categorize-labels` emits Loki 3-tuples with canonical metadata keys only
 - **OTel-aware label and metadata translation** -- bidirectional dot/underscore conversion plus hybrid field exposure keeps Loki labels usable while preserving dotted OTel-style metadata for field-oriented flows
 - **Read-path rules and alerts compatibility** -- surface `vmalert` rules and alerts on Loki-compatible read endpoints and migrate Loki-style rule files with the built-in converter
 - **Indexed fast path where possible** -- known VictoriaLogs `_stream_fields` can stay on native stream selectors instead of dropping to slower field scans
@@ -126,6 +142,7 @@ See [Getting Started](docs/getting-started.md), [Configuration](docs/configurati
 - **Rules migration support** -- convert Loki-style rule files into `vmalert` `type: vlogs` definitions for read-compatible Grafana alert visibility
 - **Production Helm support** -- OCI chart publishing, `Deployment` or `StatefulSet` modes, persistent disk cache, headless peer discovery, HPA support, and GOMEMLIMIT auto-tuning
 - **Versioned compatibility tracks** -- Loki, VictoriaLogs, and Logs Drilldown are validated as separate compatibility tracks with dedicated CI signals
+- **Automated tuple canary in CI** -- unit tuple-contract gates plus compose-backed smoke checks validate default 2-tuple and categorize-labels 3-tuple behavior on every PR
 
 ## Operational Pack
 
