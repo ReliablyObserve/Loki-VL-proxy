@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- expand tuple-contract coverage and smoke validation paths to keep strict default 2-tuple and categorize-labels 3-tuple behavior regression-safe
+- add e2e compatibility checks for vlogs alerting plus recording-rule visibility across direct `vmalert`, proxy Prometheus endpoints, legacy Loki YAML, and Grafana datasource-proxy paths
+- add dedicated e2e structured-metadata compatibility coverage for `-metadata-field-mode=hybrid` and `-metadata-field-mode=native`
+
+### CI
+
+- extend CI shard coverage to include structured-metadata compatibility tests so metadata mode regressions fail on pull requests
+- harden tuple-smoke wiring to validate strict 2-tuples on the default proxy endpoint and `categorize-labels` 3-tuples on the metadata-enabled endpoint with explicit failure diagnostics
+
+### Documentation
+
+- update architecture/readme diagrams and migration/testing docs to describe recording-rule remote-write expectations and Grafana datasource-proxy `datasource_type=vlogs` validation flow
+
 ## [0.27.19] - 2026-04-10
 
 ### Bug Fixes
@@ -19,10 +34,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - add strict `/query_range` and `/query` contract tests covering both default 2-tuple and `categorize-labels` 3-tuple paths
 - add parser-chain/brace-heavy stream-response regression coverage to prevent `ReadArray` tuple-shape regressions in Grafana Explore/Drilldown
+- extend `TestTupleContract_*` gate coverage to enforce both strict default 2-tuple and `categorize-labels` 3-tuple compliance paths
+- add e2e parity checks for vlogs recording rules and alerts across direct `vmalert`, proxy Prometheus endpoints, legacy Loki YAML rules, and Grafana datasource proxy endpoints
+- add e2e structured-metadata mode checks for `-metadata-field-mode=hybrid` vs `-metadata-field-mode=native` with OTel dotted fields and Loki-compatible underscore labels
 
 ### Documentation
 
 - update API/config docs to describe strict `categorize-labels`-driven 3-tuple behavior and canonical Loki metadata keys
+- update tuple-contract runbook guidance to the strict mode set (`default_2tuple`, `categorize_labels_3tuple`)
+- document pinned e2e stack alerting/runtime updates, including recording-rule coverage and native-metadata profile checks
+- refresh architecture and migration docs/mermaid flows to include optional recording-rule remote-write sinks and Grafana datasource-proxy `datasource_type=vlogs` validation paths
+
+### CI
+
+- add automated `tuple-smoke` workflow job that boots the compat stack, seeds logs, and runs `scripts/smoke-test.sh` (default + categorize-labels checks)
+- add `TestStructuredMetadata_*` coverage to the `e2e-compat (otel-edge)` PR shard so hybrid/native metadata regressions fail on pull requests
+
+### Observability
+
+- align tuple-contract Prometheus alerts with strict mode labels (`default_2tuple`, `categorize_labels_3tuple`) and retire stale `grafana_*` mode assumptions
 
 ## [0.27.18] - 2026-04-10
 
