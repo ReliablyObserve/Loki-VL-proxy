@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - normalize backtick-quoted LogQL line filters (for example ``|= `api` ``) to literal substring matches so parser pipelines such as `| logfmt` no longer drop valid lines
-- enable structured metadata tuples for Grafana callers by default when `-emit-structured-metadata=true`, so Explore one-event details can surface full metadata fields; allow explicit per-request opt-out via `structured_metadata=false`
+- make structured metadata emission default for Grafana query callers when `-emit-structured-metadata=true`, so Explore one-event details can include full metadata beyond stream labels; keep explicit request-level override support via `structured_metadata=true|false` and `X-Loki-Response-Encoding-Flags: structured-metadata`
 
 ### Tests
 
