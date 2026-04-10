@@ -3574,11 +3574,17 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 
 	result, _ := json.Marshal(map[string]interface{}{
 		"status": "success",
-		"data": map[string]interface{}{
-			"resultType": "streams",
-			"result":     streams,
-			"stats":      map[string]interface{}{},
-		},
+		"data": func() map[string]interface{} {
+			data := map[string]interface{}{
+				"resultType": "streams",
+				"result":     streams,
+				"stats":      map[string]interface{}{},
+			}
+			if categorizedLabels {
+				data["encodingFlags"] = []string{"categorize-labels"}
+			}
+			return data
+		}(),
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
@@ -3592,7 +3598,12 @@ func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response, origi
 	w.Header().Set("Transfer-Encoding", "chunked")
 
 	// Write opening envelope
-	w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[`))
+	openEnvelope := `{"status":"success","data":{"resultType":"streams"`
+	if categorizedLabels {
+		openEnvelope += `,"encodingFlags":["categorize-labels"]`
+	}
+	openEnvelope += `,"result":[`
+	w.Write([]byte(openEnvelope))
 	if canFlush {
 		flusher.Flush()
 	}
@@ -3933,24 +3944,23 @@ func buildStreamValues(ts, msg string, structuredMetadata map[string]string, par
 }
 
 func buildStreamValue(ts, msg string, structuredMetadata map[string]string, parsedFields map[string]string, emitStructuredMetadata bool, categorizedLabels bool) interface{} {
-	if !emitStructuredMetadata || !categorizedLabels {
+	if !categorizedLabels {
 		return []interface{}{ts, msg}
 	}
 
 	metadata := map[string]interface{}{}
-	if len(structuredMetadata) > 0 {
-		metadata["structuredMetadata"] = metadataFieldPairs(structuredMetadata)
-	}
-	if len(parsedFields) > 0 {
-		metadata["parsed"] = metadataFieldPairs(parsedFields)
-	}
-	if len(metadata) == 0 {
-		return []interface{}{ts, msg, map[string]interface{}{}}
+	if emitStructuredMetadata {
+		if len(structuredMetadata) > 0 {
+			metadata["structuredMetadata"] = metadataFieldMap(structuredMetadata)
+		}
+		if len(parsedFields) > 0 {
+			metadata["parsed"] = metadataFieldMap(parsedFields)
+		}
 	}
 	return []interface{}{ts, msg, metadata}
 }
 
-func metadataFieldPairs(fields map[string]string) [][]string {
+func metadataFieldMap(fields map[string]string) map[string]string {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -3960,9 +3970,9 @@ func metadataFieldPairs(fields map[string]string) [][]string {
 	}
 	sort.Strings(keys)
 
-	pairs := make([][]string, 0, len(keys))
+	pairs := make(map[string]string, len(keys))
 	for _, key := range keys {
-		pairs = append(pairs, []string{key, fields[key]})
+		pairs[key] = fields[key]
 	}
 	return pairs
 }
@@ -4420,9 +4430,10 @@ type lokiSeriesResponse struct {
 type lokiQueryResponse struct {
 	Status string `json:"status"`
 	Data   struct {
-		ResultType string          `json:"resultType"`
-		Result     json.RawMessage `json:"result"`
-		Stats      json.RawMessage `json:"stats,omitempty"`
+		ResultType    string          `json:"resultType"`
+		Result        json.RawMessage `json:"result"`
+		Stats         json.RawMessage `json:"stats,omitempty"`
+		EncodingFlags []string        `json:"encodingFlags,omitempty"`
 	} `json:"data"`
 }
 
@@ -4873,10 +4884,18 @@ func mergeLokiQueryResponses(tenantIDs []string, recorders []*httptest.ResponseR
 		vectors    []lokiVectorResult
 		matrixes   []lokiMatrixResult
 	)
+	encodingFlagsSet := make(map[string]struct{})
 	for i, rec := range recorders {
 		var resp lokiQueryResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			return nil, "", err
+		}
+		for _, flag := range resp.Data.EncodingFlags {
+			flag = strings.TrimSpace(flag)
+			if flag == "" {
+				continue
+			}
+			encodingFlagsSet[flag] = struct{}{}
 		}
 		if resp.Data.ResultType != "" && resultType == "" {
 			resultType = resp.Data.ResultType
@@ -4893,6 +4912,9 @@ func mergeLokiQueryResponses(tenantIDs []string, recorders []*httptest.ResponseR
 			for _, item := range items {
 				item.Stream = injectTenantLabel(item.Stream, tenantIDs[i])
 				normalizeMetadataPairTuples(item.Values)
+				if streamValuesHaveCategorizedMetadata(item.Values) {
+					encodingFlagsSet["categorize-labels"] = struct{}{}
+				}
 				streams = append(streams, item)
 			}
 		case "vector":
@@ -4936,6 +4958,14 @@ func mergeLokiQueryResponses(tenantIDs []string, recorders []*httptest.ResponseR
 	} else {
 		data["stats"] = map[string]interface{}{}
 	}
+	if len(encodingFlagsSet) > 0 {
+		encodingFlags := make([]string, 0, len(encodingFlagsSet))
+		for flag := range encodingFlagsSet {
+			encodingFlags = append(encodingFlags, flag)
+		}
+		sort.Strings(encodingFlags)
+		data["encodingFlags"] = encodingFlags
+	}
 	body, err := json.Marshal(map[string]interface{}{"status": "success", "data": data})
 	return body, "application/json", err
 }
@@ -4950,8 +4980,8 @@ func latestStreamTimestampStrings(values [][]interface{}) string {
 	return fmt.Sprintf("%v", values[0][0])
 }
 
-// normalizeMetadataPairTuples rewrites tuple metadata to Loki-compatible pair tuples.
-// It normalizes legacy pair-object arrays ({name,value}) and flat maps ({k:v}) into [[name,value], ...].
+// normalizeMetadataPairTuples rewrites tuple metadata to Loki categorized-label object maps.
+// It normalizes legacy pair-object arrays ({name,value}) and pair tuples ([[k,v], ...]) into {"k":"v", ...}.
 func normalizeMetadataPairTuples(values [][]interface{}) {
 	for i := range values {
 		if len(values[i]) < 3 {
@@ -4962,34 +4992,65 @@ func normalizeMetadataPairTuples(values [][]interface{}) {
 			continue
 		}
 		if raw, ok := meta["structuredMetadata"]; ok {
-			meta["structuredMetadata"] = normalizeMetadataPairs(raw)
+			if normalized := normalizeMetadataPairs(raw); len(normalized) > 0 {
+				meta["structuredMetadata"] = normalized
+			} else {
+				delete(meta, "structuredMetadata")
+			}
 		}
 		if raw, ok := meta["parsed"]; ok {
-			meta["parsed"] = normalizeMetadataPairs(raw)
+			if normalized := normalizeMetadataPairs(raw); len(normalized) > 0 {
+				meta["parsed"] = normalized
+			} else {
+				delete(meta, "parsed")
+			}
 		}
 		values[i][2] = meta
 	}
 }
 
-func normalizeMetadataPairs(raw interface{}) []interface{} {
+func normalizeMetadataPairs(raw interface{}) map[string]string {
 	switch typed := raw.(type) {
 	case nil:
 		return nil
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, value := range typed {
+			trimmed := strings.TrimSpace(key)
+			if trimmed == "" {
+				continue
+			}
+			out[trimmed] = value
+		}
+		return out
 	case []interface{}:
-		out := make([]interface{}, 0, len(typed))
+		out := make(map[string]string, len(typed))
 		for _, item := range typed {
 			switch pair := item.(type) {
 			case []interface{}:
 				if len(pair) < 2 {
 					continue
 				}
-				out = append(out, []interface{}{fmt.Sprintf("%v", pair[0]), fmt.Sprintf("%v", pair[1])})
+				key := fmt.Sprintf("%v", pair[0])
+				if strings.TrimSpace(key) == "" {
+					continue
+				}
+				out[key] = fmt.Sprintf("%v", pair[1])
+			case []string:
+				if len(pair) < 2 {
+					continue
+				}
+				key := strings.TrimSpace(pair[0])
+				if key == "" {
+					continue
+				}
+				out[key] = pair[1]
 			case map[string]interface{}:
-				name, _ := pair["name"].(string)
+				name := strings.TrimSpace(fmt.Sprintf("%v", pair["name"]))
 				if name == "" {
 					continue
 				}
-				out = append(out, []interface{}{name, fmt.Sprintf("%v", pair["value"])})
+				out[name] = normalizeMetadataStringValue(pair["value"])
 			}
 		}
 		return out
@@ -4999,14 +5060,37 @@ func normalizeMetadataPairs(raw interface{}) []interface{} {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		out := make([]interface{}, 0, len(keys))
+		out := make(map[string]string, len(keys))
 		for _, key := range keys {
-			out = append(out, []interface{}{key, fmt.Sprintf("%v", typed[key])})
+			trimmed := strings.TrimSpace(key)
+			if trimmed == "" {
+				continue
+			}
+			out[trimmed] = normalizeMetadataStringValue(typed[key])
 		}
 		return out
 	default:
 		return nil
 	}
+}
+
+func normalizeMetadataStringValue(raw interface{}) string {
+	if raw == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", raw)
+}
+
+func streamValuesHaveCategorizedMetadata(values [][]interface{}) bool {
+	for _, tuple := range values {
+		if len(tuple) < 3 {
+			continue
+		}
+		if _, ok := tuple[2].(map[string]interface{}); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeIndexStatsResponses(recorders []*httptest.ResponseRecorder) ([]byte, string, error) {

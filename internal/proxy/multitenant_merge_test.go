@@ -422,7 +422,8 @@ func TestMergeMultiTenantResponsesQueryPreservesThreeTupleValues(t *testing.T) {
 	}
 	var resp struct {
 		Data struct {
-			Result []struct {
+			EncodingFlags []string `json:"encodingFlags"`
+			Result        []struct {
 				Values [][]interface{} `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
@@ -433,6 +434,16 @@ func TestMergeMultiTenantResponsesQueryPreservesThreeTupleValues(t *testing.T) {
 	if len(resp.Data.Result) != 2 {
 		t.Fatalf("expected 2 merged streams, got %#v", resp.Data.Result)
 	}
+	hasCategorizedFlag := false
+	for _, flag := range resp.Data.EncodingFlags {
+		if flag == "categorize-labels" {
+			hasCategorizedFlag = true
+			break
+		}
+	}
+	if !hasCategorizedFlag {
+		t.Fatalf("expected encodingFlags to include categorize-labels, got %#v", resp.Data.EncodingFlags)
+	}
 	for _, item := range resp.Data.Result {
 		if len(item.Values) == 0 || len(item.Values[0]) != 3 {
 			t.Fatalf("expected merged stream values to preserve 3-tuple shape, got %#v", item.Values)
@@ -442,26 +453,24 @@ func TestMergeMultiTenantResponsesQueryPreservesThreeTupleValues(t *testing.T) {
 			t.Fatalf("expected metadata object in tuple[2], got %#v", item.Values[0][2])
 		}
 		if structured, ok := meta["structuredMetadata"]; ok {
-			pairs, ok := structured.([]interface{})
+			fields, ok := structured.(map[string]interface{})
 			if !ok {
-				t.Fatalf("expected structuredMetadata label-pair array, got %#v", structured)
+				t.Fatalf("expected structuredMetadata metadata object map, got %#v", structured)
 			}
-			for _, rawPair := range pairs {
-				pair, ok := rawPair.([]interface{})
-				if !ok || len(pair) < 2 {
-					t.Fatalf("expected structuredMetadata pair tuple, got %#v", rawPair)
+			for field := range fields {
+				if field == "" {
+					t.Fatalf("expected structuredMetadata to contain non-empty keys, got %#v", structured)
 				}
 			}
 		}
 		if parsed, ok := meta["parsed"]; ok {
-			pairs, ok := parsed.([]interface{})
+			fields, ok := parsed.(map[string]interface{})
 			if !ok {
-				t.Fatalf("expected parsed label-pair array, got %#v", parsed)
+				t.Fatalf("expected parsed metadata object map, got %#v", parsed)
 			}
-			for _, rawPair := range pairs {
-				pair, ok := rawPair.([]interface{})
-				if !ok || len(pair) < 2 {
-					t.Fatalf("expected parsed pair tuple, got %#v", rawPair)
+			for field := range fields {
+				if field == "" {
+					t.Fatalf("expected parsed to contain non-empty keys, got %#v", parsed)
 				}
 			}
 		}

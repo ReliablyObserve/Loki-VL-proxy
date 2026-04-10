@@ -58,6 +58,23 @@ jobs:
       - name: Tuple contract gate (default 2-tuple + categorize-labels 3-tuple)
         run: go test ./internal/proxy -run '^TestTupleContract_' -count=1
 
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.1"
+          cache: true
+
+      - name: Fuzz smoke (structured metadata normalization)
+        run: go test ./internal/proxy -run '^$' -fuzz=FuzzNormalizeMetadataPairsFromJSON -fuzztime=5s
+
+      - name: Fuzz smoke (merged categorized stream contract)
+        run: go test ./internal/proxy -run '^$' -fuzz=FuzzMergeLokiQueryResponsesStructuredMetadataContract -fuzztime=5s
+
   tuple-smoke:
     runs-on: ubuntu-latest
     needs: [test]

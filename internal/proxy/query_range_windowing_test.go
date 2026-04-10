@@ -153,7 +153,7 @@ func TestQueryRangeWindow_ParserChainBraceHeavyLine(t *testing.T) {
 	}
 }
 
-func TestQueryRangeWindow_CategorizeLabelsUsesLokiPairArrays(t *testing.T) {
+func TestQueryRangeWindow_CategorizeLabelsUsesMetadataObjectMaps(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		startNs, _ := strconv.ParseInt(r.Form.Get("start"), 10, 64)
@@ -178,7 +178,8 @@ func TestQueryRangeWindow_CategorizeLabelsUsesLokiPairArrays(t *testing.T) {
 
 	var payload struct {
 		Data struct {
-			Result []struct {
+			EncodingFlags []string `json:"encodingFlags"`
+			Result        []struct {
 				Values []json.RawMessage `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
@@ -188,6 +189,16 @@ func TestQueryRangeWindow_CategorizeLabelsUsesLokiPairArrays(t *testing.T) {
 	}
 	if len(payload.Data.Result) == 0 || len(payload.Data.Result[0].Values) == 0 {
 		t.Fatalf("expected non-empty stream values: %#v", payload.Data.Result)
+	}
+	hasCategorizedFlag := false
+	for _, flag := range payload.Data.EncodingFlags {
+		if flag == "categorize-labels" {
+			hasCategorizedFlag = true
+			break
+		}
+	}
+	if !hasCategorizedFlag {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", resp.Body.String())
 	}
 
 	var tuple []json.RawMessage
@@ -199,18 +210,23 @@ func TestQueryRangeWindow_CategorizeLabelsUsesLokiPairArrays(t *testing.T) {
 	}
 
 	var metadata struct {
-		StructuredMetadata [][]string `json:"structuredMetadata"`
-		Parsed             [][]string `json:"parsed"`
+		StructuredMetadata map[string]string `json:"structuredMetadata"`
+		Parsed             map[string]string `json:"parsed"`
 	}
 	if err := json.Unmarshal(tuple[2], &metadata); err != nil {
-		t.Fatalf("expected tuple[2] metadata object with Loki pair arrays, got %s: %v", string(tuple[2]), err)
+		t.Fatalf("expected tuple[2] metadata object with Loki maps, got %s: %v", string(tuple[2]), err)
 	}
 	if len(metadata.Parsed) == 0 && len(metadata.StructuredMetadata) == 0 {
-		t.Fatalf("expected parsed and/or structuredMetadata pairs, got %s", string(tuple[2]))
+		t.Fatalf("expected parsed and/or structuredMetadata maps, got %s", string(tuple[2]))
 	}
-	for _, pair := range append(metadata.StructuredMetadata, metadata.Parsed...) {
-		if len(pair) < 2 || pair[0] == "" {
-			t.Fatalf("expected non-empty metadata pair name, got %s", string(tuple[2]))
+	for field := range metadata.StructuredMetadata {
+		if field == "" {
+			t.Fatalf("expected non-empty structuredMetadata key, got %s", string(tuple[2]))
+		}
+	}
+	for field := range metadata.Parsed {
+		if field == "" {
+			t.Fatalf("expected non-empty parsed key, got %s", string(tuple[2]))
 		}
 	}
 }
