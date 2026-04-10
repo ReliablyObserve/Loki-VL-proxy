@@ -172,6 +172,19 @@ datasources:
 - **Grafana-first behavior**:
   - compatibility tracks continuously verify Loki API, Logs Drilldown, and VictoriaLogs integration
 
+## LogQL Compatibility
+
+Loki-VL-proxy targets Loki client compatibility while translating execution to VictoriaLogs.
+
+- Stream selectors, filters, parser pipelines, metric queries, and common range functions are supported.
+- Proxy-side compatibility logic covers semantic gaps where Loki behavior differs from native VictoriaLogs primitives.
+- Compatibility is validated continuously in CI against separate Loki, Drilldown, and VictoriaLogs tracks.
+
+For full detail:
+- [Translation Reference](docs/translation-reference.md)
+- [Loki Compatibility](docs/compatibility-loki.md)
+- [Known Issues](docs/KNOWN_ISSUES.md)
+
 ## Performance Model
 
 - Multi-layer cache: compatibility-edge + memory + optional disk + optional peer cache.
