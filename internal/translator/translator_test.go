@@ -32,6 +32,21 @@ func TestTranslateLogQL(t *testing.T) {
 			want:  `app:=nginx ~"error"`,
 		},
 		{
+			name:  "line contains filter with backtick raw string",
+			logql: "{app=\"nginx\"} |= `api`",
+			want:  `app:=nginx ~"api"`,
+		},
+		{
+			name:  "line contains backtick raw string with logfmt pipeline",
+			logql: "{app=\"nginx\"} |= `api` | logfmt",
+			want:  `app:=nginx ~"api" | unpack_logfmt`,
+		},
+		{
+			name:  "line contains backtick raw string containing pipe char",
+			logql: "{app=\"nginx\"} |= `api|v1` | logfmt",
+			want:  `app:=nginx ~"api|v1" | unpack_logfmt`,
+		},
+		{
 			name:  "line not contains filter — substring semantics",
 			logql: `{app="nginx"} != "debug"`,
 			want:  `app:=nginx NOT ~"debug"`,

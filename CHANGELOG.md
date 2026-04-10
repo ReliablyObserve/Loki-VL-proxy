@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- normalize backtick-quoted LogQL line filters (for example ``|= `api` ``) to literal substring matches so parser pipelines such as `| logfmt` no longer drop valid lines
+
+### Tests
+
+- add translator regression coverage for backtick raw-string line filters, including `|= ... | logfmt` and literals containing `|`
+
 ## [0.27.15] - 2026-04-10
 
 ### Bug Fixes
