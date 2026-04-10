@@ -7,227 +7,181 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ReliablyObserve/Loki-VL-proxy)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/ReliablyObserve/Loki-VL-proxy)](https://github.com/ReliablyObserve/Loki-VL-proxy/releases)
 [![Lines of Code](https://img.shields.io/badge/go%20loc-48.9k-blue)](https://github.com/ReliablyObserve/Loki-VL-proxy)
-[![Tests](https://img.shields.io/badge/tests-1356%20passed-brightgreen)](#tests)
-[![Coverage](https://img.shields.io/badge/coverage-90.5%25-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-1356%20passed-brightgreen)](#testing-and-release)
+[![Coverage](https://img.shields.io/badge/coverage-90.5%25-brightgreen)](#testing-and-release)
 [![LogQL Coverage](https://img.shields.io/badge/LogQL%20coverage-100%25-brightgreen)](#logql-compatibility)
 [![License](https://img.shields.io/github/license/ReliablyObserve/Loki-VL-proxy)](LICENSE)
 [![CodeQL](https://github.com/ReliablyObserve/Loki-VL-proxy/actions/workflows/codeql.yaml/badge.svg?branch=main&event=push)](https://github.com/ReliablyObserve/Loki-VL-proxy/actions/workflows/codeql.yaml)
 
-HTTP proxy that exposes a **Loki-compatible read API** on the frontend and translates requests to **VictoriaLogs** on the backend. Use Grafana's native Loki datasource (Explore, Drilldown, dashboards) with VictoriaLogs -- no custom datasource plugin needed.
+Use **Grafana Loki clients** with **VictoriaLogs** through a **Loki-compatible read proxy**.
 
-**Single static binary**, ~10MB Docker image, zero external runtime dependencies.
+No custom Grafana datasource plugin. No sidecar translation service. One small static binary.
 
-This project is intentionally a **read/query proxy**. Ingestion stays on VictoriaLogs-side pipelines (`vlagent`, Loki-push ingestion to VictoriaLogs, OTLP, or native JSON/OTel log ingestion). Data written through those paths is then queryable through the proxy's Loki-compatible read endpoints.
+## Why Teams Use It
 
-## High-Level Architecture
+- **Drop-in Loki frontend**: Keep Grafana Explore, Drilldown, dashboards, and Loki API tooling.
+- **VictoriaLogs backend economics**: Query VL while preserving Loki client experience.
+- **Strict compatibility contracts**: Default 2-tuple responses, explicit 3-tuple only when `categorize-labels` is requested.
+- **Production guardrails**: Tenant isolation, bounded fanout, circuit breaking, rate limits, and safe caching.
+- **Fast repeat reads**: Tiered cache with optional disk and fleet peer reuse.
+
+Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/compatibility-matrix.md), [Operations](docs/operations.md)
+
+## Key Features
+
+### Compatibility
+
+- Loki-compatible read API for Grafana datasource, Explore, Drilldown, and API clients.
+- Strict tuple contracts: default 2-tuple, explicit 3-tuple only via `categorize-labels`.
+- Multi-tenant read fanout with tenant isolation guardrails.
+- Rules and alerts read compatibility from `vmalert`.
+
+### Performance
+
+- Query-range windowing with historical window reuse.
+- Adaptive bounded parallel fanout for long time ranges.
+- Tiered caching: compatibility-edge, memory, disk, and optional peer cache.
+- Request coalescing and protective limits to reduce backend pressure.
+
+### Operations
+
+- Structured metrics and logs for cache, latency, fanout, tenant/client visibility.
+- Helm-ready deployment model for production clusters.
+- Compatibility CI tracks for Loki, Logs Drilldown, and VictoriaLogs.
+- Runbook-backed alerting assets for operational response.
+
+Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Observability](docs/observability.md), [Testing](docs/testing.md)
+
+## High-Level Flow
 
 ```mermaid
 flowchart LR
-    A["Clients<br/>Grafana Explore, Dashboards, Logs Drilldown, Loki API tools, LLM/MCP/API consumers"]
-    B["Loki-VL-proxy (Read Compatibility Layer)<br/>Loki API contract + tenant guardrails + LogQL translation + response shaping + tiered cache"]
-    C["Data + Rules Upstream<br/>VictoriaLogs (log data) + vmalert (rules/alerts state)<br/>+ optional VictoriaMetrics (recording-rule outputs)"]
+    A[Clients<br/>Grafana, Loki API tools, MCP/LLM, scripts]
+    B[Loki-VL-proxy<br/>Loki API compatibility + translation + shaping + cache]
+    C[Upstream<br/>VictoriaLogs data + vmalert rules/alerts]
 
     A --> B --> C
 
-    style A fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px
-    style B fill:#dbeafe,stroke:#1d4ed8,color:#111827,stroke-width:2px
-    style C fill:#e0f2fe,stroke:#0369a1,color:#111827,stroke-width:2px
+    classDef client fill:#1f2937,stroke:#60a5fa,color:#f3f4f6,stroke-width:2px;
+    classDef proxy fill:#172554,stroke:#22d3ee,color:#f8fafc,stroke-width:2px;
+    classDef upstream fill:#052e16,stroke:#34d399,color:#ecfeff,stroke-width:2px;
+    class A client;
+    class B proxy;
+    class C upstream;
 ```
 
-## Architecture (Detailed)
+Related docs: [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md)
+
+## Detailed Architecture
 
 ```mermaid
 flowchart TD
     subgraph L1["Clients"]
         G["Grafana<br/>Explore / Drilldown / Dashboards"]
-        M["MCP Servers<br/>LLM Agents"]
-        C["CLI / API Consumers"]
+        M["MCP / LLM / API Tools"]
+        C["CLI / SDK Consumers"]
     end
 
-    subgraph L2["Loki Compatibility Layer"]
-        API["Loki HTTP + WebSocket API<br/>query / labels / detected_* / tail / rules / alerts"]
-        GUARD["Security headers + tenant validation<br/>auth checks + rate limits + request logging"]
-        EDGE["Tier0 compatibility cache<br/>safe GET Loki-shaped responses only"]
+    subgraph L2["Loki Compatibility Layer (Proxy)"]
+        API["Loki HTTP + WS API<br/>query / query_range / labels / tail / rules / alerts"]
+        GUARD["Tenant guardrails + auth context + rate limits + policy checks"]
+        EDGE["Compatibility-edge cache (Tier0)<br/>safe GET response cache"]
     end
 
-    subgraph L3["Route Execution Paths"]
-        Q["Query + metadata path<br/>fanout / translation / shaping"]
-        T["/tail path<br/>origin checks + native/synthetic streaming"]
-        R["Rules + alerts read path<br/>Loki / Prom-compatible views"]
-        RESP["Loki-shaped response"]
+    subgraph L3["Execution Paths"]
+        Q["Query translation + shaping"]
+        T["Tail path (native or synthetic)"]
+        R["Rules / alerts read bridge"]
+        RESP["Loki-compatible response"]
     end
 
-    subgraph L4["Cache Layer"]
-        MEM["L1 memory cache"]
-        DISK["optional L2 disk cache"]
-        PEER["optional L3 peer cache<br/>consistent hash ring"]
+    subgraph L4["Cache Tiers"]
+        L1C["L1 memory cache"]
+        L2C["L2 disk cache (optional)"]
+        L3C["L3 peer cache (optional)"]
     end
 
-    subgraph L5["Backends + Outputs"]
-        VL["VictoriaLogs"]
-        RULES["vmalert / ruler reads"]
-        VMTS["optional VictoriaMetrics<br/>recording-rule outputs"]
-        OBS["Prometheus metrics<br/>OTLP export<br/>JSON logs"]
+    subgraph L5["Upstream Systems"]
+        VL["VictoriaLogs<br/>log data"]
+        VMA["vmalert<br/>rules / alerts state"]
+        VM["VictoriaMetrics (optional)<br/>recording rule outputs"]
     end
 
     G --> API
     M --> API
     C --> API
+
     API --> GUARD
     GUARD --> EDGE
-    EDGE -->|miss| Q
     EDGE -->|hit| RESP
+    EDGE -->|miss| Q
+
     GUARD --> T
     GUARD --> R
-    Q --> MEM
-    MEM -->|miss| DISK
-    DISK -->|miss| PEER
-    PEER -->|miss| VL
+
+    Q --> L1C
+    L1C -->|miss| L2C
+    L2C -->|miss| L3C
+    L3C -->|miss| VL
     VL --> Q
     Q --> RESP
-    T --> VL
-    R --> RULES
-    RULES -. recording writes .-> VMTS
-    GUARD --> OBS
-    Q --> OBS
-    T --> OBS
 
-    style L2 fill:#1a1a2e,stroke:#e94560,color:#fff
-    style L3 fill:#16213e,stroke:#4cc9f0,color:#fff
-    style L4 fill:#0f3460,stroke:#90e0ef,color:#fff
-    style L5 fill:#1b4332,stroke:#52b788,color:#fff
+    T --> VL
+    R --> VMA
+    VMA -. optional remote write .-> VM
+
+    classDef client fill:#1f2937,stroke:#93c5fd,color:#f3f4f6,stroke-width:2px;
+    classDef api fill:#0f172a,stroke:#22d3ee,color:#f8fafc,stroke-width:2px;
+    classDef exec fill:#172554,stroke:#818cf8,color:#eef2ff,stroke-width:2px;
+    classDef cache fill:#3f1d2e,stroke:#f472b6,color:#fdf2f8,stroke-width:2px;
+    classDef upstream fill:#052e16,stroke:#34d399,color:#ecfdf5,stroke-width:2px;
+
+    class G,M,C client;
+    class API,GUARD,EDGE api;
+    class Q,T,R,RESP exec;
+    class L1C,L2C,L3C cache;
+    class VL,VMA,VM upstream;
 ```
 
-See [Architecture](docs/architecture.md) for component design, [Observability](docs/observability.md) for metrics/logging/integration guidance, and [Fleet Cache](docs/fleet-cache.md) for distributed caching.
+Related docs: [Architecture](docs/architecture.md), [Fleet Cache](docs/fleet-cache.md), [Peer Cache Design](docs/peer-cache-design.md)
 
-## Key Features
+## Product Scope
 
-### Loki Compatibility Layer
-See [Getting Started](docs/getting-started.md), [Architecture](docs/architecture.md), [API Reference](docs/api-reference.md), [Loki Compatibility](docs/compatibility-loki.md), and [Logs Drilldown Compatibility](docs/compatibility-drilldown.md).
+Loki-VL-proxy is intentionally a **read/query proxy**.
 
-- **Loki-compatible frontend** -- use the standard Loki datasource, API shape, and WebSocket tail entrypoints against VictoriaLogs without a custom plugin
-- **Full LogQL execution surface** -- stream selectors, filters, parsers, metric queries, binary expressions, and subqueries are supported, with proxy-side evaluation for the parts VictoriaLogs does not natively provide
-- **Grafana-native workflows** -- Explore, Logs Drilldown, dashboards, live tail, and datasource-side multi-tenant reads work through the same datasource model operators already know
-- **Strict Loki tuple contract** -- default/no-flag responses stay canonical 2-tuples, while `X-Loki-Response-Encoding-Flags: categorize-labels` emits Loki 3-tuples with canonical metadata keys only
-- **OTel-aware label and metadata translation** -- bidirectional dot/underscore conversion plus hybrid field exposure keeps Loki labels usable while preserving dotted OTel-style metadata for field-oriented flows
-- **Read-path rules and alerts compatibility** -- surface `vmalert` rules and alerts on Loki-compatible read endpoints and migrate Loki-style rule files with the built-in converter
-- **Indexed fast path where possible** -- known VictoriaLogs `_stream_fields` can stay on native stream selectors instead of dropping to slower field scans
-- **Tier0 safe response cache** -- a dedicated compatibility-edge microcache can short-circuit repeated safe GET reads after tenant validation without bypassing translation, auth, or route policy on misses
+- In scope: Loki-compatible query/read endpoints, metadata paths, rules/alerts read views.
+- Out of scope: ingestion pipeline ownership (`push` is blocked), rule write lifecycle.
 
-### Security & Hardening
-See [Security](docs/security.md), [Configuration](docs/configuration.md), [Observability](docs/observability.md), and [Known Issues](docs/KNOWN_ISSUES.md).
+Use VictoriaLogs-side ingestion (`vlagent`, OTLP, native JSON/OTel, Loki-push-to-VL) and query that data through this proxy.
 
-- **Closed-by-default admin surface** -- `/debug/queries`, `pprof`, and peer-cache internals require explicit enablement and can be additionally protected with admin auth
-- **Tenant isolation controls** -- explicit tenant mapping, default-tenant aliases for VL `0:0`, and bounded read fanout on `X-Scope-OrgID: tenant-a|tenant-b`
-- **Layered request protection** -- rate limiting, concurrency caps, request coalescing, normalization, cache boundaries, and circuit breaking all apply before backend pressure cascades
-- **Origin, delete, and secret safeguards** -- browser-origin checks for `/tail`, confirmation-gated deletes, tenant-scoped destructive paths, and log redaction for sensitive values
-- **TLS and identity passthrough support** -- server-side HTTPS, backend TLS, OTLP TLS, optional client cert auth, and controlled header/cookie forwarding to the backend
-- **Backend auth passthrough option** -- enable `-forward-authorization=true` (or `-forward-headers=Authorization`) when upstream identity must be forwarded to VictoriaLogs
-
-### Performance & Scale
-See [Performance Guide](docs/performance.md), [Scaling](docs/scaling.md), [Fleet Cache](docs/fleet-cache.md), and [Observability](docs/observability.md).
-
-- **Fast where Grafana feels it** -- the proxy keeps repeated dashboard refreshes, Explore reads, and Drilldown metadata calls on warm cache paths measured in nanoseconds to sub-microseconds instead of milliseconds
-- **Tier0 plus tiered caches** -- a small compatibility-edge response cache fronts the existing in-memory LRU + TTL, optional disk-backed bbolt, and fleet peer-cache layers
-- **Fleet-aware scaling** -- consistent hashing, shadow copies with TTL preservation, headless-service peer discovery, and per-peer circuit breakers keep multi-replica fleets efficient under HPA churn
-- **Hot-path backend reduction** -- request coalescing, Tier0 cache hits, query normalization, and cached Loki-shaped responses reduce duplicate backend work for repeated dashboards and shared reads
-- **Bounded expensive paths** -- multi-tenant fanout, merge size, synthetic-tail dedup state, and metadata/discovery fallbacks all have explicit safety caps
-- **Graceful fallback behavior** -- native-first metadata discovery and synthetic tail fallback keep user-facing flows working when backend-native paths are absent or incomplete
-- **Measured regression control** -- compatibility, performance, and quality gates track cache-hit versus bypass behavior, throughput, allocations, and memory growth across hot paths
-
-### Operations
-See [Getting Started](docs/getting-started.md), [Configuration](docs/configuration.md), [Scaling](docs/scaling.md), [Operations](docs/operations.md), [Observability](docs/observability.md), [Alert Runbooks](docs/runbooks/alerts.md), [Testing](docs/testing.md), [Compatibility Matrix](docs/compatibility-matrix.md), and [Rules And Alerts Migration](docs/rules-alerts-migration.md).
-
-- **Multitenant deployment model** -- Loki tenant headers map to VictoriaLogs `AccountID` and `ProjectID`, with hot-reloadable tenant configuration
-- **Operational observability** -- Prometheus `/metrics`, OTLP export, structured JSON logs, per-tenant and per-client breakdowns, and peer-cache metrics are available out of the box
-- **Operational pack included** -- versioned dashboard JSON, PrometheusRule alert set, and SRE runbooks are maintained together so alert annotations point to concrete incident procedures
-- **Rules migration support** -- convert Loki-style rule files into `vmalert` `type: vlogs` definitions for read-compatible Grafana alert visibility
-- **Production Helm support** -- OCI chart publishing, `Deployment` or `StatefulSet` modes, persistent disk cache, headless peer discovery, HPA support, and GOMEMLIMIT auto-tuning
-- **Versioned compatibility tracks** -- Loki, VictoriaLogs, and Logs Drilldown are validated as separate compatibility tracks with dedicated CI signals
-- **Automated tuple canary in CI** -- unit tuple-contract gates plus compose-backed smoke checks validate default 2-tuple and categorize-labels 3-tuple behavior on every PR
-
-## Operational Pack
-
-Loki-VL-proxy ships a production-ready operations pack so teams can deploy, observe, and respond without building custom assets first.
-
-| Asset | Location | Why it matters |
-|---|---|---|
-| Operations dashboard | [`dashboard/loki-vl-proxy.json`](dashboard/loki-vl-proxy.json) | Request, error, latency, cache, and tenant health from proxy metrics |
-| Offenders dashboard (native VL) | [`dashboard/loki-vl-proxy-offenders.json`](dashboard/loki-vl-proxy-offenders.json) | Tenant/client/query offenders from logs stored in VictoriaLogs with built-in `tenant`, `client`, `cluster`, and `env` filters |
-| Alert rules | [`alerting/loki-vl-proxy-prometheusrule.yaml`](alerting/loki-vl-proxy-prometheusrule.yaml) | Standardized SRE labels and actionable annotations with per-alert runbook links |
-| SRE runbooks | [`docs/runbooks/alerts.md`](docs/runbooks/alerts.md) | Index plus dedicated per-alert incident procedures and deployment best practices |
-
-Chart templates consume synced copies of these assets from `charts/loki-vl-proxy/{dashboards,alerting}` and CI verifies they stay aligned.
+Related docs: [API Reference](docs/api-reference.md), [Rules And Alerts Migration](docs/rules-alerts-migration.md), [Known Issues](docs/KNOWN_ISSUES.md)
 
 ## Quick Start
 
 ```bash
-# Build and run
+# Binary
 go build -o loki-vl-proxy ./cmd/proxy
-./loki-vl-proxy -backend=http://your-victorialogs:9428
+./loki-vl-proxy -backend=http://victorialogs:9428
 
 # Docker
 docker build -t loki-vl-proxy .
 docker run -p 3100:3100 loki-vl-proxy -backend=http://victorialogs:9428
 
-# Pull published release images
-docker pull ghcr.io/reliablyobserve/loki-vl-proxy:<release>
-docker pull docker.io/reliablyobserve/loki-vl-proxy:<release>
-
-# Docker Compose (dev/test with Grafana)
+# Compose (includes Grafana)
 docker-compose up -d
-# Grafana at http://localhost:3000
 ```
 
-Image publication model:
-
-- `ghcr.io/reliablyobserve/loki-vl-proxy:<release>` is always published by release workflows.
-- `docker.io/reliablyobserve/loki-vl-proxy:<release>` is published when Docker Hub credentials are configured in repo secrets.
-- Helm charts are published to `oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy:<release>`.
-
-### Helm (Kubernetes)
+### Helm
 
 ```bash
 helm install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
   --version <release> \
   --set extraArgs.backend=http://victorialogs:9428
-
-# Local chart (development)
-helm install loki-vl-proxy ./charts/loki-vl-proxy \
-  --set extraArgs.backend=http://victorialogs:9428
 ```
 
-For persistent cache, switch the workload to `StatefulSet` and enable `persistence`. The chart will mount the PVC and inject `-disk-cache-path` automatically unless you override it explicitly:
-
-```bash
-helm install loki-vl-proxy ./charts/loki-vl-proxy \
-  --set workload.kind=StatefulSet \
-  --set persistence.enabled=true \
-  --set persistence.size=10Gi \
-  --set extraArgs.backend=http://victorialogs:9428
-```
-
-Loki-aligned `query_range` caching defaults are enabled in the chart:
-
-- `-query-range-windowing=true`
-- `-query-range-split-interval=1h`
-- `-query-range-max-parallel=2`
-- `-query-range-freshness=10m`
-- `-query-range-recent-cache-ttl=0s` (no near-now cache)
-- `-query-range-history-cache-ttl=24h`
-
-For deterministic disk usage, set `-disk-cache-max-bytes` (for example `20Gi`) instead of relying only on PVC capacity.
-
-### Fleet Cache (Multi-Replica)
-
-```bash
-# Kubernetes (DNS discovery via headless service)
-helm install loki-vl-proxy ./charts/loki-vl-proxy \
-  --set replicaCount=3 \
-  --set peerCache.enabled=true
-```
-
-When `peerCache.enabled=true`, the chart provisions a headless service and injects `-peer-self`, `-peer-discovery=dns`, and `-peer-dns` automatically. The proxy refreshes peers from DNS on a timer, so HPA-driven pod churn does not require a static replica list. The same headless service is also used automatically when `workload.kind=StatefulSet`.
+For deployment recipes (StatefulSet + persistence, peer-cache fleet setup, OTLP push wiring) and image source selection (GHCR vs Docker Hub vs custom registry), see:
+- [Getting Started](docs/getting-started.md)
+- [Operations](docs/operations.md)
 
 ### Grafana Datasource
 
@@ -238,254 +192,112 @@ datasources:
     access: proxy
     url: http://loki-vl-proxy:3100
     jsonData:
-      maxLines: 5000
-      timeout: 600
       httpHeaderName1: X-Scope-OrgID
     secureJsonData:
       httpHeaderValue1: team-alpha
 ```
 
-### Grafana Datasource with OTel Label Translation
+Related docs: [Getting Started](docs/getting-started.md), [Configuration](docs/configuration.md), [Operations](docs/operations.md)
 
-```yaml
-datasources:
-  - name: Loki (VL + OTel)
-    type: loki
-    access: proxy
-    url: http://loki-vl-proxy:3100
-    # Use with: loki-vl-proxy -label-style=underscores
-    # Queries like {service_name="api"} auto-translate to VL's service.name
-```
+## Compatibility Guarantees (Operator-Relevant)
 
-Proxy-side datasource helpers:
+- **Loki tuple safety**:
+  - default requests return strict `[timestamp, line]`
+  - `X-Loki-Response-Encoding-Flags: categorize-labels` enables Loki 3-tuple metadata mode
+- **Cache mode segregation**:
+  - query cache keys are split by tuple mode to prevent 3-tuple/2-tuple cross-contamination
+- **Grafana-first behavior**:
+  - compatibility tracks continuously verify Loki API, Logs Drilldown, and VictoriaLogs integration
 
-- `-cache-max-bytes` to set the primary L1 in-memory cache budget explicitly
-- `-disk-cache-max-bytes` to cap L2 disk usage explicitly (`0` means unlimited)
-- `-compat-cache-enabled` to keep the Tier0 compatibility-edge cache on or off
-- `-compat-cache-max-percent` to reserve a bounded share of the L1 memory budget for Tier0, defaulting to 10% and capped at 50%
-- `-query-range-windowing` plus `-query-range-history-cache-ttl` to reuse historical time windows and reduce repeated long-range backend scans
-- `-query-range-adaptive-parallel` with min/max bounds to adapt backend fanout safely from live latency/error feedback
-- `-backend-timeout` for long Grafana queries against VL
-- `-forward-headers` and `-forward-cookies` for backend auth/context passthrough
-- `-metrics.trust-proxy-headers` plus Grafana `[dataproxy] send_user_header=true` to attribute logs/metrics to real Grafana users (`enduser.id`) while keeping datasource auth principals separate (`auth.*`)
-- `-metadata-field-mode=hybrid` by default, so field APIs expose both dotted OTel names and Loki-style aliases without changing the label surface
-- built-in default-tenant aliases `0`, `fake`, and `default` for VL's `0:0` tenant during single-tenant migrations
-- explicit Loki-style multi-tenant fanout on read/query endpoints with `X-Scope-OrgID: tenant-a|tenant-b`
-- synthetic `__tenant_id__` labels in merged query results so Explore and Drilldown filters can narrow multi-tenant reads back down
-- multi-tenant Drilldown and Explore level filters such as `detected_level="error" or detected_level="info"` are translated and regression-tested against the live Grafana stack
-- `-tenant.allow-global` to let `X-Scope-OrgID: *` use VL's default `0:0` tenant as a proxy-specific wildcard bypass
-- native-first Drilldown field and label discovery that keeps slower-changing metadata hot in cache while leaving live query and tail paths conservative
-- safe Tier0 response caching only on cacheable GET reads such as `query`, `query_range`, `series`, labels, volume, and Drilldown metadata endpoints; `/tail`, writes, and websocket paths stay outside it
-- `-tls-client-ca-file` and `-tls-require-client-cert` for HTTPS client auth
-- `-tail.mode=auto|native|synthetic` to choose native tail, forced synthetic tail, or the default native-with-fallback behavior
-- `-tail.allowed-origins` when Grafana or another browser client must use `/tail`
-
-### Query-Range Tuning (Long-Range Efficiency)
-
-Default Loki-aligned behavior:
-
-- split long `query_range` into `1h` windows
-- disable near-now window cache (`recent-cache-ttl=0s`)
-- cache historical windows for `24h`
-- adaptive parallel fetch starts at `2` and can grow up to `8` when backend latency/error remain healthy
-
-Sizing formula for persistent disk cache:
-
-`disk_bytes ~= unique_window_keys_per_day * avg_window_entry_bytes * ttl_days`
-
-In this repo's sizing tests, average compressed entry size is roughly `56 KiB`, which is a good planning baseline:
-
-- `1 GiB` disk: around `18k` windows
-- `10 GiB` disk: around `189k` windows
-- `50 GiB` disk: around `948k` windows
-
-Use these metrics to tune safely:
-
-- `loki_vl_proxy_window_adaptive_parallel_current`
-- `loki_vl_proxy_window_adaptive_latency_ewma_seconds`
-- `loki_vl_proxy_window_adaptive_error_ewma`
-- `loki_vl_proxy_window_cache_hit_total` / `loki_vl_proxy_window_cache_miss_total`
-- `loki_vl_proxy_window_fetch_seconds`
-
-Rule of thumb:
-
-- if latency/error EWMA stay low during peak, increase `adaptive-max-parallel`
-- if cache hit ratio is low and repeated historical ranges are common, increase `history-cache-ttl` and disk size together
-- always set `-disk-cache-max-bytes` when extending retention windows to keep usage bounded
-
-### Why The Cache Stack Matters
-
-You do not need to understand the implementation details to understand the operational value:
-
-| Layer | Plain-English role | Operator benefit |
-|---|---|---|
-| `Tier0` | Instant answer cache at the Loki-compatible frontend | Repeated Grafana reads can return before most proxy work even starts |
-| `L1` memory | Hot local RAM cache on one proxy pod | The fastest path for repeated dashboard and Explore traffic |
-| `L2` disk | Local persistent cache on the same pod or node | Keeps useful cached results available beyond memory pressure and across larger working sets |
-| `L3` fleet peer cache | Cache sharing between proxy replicas | One warm pod can help the rest of the fleet instead of every pod hitting VictoriaLogs separately |
-
-In measured benchmarks on this branch:
-
-| Example path | Cold or uncached path | Warm cached path | Why it matters |
-|---|---|---|---|
-| `query_range` | `4.58 ms` | `0.64-0.67 us` | Repeated dashboard refreshes stop behaving like backend work |
-| `detected_field_values` | `2.76 ms` | `0.71 us` | Drilldown metadata becomes effectively instant after warm-up |
-| fleet peer-cache reuse | network/backend path | `52 ns` local shadow-copy hit | A 3-node fleet can reuse hot results instead of refetching them |
-
-How to read benchmark labels:
-
-| Benchmark label | Plain-English meaning |
-|---|---|
-| `query_range` primary-cache hit | The normal internal cache path already satisfied the handler |
-| `query_range` Tier0 compat hit | Final Loki-shaped response was served from Tier0 at the compatibility edge |
-| `detected_fields` primary-cache hit | Normal in-handler cache path |
-| `detected_fields` Tier0 compat hit | Final response returned before most handler work |
-| `detected_field_values` no compat cache | Full metadata path executed |
-| `detected_field_values` Tier0 compat hit | Tier0 short-circuited the compatibility path |
-
-Short interpretation:
-
-- Primary cache is the regular internal cache pipeline.
-- Tier0 is the compatibility-edge final-response cache.
-- Biggest Tier0 wins show up on metadata and Drilldown-style endpoints, where there is more compatibility work to skip.
-- On hot `query_range` paths, the normal cache is already highly optimized, so Tier0 mostly preserves that win instead of multiplying it.
-
-The practical outcome is simple: the proxy does not just make VictoriaLogs look like Loki, it keeps common Grafana read paths fast enough to feel native even when the backend path is more complex.
-
-Current scope boundaries and follow-up hardening are tracked in [Known Issues](docs/KNOWN_ISSUES.md):
-
-- rules and alerts are exposed on read endpoints only; writes stay on the VictoriaLogs / `vmalert` side by design
-- browser `/tail` access requires explicit `-tail.allowed-origins`
-- `/tail` remains single-tenant
-- `X-Scope-OrgID: *` remains a proxy-specific default/global convenience
-- coverage and test hardening is still open
-
-Tier0 and fleet-cache performance validation is covered by targeted benchmarks and load-style tests now, and the next CI step is to promote the compose-backed e2e cache/performance smoke flows into GitHub Actions on pull requests and post-merge `main` runs.
-
-### Grafana Datasource for Multi-Tenant Read Fanout
-
-```yaml
-datasources:
-  - name: Loki (VL multi-tenant)
-    type: loki
-    access: proxy
-    url: http://loki-vl-proxy:3100
-    jsonData:
-      httpHeaderName1: X-Scope-OrgID
-    secureJsonData:
-      httpHeaderValue1: team-a|team-b
-```
-
-Use `__tenant_id__` in Explore or Drilldown-compatible queries when you want to narrow a multi-tenant datasource back to a single tenant:
-
-```logql
-{app="api-gateway", __tenant_id__="team-b"}
-{service_name="api-gateway", __tenant_id__=~"team-.*"}
-```
-
-## Docs
-
-- [Observability](docs/observability.md)
-- [Configuration](docs/configuration.md)
-- [Rules And Alerts Migration](docs/rules-alerts-migration.md)
-- [API Reference](docs/api-reference.md)
-- [Architecture](docs/architecture.md)
-- [Fleet Cache](docs/fleet-cache.md)
-- [Performance](docs/performance.md)
-- [Compatibility Matrix](docs/compatibility-matrix.md)
-- [Testing](docs/testing.md)
-
-## API Coverage
-
-20 Loki endpoints implemented. See [API Reference](docs/api-reference.md) for the full table.
-
-| Category | Endpoints |
-|---|---|
-| Data queries | `query_range`, `query`, `series`, `labels`, `label/{name}/values` |
-| Analytics | `index/stats`, `index/volume`, `index/volume_range`, `patterns` |
-| Metadata | `detected_fields`, `detected_labels`, `detected_field/{name}/values` |
-| Streaming | `tail` (WebSocket), `format_query` |
-| Write | `push` (blocked 405), `delete` (safeguarded) |
-| Admin | `rules`, `alerts`, `config`, `buildinfo`, `ready` |
-
-Write-surface boundary:
-- `POST /loki/api/v1/push` is intentionally not implemented by this proxy (`405`); send log ingestion to VictoriaLogs or `vlagent` ([VictoriaMetrics ingestion docs](https://docs.victoriametrics.com/victorialogs/data-ingestion/)).
-- `POST /loki/api/v1/delete` is the only proxy write exception and stays heavily safeguarded.
-- Rules and alerts are exposed as Loki-compatible **read views** from configured [`vmalert`](https://docs.victoriametrics.com/vmalert/) backends; rule/alert write and lifecycle APIs are not implemented on this proxy and remain on the VictoriaMetrics control plane ([vmalert docs](https://docs.victoriametrics.com/vmalert/), [VictoriaLogs docs](https://docs.victoriametrics.com/victorialogs/)).
-
-**887 tests** (unit + fuzz + perf regression + race-safe)
-
-## Compatibility Tracks
-
-The repo now reports compatibility as three separate tracks instead of one blended percentage:
-
-| Track | Scope | Versions tracked |
-|---|---|---|
-| Loki | Loki API and LogQL behavior for Loki clients | `3.6.x`, `3.7.x` |
-| Logs Drilldown | Grafana Logs Drilldown app contracts and service-detail flows | `1.0.x`, `2.0.x` |
-| VictoriaLogs | Backend integration and translation behavior | `v1.3x.x`, `v1.4x.x` |
-
-The support window is deliberate. We do not try to carry unlimited historical compatibility. Loki tracks the current minor family plus one minor behind, Logs Drilldown tracks the current family plus one family behind, and VictoriaLogs currently tracks the `v1.3x.x` and `v1.4x.x` backend bands.
-Those compatibility workflows read their version matrices from the shared manifest in `test/e2e-compat/compatibility-matrix.json`, so one update moves CI and docs together.
-
-See [Compatibility Matrix](docs/compatibility-matrix.md), [Loki Compatibility](docs/compatibility-loki.md), [Logs Drilldown Compatibility](docs/compatibility-drilldown.md), and [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md).
+Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Loki Compatibility](docs/compatibility-loki.md), [Logs Drilldown Compatibility](docs/compatibility-drilldown.md), [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md)
 
 ## LogQL Compatibility
 
-**100% of the supported LogQL surface is handled**. Features are either native in VictoriaLogs or completed by a proxy compatibility layer where Loki semantics diverge from VictoriaLogs primitives.
+Loki-VL-proxy targets Loki client compatibility while translating execution to VictoriaLogs.
 
-### Native In VictoriaLogs
+- Stream selectors, filters, parser pipelines, metric queries, and common range functions are supported.
+- Proxy-side compatibility logic covers semantic gaps where Loki behavior differs from native VictoriaLogs primitives.
+- Compatibility is validated continuously in CI against separate Loki, Drilldown, and VictoriaLogs tracks.
 
-| Capability | Examples | Implementation path | VictoriaLogs docs |
-|---|---|---|---|
-| Selector + line filtering | `{app="api"} \|= "error"` | Loki matchers map to LogsQL filters | [LogQL->LogsQL mapping](https://docs.victoriametrics.com/victorialogs/logql-to-logsql/) |
-| Parser stages | `\| json`, `\| logfmt`, `\| pattern`, `\| regexp` | `unpack_json`, `unpack_logfmt`, `extract`, `extract_regexp` | [LogSQL reference](https://docs.victoriametrics.com/victorialogs/logsql/) |
-| Label/field filtering | `\| level="error"` | Native field filters and parser-aware filter wrapping | [LogSQL reference](https://docs.victoriametrics.com/victorialogs/logsql/) |
-| Metric/range functions | `rate`, `count_over_time`, `sum_over_time`, `quantile_over_time` | Native `stats` pipeline / quantile ops | [Querying guide](https://docs.victoriametrics.com/victorialogs/querying/) |
-| Metadata and series paths | `labels`, `label_values`, `series`, index/volume endpoints | Native `stream_field_*`, `field_*`, `streams`, `hits` APIs | [Querying guide](https://docs.victoriametrics.com/victorialogs/querying/) |
+For full detail:
+- [Translation Modes Guide](docs/translation-modes.md)
+- [Translation Reference](docs/translation-reference.md)
+- [Loki Compatibility](docs/compatibility-loki.md)
+- [Known Issues](docs/KNOWN_ISSUES.md)
 
-### Proxy Compatibility Layer
+## Performance Model
 
-| Capability gap vs native VL | Loki examples | Proxy implementation | Implementation docs |
-|---|---|---|---|
-| Binary expression joins and math | `A / B`, `A * 100`, comparisons | Execute sides independently and combine with Loki vector semantics | [Proxy compatibility layer](docs/translation-reference.md#proxy-compatibility-layer) |
-| Vector matching semantics | `on()`, `ignoring()`, `group_left()`, `group_right()`, `without()` | Label-subset matching and one-to-many join behavior implemented in proxy evaluation | [Vector matching details](docs/translation-reference.md#binary-expressions) |
-| Time modifiers and subqueries | `offset`, `@`, `rate(...)[1h:5m]` | Modifier normalization and concurrent sub-step evaluation with outer aggregation | [Time/subquery behavior](docs/translation-reference.md#time-and-subquery-semantics) |
-| Template/formatting behavior | `line_format`, `label_format` templates | Go-template evaluation + field shaping in response path | [Formatting behavior](docs/translation-reference.md#formatting-and-normalization) |
-| Non-native stage semantics | `decolorize`, unwrap unit helpers | ANSI stripping and unit-aware unwrap compatibility logic | [Proxy stage coverage](docs/translation-reference.md#proxy-side-stages) |
+- Multi-layer cache: compatibility-edge + memory + optional disk + optional peer cache.
+- Query-range windowing: historical range reuse with adaptive bounded parallel fetch.
+- Built-in metrics/logs for tuning cache hit ratio, backend latency, fanout behavior, and tenant/client pressure.
 
-For edge semantics and intentional boundaries, see [Known Issues](docs/KNOWN_ISSUES.md). For the full mapping table, see [Translation Reference](docs/translation-reference.md).
+### Query-Range Tuning (Long-Range Efficiency)
 
-## Documentation
+- Split long ranges into cacheable windows (for example `1h`) and reuse historical windows.
+- Keep near-now windows uncached (or very short TTL) and use longer TTL for historical windows.
+- Use adaptive bounded parallelism to improve long-range latency without overloading VictoriaLogs.
+- Track tuning with window cache hit/miss, window fetch latency, and adaptive parallelism metrics.
 
-| Document | Contents |
-|---|---|
-| [Getting Started](docs/getting-started.md) | Fast bootstrap for binary, Docker, Helm, and first datasource checks |
-| [Architecture](docs/architecture.md) | Component design, data flow, protection layers, data model mapping |
-| [Security](docs/security.md) | Security model, tenant/isolation controls, hardening baseline |
-| [Observability](docs/observability.md) | Metrics, logs, OTLP export, dashboard and alert guidance |
-| [Fleet Cache](docs/fleet-cache.md) | Distributed cache: hash ring, shadow copies, TTL preservation, circuit breakers |
-| [Peer Cache Design](docs/peer-cache-design.md) | Design deep dive for peer cache behavior and consistency tradeoffs |
-| [Configuration](docs/configuration.md) | All flags, environment variables, cache, tenancy, TLS, OTLP |
-| [API Reference](docs/api-reference.md) | Endpoint table, delete safeguards, metrics, observability |
-| [Translation Reference](docs/translation-reference.md) | LogQL to LogsQL mapping table, supported/unsupported features |
-| [Performance](docs/performance.md) | Benchmarks, optimization techniques, scaling profile, CI regression gates |
-| [Benchmarks](docs/benchmarks.md) | Raw benchmark numbers, connection pool tuning, hot path analysis |
-| [Scaling](docs/scaling.md) | Capacity planning, resource projections, per-tenant/client metrics, Helm sizing |
-| [Operations](docs/operations.md) | Deployment, performance tuning, troubleshooting |
-| [Alert Runbooks](docs/runbooks/alerts.md) | SRE incident runbooks linked from alert annotations |
-| [Deployment Best Practices](docs/runbooks/deployment-best-practices.md) | Scaling/deployment defaults that prevent latency, error, and availability incidents |
-| [Testing](docs/testing.md) | Test categories, running tests, fuzz testing |
-| [Release Info](docs/release-info.md) | Release precedence, skip rules, and metadata-sync behavior |
-| [Rules And Alerts Migration](docs/rules-alerts-migration.md) | Converting Loki rule files and exposing vmalert reads via Loki-compatible endpoints |
-| [Compatibility Matrix](docs/compatibility-matrix.md) | Separate Loki, Drilldown, and VictoriaLogs compatibility tracks |
-| [Loki Compatibility](docs/compatibility-loki.md) | Loki API and LogQL version matrix |
-| [Logs Drilldown Compatibility](docs/compatibility-drilldown.md) | Drilldown app version matrix and app contracts |
-| [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md) | VictoriaLogs backend version matrix and translation focus |
-| [Known Issues](docs/KNOWN_ISSUES.md) | VL compatibility gaps, data model differences |
-| [Roadmap](docs/roadmap.md) | Completed features and planned work |
-| [Changelog](CHANGELOG.md) | Release history |
+### Why The Cache Stack Matters
+
+- `Tier0` compatibility-edge cache reduces repeated frontend compatibility work.
+- `L1` memory cache gives fastest hot-path reads.
+- `L2` disk cache keeps useful historical windows warm across larger working sets.
+- `L3` peer cache lets warm replicas help the fleet instead of refetching from backend.
+
+See [Performance](docs/performance.md), [Fleet Cache](docs/fleet-cache.md), [Scaling](docs/scaling.md), and [Observability](docs/observability.md).
+
+## Documentation Map
+
+### Core
+- [Getting Started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [Operations](docs/operations.md)
+- [Architecture](docs/architecture.md)
+- [API Reference](docs/api-reference.md)
+- [Security](docs/security.md)
+- [Observability](docs/observability.md)
+- [Performance](docs/performance.md)
+- [Scaling](docs/scaling.md)
+
+### Compatibility
+- [Compatibility Matrix](docs/compatibility-matrix.md)
+- [Loki Compatibility](docs/compatibility-loki.md)
+- [Logs Drilldown Compatibility](docs/compatibility-drilldown.md)
+- [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md)
+- [Translation Modes Guide](docs/translation-modes.md)
+- [Translation Reference](docs/translation-reference.md)
+
+### Cache and Runtime Design
+- [Fleet Cache](docs/fleet-cache.md)
+- [Peer Cache Design](docs/peer-cache-design.md)
+- [Benchmarks](docs/benchmarks.md)
+
+### Runbooks
+- [Alert Runbooks Index](docs/runbooks/alerts.md)
+- [Deployment Best Practices](docs/runbooks/deployment-best-practices.md)
+- [Backend High Latency](docs/runbooks/loki-vl-proxy-backend-high-latency.md)
+- [Backend Unreachable](docs/runbooks/loki-vl-proxy-backend-unreachable.md)
+- [Circuit Breaker Open](docs/runbooks/loki-vl-proxy-circuit-breaker-open.md)
+- [Client Bad Request Burst](docs/runbooks/loki-vl-proxy-client-bad-request-burst.md)
+- [Proxy Down](docs/runbooks/loki-vl-proxy-down.md)
+- [Grafana Tuple Contract](docs/runbooks/loki-vl-proxy-grafana-tuple-contract.md)
+- [High Error Rate](docs/runbooks/loki-vl-proxy-high-error-rate.md)
+- [High Latency](docs/runbooks/loki-vl-proxy-high-latency.md)
+- [Rate Limiting](docs/runbooks/loki-vl-proxy-rate-limiting.md)
+- [System Resources](docs/runbooks/loki-vl-proxy-system-resources.md)
+- [Tenant High Error Rate](docs/runbooks/loki-vl-proxy-tenant-high-error-rate.md)
+
+### Testing and Release
+- [Testing](docs/testing.md)
+- [Release Info](docs/release-info.md)
+
+### Migration and Project Status
+- [Rules And Alerts Migration](docs/rules-alerts-migration.md)
+- [Known Issues](docs/KNOWN_ISSUES.md)
+- [Roadmap](docs/roadmap.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+Apache License 2.0. See [LICENSE](LICENSE).
