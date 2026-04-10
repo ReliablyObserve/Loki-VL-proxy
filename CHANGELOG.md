@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - harden startup diagnostics and /proc-host mount guidance for system resource metrics so missing CPU/memory/disk/network/PSI families are surfaced explicitly at boot
+- scope the main Grafana dashboard by OTEL dimensions (`job`, `cluster`, `env`, `namespace`, `pod`) and aggregate overview stat queries to prevent cross-instance value pollution in multi-pod deployments
 
 ### Tests
 
