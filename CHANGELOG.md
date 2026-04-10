@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.23] - 2026-04-10
+
 ### Documentation
 
 - add explicit compatibility profile guidance for chart operators, including recommended combinations of `label-style`, `metadata-field-mode`, and `emit-structured-metadata`
