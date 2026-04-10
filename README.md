@@ -144,6 +144,10 @@ helm install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
   --set extraArgs.backend=http://victorialogs:9428
 ```
 
+For deployment recipes (StatefulSet + persistence, peer-cache fleet setup, OTLP push wiring) and image source selection (GHCR vs Docker Hub vs custom registry), see:
+- [Getting Started](docs/getting-started.md)
+- [Operations](docs/operations.md)
+
 ### Grafana Datasource
 
 ```yaml
@@ -178,30 +182,49 @@ See [Performance](docs/performance.md), [Fleet Cache](docs/fleet-cache.md), [Sca
 
 ## Documentation Map
 
-### Start Here
+### Core
 - [Getting Started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [Operations](docs/operations.md)
-
-### Architecture & Behavior
 - [Architecture](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
-- [Translation Reference](docs/translation-reference.md)
 - [Security](docs/security.md)
+- [Observability](docs/observability.md)
+- [Performance](docs/performance.md)
+- [Scaling](docs/scaling.md)
 
-### Compatibility & Testing
+### Compatibility
 - [Compatibility Matrix](docs/compatibility-matrix.md)
 - [Loki Compatibility](docs/compatibility-loki.md)
 - [Logs Drilldown Compatibility](docs/compatibility-drilldown.md)
 - [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md)
-- [Testing](docs/testing.md)
+- [Translation Reference](docs/translation-reference.md)
 
-### SRE / Runbooks
-- [Observability](docs/observability.md)
-- [Alert Runbooks](docs/runbooks/alerts.md)
+### Cache and Runtime Design
+- [Fleet Cache](docs/fleet-cache.md)
+- [Peer Cache Design](docs/peer-cache-design.md)
+- [Benchmarks](docs/benchmarks.md)
+
+### Runbooks
+- [Alert Runbooks Index](docs/runbooks/alerts.md)
 - [Deployment Best Practices](docs/runbooks/deployment-best-practices.md)
+- [Backend High Latency](docs/runbooks/loki-vl-proxy-backend-high-latency.md)
+- [Backend Unreachable](docs/runbooks/loki-vl-proxy-backend-unreachable.md)
+- [Circuit Breaker Open](docs/runbooks/loki-vl-proxy-circuit-breaker-open.md)
+- [Client Bad Request Burst](docs/runbooks/loki-vl-proxy-client-bad-request-burst.md)
+- [Proxy Down](docs/runbooks/loki-vl-proxy-down.md)
+- [Grafana Tuple Contract](docs/runbooks/loki-vl-proxy-grafana-tuple-contract.md)
+- [High Error Rate](docs/runbooks/loki-vl-proxy-high-error-rate.md)
+- [High Latency](docs/runbooks/loki-vl-proxy-high-latency.md)
+- [Rate Limiting](docs/runbooks/loki-vl-proxy-rate-limiting.md)
+- [System Resources](docs/runbooks/loki-vl-proxy-system-resources.md)
+- [Tenant High Error Rate](docs/runbooks/loki-vl-proxy-tenant-high-error-rate.md)
 
-### Migration & Project Info
+### Testing and Release
+- [Testing](docs/testing.md)
+- [Release Info](docs/release-info.md)
+
+### Migration and Project Status
 - [Rules And Alerts Migration](docs/rules-alerts-migration.md)
 - [Known Issues](docs/KNOWN_ISSUES.md)
 - [Roadmap](docs/roadmap.md)
