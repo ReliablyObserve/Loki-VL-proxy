@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- add Loki-aligned `query_range` window cache defaults (`split=1h`, `max-parallel=2`, `freshness=10m`, `recent-ttl=0s`, `history-ttl=24h`) with bounded parallel fanout and historical-window reuse
+- add adaptive query-range window parallelism (`min/max` bounds with latency/error EWMA feedback) so backend fanout can scale up under healthy latency and back off under pressure
+- add `-disk-cache-max-bytes` to cap on-disk L2 cache size for predictable retention and capacity control
+
+### Observability
+
+- add adaptive query-range tuning gauges: current parallelism, latency EWMA, and error EWMA, exposed in both Prometheus and OTLP metrics
+
 ### Tests
 
 - expand tuple-contract coverage and smoke validation paths to keep strict default 2-tuple and categorize-labels 3-tuple behavior regression-safe
@@ -21,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - update architecture/readme diagrams and migration/testing docs to describe recording-rule remote-write expectations and Grafana datasource-proxy `datasource_type=vlogs` validation flow
+- document query-range window cache controls, Loki-aligned defaults, and practical disk sizing guidance for longer retention windows
 
 ## [0.27.19] - 2026-04-10
 

@@ -200,6 +200,8 @@ func (p *OTLPPusher) buildPayload() map[string]interface{} {
 	metrics = append(metrics,
 		p.sumMetric("loki_vl_proxy_cache_hits_total", "Cache hits.", "", p.counterDP("loki_vl_proxy_cache_hits_total", p.metrics.cacheHits.Load(), now)),
 		p.sumMetric("loki_vl_proxy_cache_misses_total", "Cache misses.", "", p.counterDP("loki_vl_proxy_cache_misses_total", p.metrics.cacheMisses.Load(), now)),
+		p.sumMetric("loki_vl_proxy_window_cache_hit_total", "Query-range window cache hits.", "", p.counterDP("loki_vl_proxy_window_cache_hit_total", p.metrics.windowCacheHits.Load(), now)),
+		p.sumMetric("loki_vl_proxy_window_cache_miss_total", "Query-range window cache misses.", "", p.counterDP("loki_vl_proxy_window_cache_miss_total", p.metrics.windowCacheMisses.Load(), now)),
 		p.sumMetric("loki_vl_proxy_translations_total", "LogQL to LogsQL translations.", "", p.counterDP("loki_vl_proxy_translations_total", p.metrics.translationsTotal.Load(), now)),
 		p.sumMetric("loki_vl_proxy_translation_errors_total", "Failed translations.", "", p.counterDP("loki_vl_proxy_translation_errors_total", p.metrics.translationErrors.Load(), now)),
 		p.sumMetric("loki_vl_proxy_coalesced_total", "Requests served from coalesced results.", "", p.counterDP("loki_vl_proxy_coalesced_total", p.metrics.coalescedTotal.Load(), now)),
@@ -222,6 +224,7 @@ func (p *OTLPPusher) buildPayload() map[string]interface{} {
 	if circuitBreakerMetric := p.circuitBreakerMetric(now); circuitBreakerMetric != nil {
 		metrics = append(metrics, circuitBreakerMetric)
 	}
+	metrics = append(metrics, p.queryRangeWindowMetrics(now)...)
 
 	metrics = append(metrics, p.systemMetrics(now)...)
 
@@ -510,6 +513,55 @@ func (p *OTLPPusher) backendDurationMetrics(now int64) []map[string]interface{} 
 		return nil
 	}
 	return []map[string]interface{}{p.histogramMetric("loki_vl_proxy_backend_duration_seconds", "VL backend response time.", "s", points...)}
+}
+
+func (p *OTLPPusher) queryRangeWindowMetrics(now int64) []map[string]interface{} {
+	metrics := make([]map[string]interface{}, 0, 6)
+	if p.metrics.windowFetch != nil {
+		metrics = append(metrics, p.histogramMetric(
+			"loki_vl_proxy_window_fetch_seconds",
+			"Query-range window backend fetch duration.",
+			"s",
+			p.histogramDP(p.metrics.windowFetch, now),
+		))
+	}
+	if p.metrics.windowMerge != nil {
+		metrics = append(metrics, p.histogramMetric(
+			"loki_vl_proxy_window_merge_seconds",
+			"Query-range window merge duration.",
+			"s",
+			p.histogramDP(p.metrics.windowMerge, now),
+		))
+	}
+	if p.metrics.windowCount != nil {
+		metrics = append(metrics, p.histogramMetric(
+			"loki_vl_proxy_window_count",
+			"Query-range window count per request.",
+			"{window}",
+			p.histogramDP(p.metrics.windowCount, now),
+		))
+	}
+	metrics = append(metrics,
+		p.gaugeMetric(
+			"loki_vl_proxy_window_adaptive_parallel_current",
+			"Current adaptive query-range window parallelism.",
+			"{window}",
+			p.gaugeDP("loki_vl_proxy_window_adaptive_parallel_current", float64(p.metrics.windowAdaptiveParallelCurrent.Load()), now),
+		),
+		p.gaugeMetric(
+			"loki_vl_proxy_window_adaptive_latency_ewma_seconds",
+			"EWMA backend fetch latency for query-range windows.",
+			"s",
+			p.gaugeDP("loki_vl_proxy_window_adaptive_latency_ewma_seconds", float64(p.metrics.windowAdaptiveLatencyEWMAms.Load())/1000.0, now),
+		),
+		p.gaugeMetric(
+			"loki_vl_proxy_window_adaptive_error_ewma",
+			"Adaptive backend window fetch error EWMA ratio (0-1).",
+			"",
+			p.gaugeDP("loki_vl_proxy_window_adaptive_error_ewma", float64(p.metrics.windowAdaptiveErrorEWMAppm.Load())/1000000.0, now),
+		),
+	)
+	return metrics
 }
 
 func (p *OTLPPusher) clientMetrics(now int64) []map[string]interface{} {

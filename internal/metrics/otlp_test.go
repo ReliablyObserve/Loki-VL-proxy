@@ -312,6 +312,9 @@ func TestOTLPPusher_SpecializedMetricFamilies(t *testing.T) {
 	m.RecordEndpointCacheHit("query_range")
 	m.RecordEndpointCacheMiss("query")
 	m.RecordBackendDuration("query_range", 25*time.Millisecond)
+	m.RecordQueryRangeWindowFetchDuration(20 * time.Millisecond)
+	m.RecordQueryRangeWindowMergeDuration(5 * time.Millisecond)
+	m.RecordQueryRangeWindowCount(4)
 	m.SetCircuitBreakerFunc(func() string { return "half-open" })
 
 	pusher := NewOTLPPusher(OTLPConfig{Endpoint: "http://unused"}, m)
@@ -335,11 +338,18 @@ func TestOTLPPusher_SpecializedMetricFamilies(t *testing.T) {
 	}
 
 	endpointFamilies := append(pusher.endpointCacheMetrics(now), pusher.backendDurationMetrics(now)...)
+	endpointFamilies = append(endpointFamilies, pusher.queryRangeWindowMetrics(now)...)
 	names := metricNamesFromMaps(endpointFamilies)
 	for _, required := range []string{
 		"loki_vl_proxy_cache_hits_by_endpoint",
 		"loki_vl_proxy_cache_misses_by_endpoint",
 		"loki_vl_proxy_backend_duration_seconds",
+		"loki_vl_proxy_window_fetch_seconds",
+		"loki_vl_proxy_window_merge_seconds",
+		"loki_vl_proxy_window_count",
+		"loki_vl_proxy_window_adaptive_parallel_current",
+		"loki_vl_proxy_window_adaptive_latency_ewma_seconds",
+		"loki_vl_proxy_window_adaptive_error_ewma",
 	} {
 		if !names[required] {
 			t.Fatalf("expected %s in specialized families, names=%v", required, names)
