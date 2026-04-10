@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-- emit `structuredMetadata` and `parsed` tuple metadata in Loki label-pair array shape (`[{name,value}]`) when `X-Loki-Response-Encoding-Flags: categorize-labels` is enabled, preventing strict decoder `ReadArray` failures on object-shaped payloads
+- emit `structuredMetadata` and `parsed` tuple metadata as Loki pair-tuples (`[[name,value], ...]`) when `X-Loki-Response-Encoding-Flags: categorize-labels` is enabled, preventing strict decoder `ReadArray` failures on object-shaped or `{name,value}` pair payloads
+- normalize multi-tenant merged stream metadata to pair-tuples (`[[name,value], ...]`) so legacy backend shapes cannot leak incompatible tuple payloads to strict decoders
 
 ### Tests
 
