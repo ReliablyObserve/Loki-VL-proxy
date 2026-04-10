@@ -116,11 +116,17 @@ func (p *Proxy) proxyLogQueryWindowed(w http.ResponseWriter, r *http.Request, lo
 
 	result, _ := json.Marshal(map[string]interface{}{
 		"status": "success",
-		"data": map[string]interface{}{
-			"resultType": "streams",
-			"result":     streams,
-			"stats":      map[string]interface{}{},
-		},
+		"data": func() map[string]interface{} {
+			data := map[string]interface{}{
+				"resultType": "streams",
+				"result":     streams,
+				"stats":      map[string]interface{}{},
+			}
+			if categorizedLabels {
+				data["encodingFlags"] = []string{"categorize-labels"}
+			}
+			return data
+		}(),
 	})
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(result)

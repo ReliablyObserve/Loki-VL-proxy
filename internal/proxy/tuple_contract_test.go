@@ -77,7 +77,8 @@ func assertCategorizeLabelsThreeTupleContract(t *testing.T, body []byte) {
 	var payload struct {
 		Status string `json:"status"`
 		Data   struct {
-			Result []struct {
+			EncodingFlags []string `json:"encodingFlags"`
+			Result        []struct {
 				Values []json.RawMessage `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
@@ -87,6 +88,16 @@ func assertCategorizeLabelsThreeTupleContract(t *testing.T, body []byte) {
 	}
 	if payload.Status != "success" {
 		t.Fatalf("expected success status, got %q body=%s", payload.Status, string(body))
+	}
+	hasCategorizedFlag := false
+	for _, flag := range payload.Data.EncodingFlags {
+		if flag == "categorize-labels" {
+			hasCategorizedFlag = true
+			break
+		}
+	}
+	if !hasCategorizedFlag {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", string(body))
 	}
 
 	tupleCount := 0
@@ -112,10 +123,10 @@ func assertCategorizeLabelsThreeTupleContract(t *testing.T, body []byte) {
 				t.Fatalf("non-Loki structured_metadata alias must not be emitted: %s", string(tuple[2]))
 			}
 			if raw, ok := metadata["structuredMetadata"]; ok {
-				assertMetadataPairArray(t, raw, "structuredMetadata")
+				assertMetadataObjectMap(t, raw, "structuredMetadata")
 			}
 			if raw, ok := metadata["parsed"]; ok {
-				assertMetadataPairArray(t, raw, "parsed")
+				assertMetadataObjectMap(t, raw, "parsed")
 			}
 			if _, ok := metadata["structuredMetadata"]; !ok {
 				if _, ok := metadata["parsed"]; !ok {
@@ -129,15 +140,15 @@ func assertCategorizeLabelsThreeTupleContract(t *testing.T, body []byte) {
 	}
 }
 
-func assertMetadataPairArray(t *testing.T, raw json.RawMessage, key string) {
+func assertMetadataObjectMap(t *testing.T, raw json.RawMessage, key string) {
 	t.Helper()
-	var pairs [][]string
-	if err := json.Unmarshal(raw, &pairs); err != nil {
-		t.Fatalf("expected %s to be Loki label-pair array, got %s: %v", key, string(raw), err)
+	var fields map[string]interface{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("expected %s to be Loki metadata object map, got %s: %v", key, string(raw), err)
 	}
-	for _, pair := range pairs {
-		if len(pair) < 2 || pair[0] == "" {
-			t.Fatalf("expected non-empty %s pair name in %s", key, string(raw))
+	for field := range fields {
+		if field == "" {
+			t.Fatalf("expected non-empty %s key in %s", key, string(raw))
 		}
 	}
 }

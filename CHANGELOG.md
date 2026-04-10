@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.25] - 2026-04-10
+### Bug Fixes
 
+- align categorized stream responses with upstream Loki/Grafana contract by emitting `data.encodingFlags=["categorize-labels"]` alongside 3-tuples and object-map metadata (`structuredMetadata`/`parsed`)
+- harden query-range windowed and multi-tenant merge stream responses so categorized tuple payloads remain parser-safe and normalized across legacy metadata shapes
+
+### Tests
+
+- add categorized-stream contract coverage for metadata-disabled mode to enforce parser-safe 3-tuple output with empty metadata object
+- add fuzz targets for metadata normalization and merged categorized-stream contract invariants
+
+### CI
+
+- add `fuzz-smoke` PR workflow steps to exercise structured-metadata normalization and merged categorized-stream contract fuzz targets
+## [0.27.25] - 2026-04-10
 ### Bug Fixes
 
 - normalize merged query stream metadata to Loki pair-tuples (`[[name,value], ...]`) so legacy/object-shaped metadata cannot trigger strict decoder `ReadArray` failures

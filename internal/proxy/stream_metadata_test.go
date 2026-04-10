@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -61,44 +62,64 @@ func decodeFirstTuple(t *testing.T, body []byte) []interface{} {
 	return resp.Data.Result[0].Values[0]
 }
 
-// labelPairsToMap decodes Loki metadata pair-tuples: [[name,value], ...].
-func labelPairsToMap(t *testing.T, raw interface{}) map[string]string {
+// metadataObjectToMap decodes Loki categorized metadata object maps: {"name":"value", ...}.
+func metadataObjectToMap(t *testing.T, raw interface{}) map[string]string {
 	t.Helper()
-	var out map[string]string
-	switch items := raw.(type) {
-	case []interface{}:
-		out = make(map[string]string, len(items))
-		for _, item := range items {
-			pair, ok := item.([]interface{})
-			if !ok {
-				t.Fatalf("expected label pair tuple, got %T", item)
-			}
-			if len(pair) < 2 {
-				t.Fatalf("expected [name,value] pair, got %v", pair)
-			}
-			name, _ := pair[0].(string)
-			value, _ := pair[1].(string)
+	switch typed := raw.(type) {
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for name, value := range typed {
 			if name == "" {
-				t.Fatalf("expected non-empty pair name in %v", pair)
+				t.Fatalf("expected non-empty metadata key in %#v", typed)
 			}
 			out[name] = value
 		}
-	case [][]string:
-		out = make(map[string]string, len(items))
-		for _, pair := range items {
-			if len(pair) < 2 {
-				t.Fatalf("expected [name,value] pair, got %v", pair)
-			}
-			name := pair[0]
+		return out
+	case map[string]interface{}:
+		items := typed
+		out := make(map[string]string, len(items))
+		for name, value := range items {
 			if name == "" {
-				t.Fatalf("expected non-empty pair name in %v", pair)
+				t.Fatalf("expected non-empty metadata key in %#v", items)
 			}
-			out[name] = pair[1]
+			switch typedValue := value.(type) {
+			case string:
+				out[name] = typedValue
+			case bool:
+				if typedValue {
+					out[name] = "true"
+				} else {
+					out[name] = "false"
+				}
+			case float64:
+				out[name] = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", typedValue), "0"), ".")
+			default:
+				out[name] = fmt.Sprintf("%v", typedValue)
+			}
 		}
+		return out
 	default:
-		t.Fatalf("expected metadata label pairs array, got %T", raw)
+		t.Fatalf("expected metadata object map, got %T", raw)
 	}
-	return out
+	return map[string]string{}
+}
+
+func responseHasEncodingFlag(t *testing.T, body []byte, want string) bool {
+	t.Helper()
+	var payload struct {
+		Data struct {
+			EncodingFlags []string `json:"encodingFlags"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode response for encodingFlags: %v", err)
+	}
+	for _, flag := range payload.Data.EncodingFlags {
+		if flag == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRequestWantsCategorizedLabels(t *testing.T) {
@@ -173,6 +194,9 @@ func TestQueryRange_CategorizeLabelsReturnsLokiThreeTuple(t *testing.T) {
 	if len(tuple) != 3 {
 		t.Fatalf("expected 3-tuple categorize-labels response, got %#v", tuple)
 	}
+	if !responseHasEncodingFlag(t, rec.Body.Bytes(), "categorize-labels") {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", rec.Body.String())
+	}
 	meta, ok := tuple[2].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected metadata object at tuple[2], got %T", tuple[2])
@@ -181,12 +205,42 @@ func TestQueryRange_CategorizeLabelsReturnsLokiThreeTuple(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected Loki structuredMetadata payload, got %#v", meta)
 	}
-	structured := labelPairsToMap(t, structuredRaw)
+	structured := metadataObjectToMap(t, structuredRaw)
 	if got := structured["service.name"]; got != "otel-app" {
 		t.Fatalf("expected service.name pair in structured metadata, got %#v", structured)
 	}
 	if _, ok := meta["structured_metadata"]; ok {
 		t.Fatalf("non-Loki structured_metadata alias must not be emitted, got %#v", meta)
+	}
+}
+
+func TestQueryRange_CategorizeLabelsFeatureDisabledStillReturnsParserSafeTuple(t *testing.T) {
+	vlBackend := backendWithSingleNDJSONLine(t, `{"_time":"2026-01-01T00:00:00Z","_msg":"line","_stream":"{job=\"otel-proxy\",level=\"info\"}","service.name":"otel-app","level":"info"}`)
+	defer vlBackend.Close()
+
+	p := newStreamMetadataProxy(t, vlBackend.URL, false, false)
+	q := url.Values{}
+	q.Set("query", `{job="otel-proxy"}`)
+	q.Set("start", "1")
+	q.Set("end", "2")
+	req := httptest.NewRequest("GET", "/loki/api/v1/query_range?"+q.Encode(), nil)
+	req.Header.Set("X-Loki-Response-Encoding-Flags", "categorize-labels")
+	rec := httptest.NewRecorder()
+
+	p.handleQueryRange(rec, req)
+	tuple := decodeFirstTuple(t, rec.Body.Bytes())
+	if len(tuple) != 3 {
+		t.Fatalf("expected 3-tuple categorize-labels response even when metadata feature is disabled, got %#v", tuple)
+	}
+	if !responseHasEncodingFlag(t, rec.Body.Bytes(), "categorize-labels") {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", rec.Body.String())
+	}
+	meta, ok := tuple[2].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected metadata object at tuple[2], got %T", tuple[2])
+	}
+	if len(meta) != 0 {
+		t.Fatalf("expected empty metadata object with feature disabled, got %#v", meta)
 	}
 }
 
@@ -223,6 +277,9 @@ func TestQuery_CategorizeLabelsReturnsThreeTuple(t *testing.T) {
 	if len(tuple) != 3 {
 		t.Fatalf("expected 3-tuple categorize-labels query response, got %#v", tuple)
 	}
+	if !responseHasEncodingFlag(t, rec.Body.Bytes(), "categorize-labels") {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", rec.Body.String())
+	}
 }
 
 func TestStreamLogQuery_StreamingModePreservesThreeTupleMetadata(t *testing.T) {
@@ -244,6 +301,9 @@ func TestStreamLogQuery_StreamingModePreservesThreeTupleMetadata(t *testing.T) {
 	if len(tuple) != 3 {
 		t.Fatalf("expected stream-mode 3-tuple value, got %#v", tuple)
 	}
+	if !responseHasEncodingFlag(t, rec.Body.Bytes(), "categorize-labels") {
+		t.Fatalf("expected encodingFlags to include categorize-labels, body=%s", rec.Body.String())
+	}
 	meta, ok := tuple[2].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected metadata object at tuple[2], got %T", tuple[2])
@@ -252,7 +312,7 @@ func TestStreamLogQuery_StreamingModePreservesThreeTupleMetadata(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected parsed payload for parser-chain query, got %#v", meta)
 	}
-	parsed := labelPairsToMap(t, parsedRaw)
+	parsed := metadataObjectToMap(t, parsedRaw)
 	if got := parsed["http.status_code"]; got != "500" {
 		t.Fatalf("expected http.status_code in parsed payload, got %#v", parsed)
 	}
@@ -292,7 +352,7 @@ func TestClassifyEntryFields_UsesLokiCanonicalMetadataKeysOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected structuredMetadata key, got %#v", meta)
 	}
-	structured := labelPairsToMap(t, structuredRaw)
+	structured := metadataObjectToMap(t, structuredRaw)
 	if got := structured["service.name"]; got != "otel-app" {
 		t.Fatalf("expected service.name in structuredMetadata payload, got %#v", structured)
 	}
