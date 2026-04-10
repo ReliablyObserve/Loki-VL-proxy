@@ -219,6 +219,14 @@ Use these queries to quickly isolate backend slowness vs proxy/client-side failu
 
 For latency histograms, keep dashboards on `p50`, `p95`, and `p99` rather than averages. Averages hide tail latency incidents.
 
+The packaged `Loki-VL-Proxy` dashboard also includes a `System Resources` section with:
+
+- memory usage ratio
+- CPU usage split by mode
+- PSI pressure (cpu/memory/io)
+- disk and network throughput
+- process RSS and open file descriptors
+
 ### Active Backend E2E Healthchecks
 
 `/ready` confirms backend reachability, but production health should also include synthetic end-to-end probes with real query traffic shape.
