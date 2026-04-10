@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- restore Grafana-safe tuple defaults when `-emit-structured-metadata=true`: Explore/Drilldown requests now stay on canonical `[timestamp, line]` unless explicitly opted into `structured_metadata=true` (or `X-Loki-Response-Encoding-Flags: structured-metadata`), preventing `ReadArray` decode regressions
+
+### Tests
+
+- add strict query-range regression coverage that decodes Grafana responses as `[2]string` tuples and fails on any metadata-object tuple shape leak
+
+## [0.27.17] - 2026-04-10
+
+### Bug Fixes
+
+- default to Loki 3-tuple structured metadata for Grafana query callers when `-emit-structured-metadata=true`, so Explore one-event details include full metadata by default while still allowing explicit request override via `structured_metadata=true|false`
+
+## [0.27.16] - 2026-04-10
+
+### Bug Fixes
+
+- normalize backtick-quoted LogQL line filters (for example ``|= `api` ``) to literal substring matches so parser pipelines such as `| logfmt` no longer drop valid lines
+- make structured metadata emission default for Grafana query callers when `-emit-structured-metadata=true`, so Explore one-event details can include full metadata beyond stream labels; keep explicit request-level override support via `structured_metadata=true|false` and `X-Loki-Response-Encoding-Flags: structured-metadata`
+
+### Tests
+
+- add translator regression coverage for backtick raw-string line filters, including `|= ... | logfmt` and literals containing `|`
+- add proxy coverage for Grafana default structured-metadata emission plus explicit `structured_metadata=false` opt-out behavior
+
+## [0.27.15] - 2026-04-10
+
+### Bug Fixes
+
 - harden startup diagnostics and /proc-host mount guidance for system resource metrics so missing CPU/memory/disk/network/PSI families are surfaced explicitly at boot
 - scope the main Grafana dashboard by OTEL dimensions (`job`, `cluster`, `env`, `namespace`, `pod`) and aggregate overview stat queries to prevent cross-instance value pollution in multi-pod deployments
 

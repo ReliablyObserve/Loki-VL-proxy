@@ -1022,18 +1022,22 @@ func normalizeByLabels(labels string, labelFn LabelTranslateFunc) string {
 
 func findMatchingBrace(s string) int {
 	depth := 0
-	inQuote := false
+	var inQuote rune
 	for i := 0; i < len(s); i++ {
 		c := rune(s[i])
 		// Handle backslash escapes inside quotes
-		if c == '\\' && inQuote && i+1 < len(s) {
+		if c == '\\' && inQuote == '"' && i+1 < len(s) {
 			i++ // skip escaped character
 			continue
 		}
-		if c == '"' {
-			inQuote = !inQuote
+		if (c == '"' || c == '`') && (inQuote == 0 || inQuote == c) {
+			if inQuote == 0 {
+				inQuote = c
+			} else {
+				inQuote = 0
+			}
 		}
-		if inQuote {
+		if inQuote != 0 {
 			continue
 		}
 		if c == '{' {
@@ -1051,12 +1055,20 @@ func findMatchingBrace(s string) int {
 
 func findLastMatchingParen(s string) int {
 	depth := 0
-	inQuote := false
+	var inQuote rune
 	for i, c := range s {
-		if c == '"' {
-			inQuote = !inQuote
+		if c == '\\' && inQuote == '"' && i+1 < len(s) {
+			i++
+			continue
 		}
-		if inQuote {
+		if (c == '"' || c == '`') && (inQuote == 0 || inQuote == c) {
+			if inQuote == 0 {
+				inQuote = c
+			} else {
+				inQuote = 0
+			}
+		}
+		if inQuote != 0 {
 			continue
 		}
 		if c == '(' {
@@ -1074,12 +1086,20 @@ func findLastMatchingParen(s string) int {
 
 func extractPipelineStage(s string) (stage, rest string) {
 	// A pipeline stage goes until the next unquoted |
-	inQuote := false
+	var inQuote rune
 	for i, c := range s {
-		if c == '"' {
-			inQuote = !inQuote
+		if c == '\\' && inQuote == '"' && i+1 < len(s) {
+			i++
+			continue
 		}
-		if inQuote {
+		if (c == '"' || c == '`') && (inQuote == 0 || inQuote == c) {
+			if inQuote == 0 {
+				inQuote = c
+			} else {
+				inQuote = 0
+			}
+		}
+		if inQuote != 0 {
 			continue
 		}
 		if c == '|' {
@@ -1101,6 +1121,13 @@ func extractQuotedValue(s string) (string, string) {
 		}
 		// No closing quote found — return everything
 		return s, ""
+	}
+	if strings.HasPrefix(s, "`") {
+		if i := strings.IndexByte(s[1:], '`'); i >= 0 {
+			// Raw strings should behave like regular quoted literals in the translated query.
+			return strconv.Quote(s[1 : i+1]), strings.TrimSpace(s[i+2:])
+		}
+		return strconv.Quote(s[1:]), ""
 	}
 	// Not quoted — take until next space or pipe
 	end := strings.IndexAny(s, " |")
