@@ -48,7 +48,7 @@ Default logs are emitted as JSON and already use OTel-friendly top-level keys:
   },
   "body": "request",
   "service.name": "loki-vl-proxy",
-  "service.version": "0.27.14",
+  "service.version": "0.27.15",
   "service.instance.id": "proxy-1",
   "deployment.environment.name": "prod",
   "component": "proxy",
@@ -196,6 +196,13 @@ The proxy also exports a lightweight built-in set of runtime and host health met
 | `node_disk_*_bytes_total` | disk I/O counters |
 | `node_network_*_bytes_total` | network I/O counters |
 | `node_pressure_*` | Linux PSI gauges when available |
+
+Kubernetes notes:
+- These runtime/system metrics are read from `/proc` and do not require Kubernetes RBAC permissions.
+- PSI metrics (`node_pressure_*`) depend on kernel support and may be absent on nodes without `/proc/pressure/*`.
+- On startup, the proxy logs a system-metrics readiness check with missing families and remediation hints instead of failing silently.
+- For node-level metrics in Kubernetes, mount host `/proc` and set `-proc-root=/host/proc` (the upstream chart supports this via `systemMetrics.hostProc.enabled: true`).
+- For per-pod attribution in OTLP backends, set `OTEL_SERVICE_INSTANCE_ID` from pod name and `OTEL_SERVICE_NAMESPACE` from pod namespace (the upstream chart now injects these by default).
 
 ### PromQL Drilldowns For Slowness And Client Errors
 

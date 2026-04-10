@@ -44,6 +44,75 @@ func setSyntheticProcEnv(t *testing.T, root string) {
 	})
 }
 
+func TestSetProcRoot(t *testing.T) {
+	oldRoot := procRoot
+	t.Cleanup(func() { procRoot = oldRoot })
+
+	SetProcRoot("/host/proc/../proc")
+	if got := ProcRoot(); got != "/host/proc" {
+		t.Fatalf("expected cleaned proc root, got %q", got)
+	}
+
+	SetProcRoot("   ")
+	if got := ProcRoot(); got != "/proc" {
+		t.Fatalf("expected default proc root, got %q", got)
+	}
+}
+
+func TestInspectSystemStartup_WithSyntheticHostProc(t *testing.T) {
+	root := withSyntheticProcFS(t, map[string]string{
+		"stat":            "cpu  100 5 20 300 7 0 1 2\n",
+		"meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
+		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
+		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
+		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
+		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
+		"pressure/memory": "some avg10=0.50 avg60=1.00 avg300=1.50 total=10\nfull avg10=2.00 avg60=2.50 avg300=3.00 total=20\n",
+		"pressure/io":     "some avg10=0.25 avg60=0.50 avg300=0.75 total=10\nfull avg10=1.00 avg60=1.25 avg300=1.50 total=20\n",
+		"self/fd/0":       "",
+		"self/fd/1":       "",
+		"self/fd/2":       "",
+	})
+	setSyntheticProcEnv(t, root)
+
+	check := InspectSystemStartup()
+	if check.Scope != "custom" {
+		t.Fatalf("expected custom scope for synthetic path, got %q", check.Scope)
+	}
+	if len(check.MissingFamilies()) != 0 {
+		t.Fatalf("expected no missing families, got %v (%v)", check.MissingFamilies(), check.Issues)
+	}
+}
+
+func TestInspectSystemStartup_ReportsMissingFamilies(t *testing.T) {
+	root := withSyntheticProcFS(t, map[string]string{
+		"stat":            "cpu  100 5 20 300 7 0 1 2\n",
+		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
+		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
+		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
+		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
+		"pressure/memory": "some avg10=0.50 avg60=1.00 avg300=1.50 total=10\nfull avg10=2.00 avg60=2.50 avg300=3.00 total=20\n",
+		"self/fd/0":       "",
+	})
+	setSyntheticProcEnv(t, root)
+
+	check := InspectSystemStartup()
+	missing := check.MissingFamilies()
+	wantSubset := []string{"memory", "pressure_io"}
+	for _, family := range wantSubset {
+		if check.Availability[family] {
+			t.Fatalf("expected %s to be unavailable, got available map=%v", family, check.Availability)
+		}
+	}
+	if len(missing) == 0 {
+		t.Fatalf("expected missing families, got none")
+	}
+	issues := check.IssueList()
+	if len(issues) == 0 {
+		t.Fatalf("expected startup issues, got none")
+	}
+}
+
 func TestSystemMetrics_WritePrometheus_NoPanic(t *testing.T) {
 	sm := NewSystemMetrics()
 	var sb strings.Builder
