@@ -307,11 +307,11 @@ func TestMetricQueryTranslation_MalformedDottedDrilldownStage(t *testing.T) {
 		}
 	}
 
-	got, err := TranslateLogQLWithLabels(`sum by (level, detected_level) (count_over_time({deployment_environment="dev", k8s_namespace_name="argocd"} | k8s . `+"`cluster.`"+`[1m]))`, labelFn)
+	got, err := TranslateLogQLWithLabels(`sum by (level, detected_level) (count_over_time({deployment_environment="dev", k8s_namespace_name="sample_ns"} | k8s . `+"`cluster.`"+`[1m]))`, labelFn)
 	if err != nil {
 		t.Fatalf("TranslateLogQLWithLabels() error = %v", err)
 	}
-	want := `"deployment.environment":=dev "k8s.namespace.name":=argocd "k8s.cluster":!"" | stats by (level) count()`
+	want := `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "k8s.cluster":!"" | stats by (level) count()`
 	if got != want {
 		t.Fatalf("TranslateLogQLWithLabels() = %q, want %q", got, want)
 	}

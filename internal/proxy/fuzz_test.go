@@ -126,9 +126,9 @@ func FuzzFormatVLStep(f *testing.F) {
 // FuzzNormalizeMetadataPairs guards metadata normalization from panics across arbitrary JSON payloads.
 func FuzzNormalizeMetadataPairs(f *testing.F) {
 	seeds := [][]byte{
-		[]byte(`{"service.name":"orders","k8s.cluster.name":"main-sand"}`),
-		[]byte(`[["service.name","orders"],["k8s.cluster.name","main-sand"]]`),
-		[]byte(`[{"name":"service.name","value":"orders"},{"name":"k8s.cluster.name","value":"main-sand"}]`),
+		[]byte(`{"service.name":"orders","k8s.cluster.name":"cluster-alpha"}`),
+		[]byte(`[["service.name","orders"],["k8s.cluster.name","cluster-alpha"]]`),
+		[]byte(`[{"name":"service.name","value":"orders"},{"name":"k8s.cluster.name","value":"cluster-alpha"}]`),
 		[]byte(`null`),
 	}
 	for _, seed := range seeds {

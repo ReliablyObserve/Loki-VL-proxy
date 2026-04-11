@@ -98,18 +98,18 @@ func TestTranslateLogQLWithLabels(t *testing.T) {
 		},
 		{
 			name:  "native dotted field equality filter in pipeline",
-			logql: `{deployment_environment="dev",k8s_namespace_name="argocd"} | k8s.cluster.name = ` + "`main-sand`",
-			want:  `"deployment.environment":=dev "k8s.namespace.name":=argocd "k8s.cluster.name":=main-sand`,
+			logql: `{deployment_environment="dev",k8s_namespace_name="sample_ns"} | k8s.cluster.name = ` + "`cluster-alpha`",
+			want:  `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "k8s.cluster.name":=cluster-alpha`,
 		},
 		{
 			name:  "underscored alias equality filter maps to same dotted field",
-			logql: `{deployment_environment="dev",k8s_namespace_name="argocd"} | k8s_cluster_name = ` + "`main-sand`",
-			want:  `"deployment.environment":=dev "k8s.namespace.name":=argocd "k8s.cluster.name":=main-sand`,
+			logql: `{deployment_environment="dev",k8s_namespace_name="sample_ns"} | k8s_cluster_name = ` + "`cluster-alpha`",
+			want:  `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "k8s.cluster.name":=cluster-alpha`,
 		},
 		{
 			name:  "malformed dotted stage from drilldown degrades to non-empty filter",
-			logql: `{deployment_environment="dev",k8s_namespace_name="argocd"} | k8s . ` + "`cluster.`",
-			want:  `"deployment.environment":=dev "k8s.namespace.name":=argocd "k8s.cluster":!""`,
+			logql: `{deployment_environment="dev",k8s_namespace_name="sample_ns"} | k8s . ` + "`cluster.`",
+			want:  `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "k8s.cluster":!""`,
 		},
 	}
 
