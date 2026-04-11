@@ -180,6 +180,17 @@ helm install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
   --set extraArgs.backend=http://victorialogs:9428
 ```
 
+For high-cardinality label-value browsing, tune indexed browse cache directly via chart flags:
+
+```bash
+helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set extraArgs.label-values-indexed-cache=true \
+  --set extraArgs.label-values-hot-limit=200 \
+  --set extraArgs.label-values-index-max-entries=200000
+```
+
 For deployment recipes (StatefulSet + persistence, peer-cache fleet setup, OTLP push wiring) and image source selection (GHCR vs Docker Hub vs custom registry), see:
 - [Getting Started](docs/getting-started.md)
 - [Operations](docs/operations.md)

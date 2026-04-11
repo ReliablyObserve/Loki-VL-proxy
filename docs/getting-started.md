@@ -74,6 +74,14 @@ helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-v
   --set extraArgs.backend=http://victorialogs:9428 \
   --set-string extraArgs.metrics\\.otlp-endpoint=http://otel-collector.monitoring.svc.cluster.local:4318/v1/metrics \
   --set-string extraArgs.server\\.register-instrumentation=false
+
+# 5) Indexed label-values browse cache (hotset + paging/search)
+helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set extraArgs.label-values-indexed-cache=true \
+  --set extraArgs.label-values-hot-limit=200 \
+  --set extraArgs.label-values-index-max-entries=200000
 ```
 
 ### Image Selection
