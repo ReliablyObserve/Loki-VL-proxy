@@ -73,6 +73,12 @@ extraArgs:
   query-range-freshness: "10m"
   query-range-recent-cache-ttl: "0s"
   query-range-history-cache-ttl: "24h"
+  # Indexed label-values browse cache (high-cardinality label UX).
+  # Keep disabled by default; enable when label value lists are large and you
+  # want hotset-first responses with optional offset/search.
+  label-values-indexed-cache: "false"
+  label-values-hot-limit: "200"
+  label-values-index-max-entries: "200000"
   log-level: "info"
   # Hardening
   http-read-timeout: "30s"

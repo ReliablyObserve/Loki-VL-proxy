@@ -40,6 +40,7 @@ type envConfig struct {
 	labelStyle        string
 	fieldMappingJSON  string
 	metadataFieldMode string
+	extraLabelFields  string
 	serviceName       string
 	serviceNamespace  string
 	serviceInstanceID string
@@ -92,6 +93,7 @@ type proxyRuntimeConfig struct {
 	metadataFieldMode               string
 	fieldMappingJSON                string
 	streamFieldsCSV                 string
+	extraLabelFieldsCSV             string
 	peerSelf                        string
 	peerDiscovery                   string
 	peerDNS                         string
@@ -340,6 +342,7 @@ func run(
   hybrid      - expose both native VL field names and translated aliases when they differ`)
 	fieldMappingJSON := fs.String("field-mapping", "", `JSON custom field mappings: [{"vl_field":"service.name","loki_label":"service_name"}]`)
 	streamFieldsCSV := fs.String("stream-fields", "", `Comma-separated VL _stream_fields labels for stream selector optimization (e.g., "app,env,namespace")`)
+	extraLabelFieldsCSV := fs.String("extra-label-fields", "", `Comma-separated additional VL field names exposed on /labels and eligible for alias resolution (for example "host.id,custom.pipeline.processing")`)
 	allowGlobalTenant := fs.Bool("tenant.allow-global", false, `Allow X-Scope-OrgID "*" to bypass AccountID/ProjectID scoping and use the backend default tenant`)
 
 	// Peer cache (fleet distribution)
@@ -366,6 +369,7 @@ func run(
 		labelStyle:        *labelStyle,
 		fieldMappingJSON:  *fieldMappingJSON,
 		metadataFieldMode: *metadataFieldMode,
+		extraLabelFields:  *extraLabelFieldsCSV,
 		serviceName:       *otelServiceName,
 		serviceNamespace:  *otelServiceNamespace,
 		serviceInstanceID: *otelServiceInstanceID,
@@ -445,6 +449,7 @@ func run(
 			metadataFieldMode:               envCfg.metadataFieldMode,
 			fieldMappingJSON:                envCfg.fieldMappingJSON,
 			streamFieldsCSV:                 *streamFieldsCSV,
+			extraLabelFieldsCSV:             envCfg.extraLabelFields,
 			peerSelf:                        *peerSelf,
 			peerDiscovery:                   *peerDiscovery,
 			peerDNS:                         *peerDNS,
@@ -753,6 +758,9 @@ func applyEnvOverrides(cfg envConfig, getenv func(string) string) envConfig {
 	if v := getenv("METADATA_FIELD_MODE"); v != "" && cfg.metadataFieldMode == "hybrid" {
 		cfg.metadataFieldMode = v
 	}
+	if v := getenv("EXTRA_LABEL_FIELDS"); v != "" && cfg.extraLabelFields == "" {
+		cfg.extraLabelFields = v
+	}
 	if v := getenv("OTEL_SERVICE_NAME"); v != "" && (cfg.serviceName == "" || cfg.serviceName == "loki-vl-proxy") {
 		cfg.serviceName = v
 	}
@@ -960,6 +968,7 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		MetadataFieldMode:               mfm,
 		FieldMappings:                   fieldMappings,
 		StreamFields:                    parseCSV(cfg.streamFieldsCSV),
+		ExtraLabelFields:                parseCSV(cfg.extraLabelFieldsCSV),
 		PeerCache:                       peerCache,
 		PeerAuthToken:                   cfg.peerAuthToken,
 	}, nil

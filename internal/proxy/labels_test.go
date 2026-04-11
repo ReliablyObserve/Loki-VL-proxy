@@ -110,12 +110,12 @@ func TestLabelTranslator_ToVL_DetectedLevelAliasInPassthrough(t *testing.T) {
 func TestLabelTranslator_ToVL_LearnedCustomAliases(t *testing.T) {
 	lt := NewLabelTranslator(LabelStyleUnderscores, nil)
 
-	if got := lt.ToVL("cll_pipeline_processing"); got != "cll_pipeline_processing" {
+	if got := lt.ToVL("custom_pipeline_processing"); got != "custom_pipeline_processing" {
 		t.Fatalf("unexpected pre-learn mapping, got %q", got)
 	}
 
-	lt.LearnFieldAliases([]string{"cll.pipeline.processing"})
-	if got := lt.ToVL("cll_pipeline_processing"); got != "cll.pipeline.processing" {
+	lt.LearnFieldAliases([]string{"custom.pipeline.processing"})
+	if got := lt.ToVL("custom_pipeline_processing"); got != "custom.pipeline.processing" {
 		t.Fatalf("learned alias mapping failed, got %q", got)
 	}
 }

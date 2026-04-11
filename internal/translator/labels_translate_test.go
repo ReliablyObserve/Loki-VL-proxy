@@ -108,8 +108,8 @@ func TestTranslateLogQLWithLabels(t *testing.T) {
 		},
 		{
 			name:  "malformed spaced dotted triplet with trailing dot normalizes to valid dotted filter",
-			logql: `{deployment_environment="dev",k8s_namespace_name="sample_ns"} | cll . ` + "`pipeline.processing.`" + ` = ` + "`vector-processing`",
-			want:  `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "cll.pipeline.processing":=vector-processing`,
+			logql: `{deployment_environment="dev",k8s_namespace_name="sample_ns"} | custom . ` + "`pipeline.processing.`" + ` = ` + "`vector-processing`",
+			want:  `"deployment.environment":=dev "k8s.namespace.name":=sample_ns "custom.pipeline.processing":=vector-processing`,
 		},
 		{
 			name:  "malformed dotted stage from drilldown degrades to dotted-prefix regex filter",
@@ -118,8 +118,8 @@ func TestTranslateLogQLWithLabels(t *testing.T) {
 		},
 		{
 			name:  "malformed nested dotted stage keeps full prefix for regex fallback",
-			logql: `{app="api"} | cll . ` + "`pipeline.`",
-			want:  `app:=api ~"cll\.pipeline\."`,
+			logql: `{app="api"} | custom . ` + "`pipeline.`",
+			want:  `app:=api ~"custom\.pipeline\."`,
 		},
 	}
 
@@ -172,8 +172,8 @@ func TestTranslateSingleLabelFilter_DottedTripletKeyOperatorValue(t *testing.T) 
 		},
 		{
 			name:  "malformed spaced dotted key with trailing dot is sanitized",
-			stage: "cll . `pipeline.processing.` = `vector-processing`",
-			want:  `"cll.pipeline.processing":=vector-processing`,
+			stage: "custom . `pipeline.processing.` = `vector-processing`",
+			want:  `"custom.pipeline.processing":=vector-processing`,
 		},
 	}
 

@@ -180,6 +180,17 @@ helm install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
   --set extraArgs.backend=http://victorialogs:9428
 ```
 
+For high-cardinality label-value browsing, tune indexed browse cache directly via chart flags:
+
+```bash
+helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set extraArgs.label-values-indexed-cache=true \
+  --set extraArgs.label-values-hot-limit=200 \
+  --set extraArgs.label-values-index-max-entries=200000
+```
+
 For deployment recipes (StatefulSet + persistence, peer-cache fleet setup, OTLP push wiring) and image source selection (GHCR vs Docker Hub vs custom registry), see:
 - [Getting Started](docs/getting-started.md)
 - [Operations](docs/operations.md)
@@ -221,6 +232,7 @@ Related docs: [Getting Started](docs/getting-started.md), [Configuration](docs/c
 Operational note:
 - Grafana datasource queries can use dotted field filters (for example `k8s.cluster.name = \`my-cluster\``) while stream labels remain Loki-compatible underscores.
 - Grafana Loki query builder UI may tokenize dotted keys as `label=host`, `operator=.`, `value=id` for `host.id`. Query execution still works in code mode, but builder editing is safest with underscore aliases (`label-style=underscores`, `metadata-field-mode=translated`).
+- `extra-label-fields` can extend `/labels` and alias resolution for custom VL fields while keeping Loki-facing labels underscore-safe in conservative mode.
 
 Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Loki Compatibility](docs/compatibility-loki.md), [Logs Drilldown Compatibility](docs/compatibility-drilldown.md), [VictoriaLogs Compatibility](docs/compatibility-victorialogs.md)
 

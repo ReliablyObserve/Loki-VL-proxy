@@ -225,6 +225,9 @@ type Config struct {
 
 	// Stream optimization
 	StreamFields []string // VL _stream_fields labels — use native stream selectors for these (faster)
+	// ExtraLabelFields extends the auto-discovered label surface with explicit VL field names.
+	// Values may be dotted or underscore aliases; they are normalized to VL-native names.
+	ExtraLabelFields []string
 
 	// Peer cache (fleet distribution)
 	PeerCache     *cache.PeerCache // optional peer cache for distributed fleet
@@ -312,6 +315,7 @@ type Proxy struct {
 	labelTranslator                 *LabelTranslator
 	metadataFieldMode               MetadataFieldMode
 	streamFieldsMap                 map[string]bool  // known _stream_fields for VL stream selector optimization
+	declaredLabelFields             []string         // configured VL-native label fields (stream_fields + extras)
 	peerCache                       *cache.PeerCache // L3 fleet peer cache
 	peerAuthToken                   string
 	registerInstrumentation         bool
@@ -526,6 +530,9 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("invalid tail mode %q", tailMode)
 	}
 
+	labelTranslator := NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings)
+	declaredLabelFields := buildDeclaredLabelFields(cfg.StreamFields, cfg.ExtraLabelFields, labelTranslator)
+
 	return &Proxy{
 		backend:       u,
 		rulerBackend:  rulerURL,
@@ -555,9 +562,10 @@ func New(cfg Config) (*Proxy, error) {
 		derivedFields:                   cfg.DerivedFields,
 		streamResponse:                  cfg.StreamResponse,
 		emitStructuredMetadata:          cfg.EmitStructuredMetadata,
-		labelTranslator:                 NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings),
+		labelTranslator:                 labelTranslator,
 		metadataFieldMode:               metadataFieldMode,
 		streamFieldsMap:                 buildStreamFieldsMap(cfg.StreamFields),
+		declaredLabelFields:             declaredLabelFields,
 		peerCache:                       cfg.PeerCache,
 		peerAuthToken:                   cfg.PeerAuthToken,
 		registerInstrumentation:         registerInstrumentation,
@@ -591,9 +599,52 @@ func buildStreamFieldsMap(fields []string) map[string]bool {
 	}
 	m := make(map[string]bool, len(fields))
 	for _, f := range fields {
-		m[f] = true
+		key := strings.TrimSpace(f)
+		if key == "" {
+			continue
+		}
+		m[key] = true
+	}
+	if len(m) == 0 {
+		return nil
 	}
 	return m
+}
+
+func buildDeclaredLabelFields(streamFields, extraLabelFields []string, lt *LabelTranslator) []string {
+	if len(streamFields) == 0 && len(extraLabelFields) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(streamFields)+len(extraLabelFields))
+	out := make([]string, 0, len(streamFields)+len(extraLabelFields))
+	addField := func(raw string) {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return
+		}
+		if lt != nil {
+			mapped := strings.TrimSpace(lt.ToVL(name))
+			if mapped != "" {
+				name = mapped
+			}
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	for _, field := range streamFields {
+		addField(field)
+	}
+	for _, field := range extraLabelFields {
+		addField(field)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Init wires cross-component dependencies after construction.
@@ -1410,6 +1461,37 @@ func decodeVLFieldHits(body []byte) ([]string, error) {
 	return values, nil
 }
 
+func appendUniqueStrings(dst []string, values ...string) []string {
+	if len(values) == 0 {
+		return dst
+	}
+	seen := make(map[string]struct{}, len(dst)+len(values))
+	for _, existing := range dst {
+		seen[existing] = struct{}{}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		dst = append(dst, value)
+	}
+	return dst
+}
+
+func (p *Proxy) snapshotDeclaredLabelFields() []string {
+	if p == nil || len(p.declaredLabelFields) == 0 {
+		return nil
+	}
+	out := make([]string, len(p.declaredLabelFields))
+	copy(out, p.declaredLabelFields)
+	return out
+}
+
 func (p *Proxy) fetchVLFieldNames(ctx context.Context, path string, params url.Values) ([]string, error) {
 	resp, err := p.vlGet(ctx, path, params)
 	if err != nil {
@@ -1446,10 +1528,16 @@ func (p *Proxy) fetchVLFieldValues(ctx context.Context, path string, params url.
 func (p *Proxy) fetchPreferredLabelNames(ctx context.Context, params url.Values) ([]string, error) {
 	labels, err := p.fetchVLFieldNames(ctx, "/select/logsql/stream_field_names", params)
 	if err == nil {
+		labels = appendUniqueStrings(labels, p.snapshotDeclaredLabelFields()...)
 		return labels, nil
 	}
 	if shouldFallbackToGenericMetadata(err) {
-		return p.fetchVLFieldNames(ctx, "/select/logsql/field_names", params)
+		fallback, fallbackErr := p.fetchVLFieldNames(ctx, "/select/logsql/field_names", params)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		fallback = appendUniqueStrings(fallback, p.snapshotDeclaredLabelFields()...)
+		return fallback, nil
 	}
 	return nil, err
 }
@@ -1460,12 +1548,16 @@ func (p *Proxy) fetchPreferredLabelValues(ctx context.Context, labelName string,
 	if err != nil && !shouldFallbackToGenericMetadata(err) {
 		return nil, err
 	}
+	streamFields = appendUniqueStrings(streamFields, p.snapshotDeclaredLabelFields()...)
 
 	resolution := p.labelTranslator.ResolveLabelCandidates(labelName, streamFields)
 	if len(resolution.candidates) == 0 && useStreamEndpoint {
 		useStreamEndpoint = false
 	}
 	if len(resolution.candidates) == 0 && !useStreamEndpoint {
+		resolution = p.labelTranslator.ResolveLabelCandidates(labelName, p.snapshotDeclaredLabelFields())
+	}
+	if len(resolution.candidates) == 0 {
 		resolution = fieldResolution{candidates: []string{p.labelTranslator.ToVL(labelName)}}
 	}
 	if len(resolution.candidates) == 0 {
@@ -1796,6 +1888,70 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
 }
 
+func (p *Proxy) resolveTargetLabelFields(ctx context.Context, targetLabels string, params url.Values) []string {
+	fields := splitTargetLabels(targetLabels)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	var (
+		available []string
+		fetchErr  error
+	)
+
+	needsInventory := false
+	if p.labelTranslator != nil && p.labelTranslator.style == LabelStyleUnderscores {
+		for _, field := range fields {
+			translated := p.labelTranslator.ToVL(field)
+			if translated == strings.TrimSpace(field) && strings.Contains(field, "_") {
+				needsInventory = true
+				break
+			}
+		}
+	}
+
+	if needsInventory {
+		lookup := url.Values{}
+		for _, key := range []string{"query", "start", "end"} {
+			if value := strings.TrimSpace(params.Get(key)); value != "" {
+				lookup.Set(key, value)
+			}
+		}
+		available, fetchErr = p.fetchPreferredLabelNames(ctx, lookup)
+		if fetchErr != nil {
+			p.log.Debug("target label inventory lookup failed; falling back to direct mapping", "error", fetchErr)
+		}
+	}
+
+	if len(available) == 0 {
+		available = p.snapshotDeclaredLabelFields()
+	}
+	available = appendUniqueStrings(available, p.snapshotDeclaredLabelFields()...)
+
+	resolved := make([]string, 0, len(fields))
+	for _, field := range fields {
+		name := strings.TrimSpace(field)
+		if name == "" {
+			continue
+		}
+		mapped := p.labelTranslator.ToVL(name)
+		if len(available) > 0 {
+			candidates := p.labelTranslator.ResolveLabelCandidates(name, available)
+			if len(candidates.candidates) > 0 {
+				if candidates.ambiguous {
+					p.log.Debug("ambiguous label alias for targetLabels; using first candidate",
+						"label", name,
+						"candidate_count", len(candidates.candidates),
+					)
+				}
+				mapped = candidates.candidates[0]
+			}
+		}
+		resolved = appendUniqueStrings(resolved, mapped)
+	}
+	return resolved
+}
+
 // handleVolume returns volume data via VL /select/logsql/hits with field grouping.
 // Loki: GET /loki/api/v1/index/volume?query={...}&start=...&end=...
 // Response: {"status":"success","data":{"resultType":"vector","result":[{"metric":{...},"value":[ts,"count"]}]}}
@@ -1837,11 +1993,10 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	// Request field-level grouping
 	if targetLabels != "" {
-		mappedFields := make([]string, 0, len(splitTargetLabels(targetLabels)))
-		for _, field := range splitTargetLabels(targetLabels) {
-			mappedFields = append(mappedFields, p.labelTranslator.ToVL(field))
+		mappedFields := p.resolveTargetLabelFields(r.Context(), targetLabels, params)
+		if len(mappedFields) > 0 {
+			params.Set("field", strings.Join(mappedFields, ","))
 		}
-		params.Set("field", strings.Join(mappedFields, ","))
 	}
 
 	resp, err := p.vlGet(r.Context(), "/select/logsql/hits", params)
@@ -1901,11 +2056,10 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	}
 	// Forward targetLabels for field-level grouping (same as /volume)
 	if targetLabels != "" {
-		mappedFields := make([]string, 0, len(splitTargetLabels(targetLabels)))
-		for _, field := range splitTargetLabels(targetLabels) {
-			mappedFields = append(mappedFields, p.labelTranslator.ToVL(field))
+		mappedFields := p.resolveTargetLabelFields(r.Context(), targetLabels, params)
+		if len(mappedFields) > 0 {
+			params.Set("field", strings.Join(mappedFields, ","))
 		}
-		params.Set("field", strings.Join(mappedFields, ","))
 	}
 
 	resp, err := p.vlGet(r.Context(), "/select/logsql/hits", params)

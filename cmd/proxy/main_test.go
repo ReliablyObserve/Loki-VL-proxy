@@ -617,6 +617,7 @@ func TestApplyEnvOverrides(t *testing.T) {
 		"LABEL_STYLE":              "underscores",
 		"FIELD_MAPPING":            `[{"vl_field":"service.name","loki_label":"service_name"}]`,
 		"METADATA_FIELD_MODE":      "native",
+		"EXTRA_LABEL_FIELDS":       "host.id,custom.pipeline.processing",
 		"OTEL_SERVICE_NAME":        "custom-proxy",
 		"OTEL_SERVICE_NAMESPACE":   "platform",
 		"OTEL_SERVICE_INSTANCE_ID": "proxy-1",
@@ -635,6 +636,9 @@ func TestApplyEnvOverrides(t *testing.T) {
 	if got.otlpCompression != "gzip" || got.labelStyle != "underscores" || got.metadataFieldMode != "native" {
 		t.Fatalf("unexpected style/compression override result: %+v", got)
 	}
+	if got.extraLabelFields != "host.id,custom.pipeline.processing" {
+		t.Fatalf("unexpected extra label fields override result: %+v", got)
+	}
 	if got.serviceName != "custom-proxy" || got.serviceNamespace != "platform" || got.serviceInstanceID != "proxy-1" || got.deploymentEnv != "prod" {
 		t.Fatalf("unexpected observability env overrides: %+v", got)
 	}
@@ -648,6 +652,7 @@ func TestApplyEnvOverrides_PreservesExplicitFlags(t *testing.T) {
 		labelStyle:        "underscores",
 		fieldMappingJSON:  `[]`,
 		metadataFieldMode: "translated",
+		extraLabelFields:  "service.name",
 	}
 	env := map[string]string{
 		"TENANT_MAP":          `{"ignored":{}}`,
@@ -656,6 +661,7 @@ func TestApplyEnvOverrides_PreservesExplicitFlags(t *testing.T) {
 		"LABEL_STYLE":         "passthrough",
 		"FIELD_MAPPING":       `[{"ignored":true}]`,
 		"METADATA_FIELD_MODE": "native",
+		"EXTRA_LABEL_FIELDS":  "host.id",
 	}
 	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
 	if got != cfg {
@@ -823,6 +829,7 @@ func TestBuildProxyConfig(t *testing.T) {
 		metadataFieldMode:               "hybrid",
 		fieldMappingJSON:                `[{"vl_field":"service.name","loki_label":"service_name"}]`,
 		streamFieldsCSV:                 "app,namespace",
+		extraLabelFieldsCSV:             "host.id,custom.pipeline.processing",
 		peerSelf:                        "10.0.0.1:3100",
 		peerDiscovery:                   "static",
 		peerStatic:                      "10.0.0.2:3100,10.0.0.3:3100",
@@ -890,6 +897,9 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if len(got.StreamFields) != 2 || got.StreamFields[0] != "app" {
 		t.Fatalf("unexpected stream fields: %+v", got.StreamFields)
+	}
+	if len(got.ExtraLabelFields) != 2 || got.ExtraLabelFields[0] != "host.id" || got.ExtraLabelFields[1] != "custom.pipeline.processing" {
+		t.Fatalf("unexpected extra label fields: %+v", got.ExtraLabelFields)
 	}
 	if got.TailMode != proxy.TailModeSynthetic {
 		t.Fatalf("unexpected tail mode: %v", got.TailMode)
