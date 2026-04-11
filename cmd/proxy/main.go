@@ -94,6 +94,13 @@ type proxyRuntimeConfig struct {
 	fieldMappingJSON                string
 	streamFieldsCSV                 string
 	extraLabelFieldsCSV             string
+	labelValuesIndexedCache         bool
+	labelValuesHotLimit             int
+	labelValuesIndexMaxEntries      int
+	labelValuesIndexPersistPath     string
+	labelValuesIndexPersistInterval time.Duration
+	labelValuesIndexStartupStale    time.Duration
+	labelValuesIndexPeerWarmTimeout time.Duration
 	peerSelf                        string
 	peerDiscovery                   string
 	peerDNS                         string
@@ -343,6 +350,13 @@ func run(
 	fieldMappingJSON := fs.String("field-mapping", "", `JSON custom field mappings: [{"vl_field":"service.name","loki_label":"service_name"}]`)
 	streamFieldsCSV := fs.String("stream-fields", "", `Comma-separated VL _stream_fields labels for stream selector optimization (e.g., "app,env,namespace")`)
 	extraLabelFieldsCSV := fs.String("extra-label-fields", "", `Comma-separated additional VL field names exposed on /labels and eligible for alias resolution (for example "host.id,custom.pipeline.processing")`)
+	labelValuesIndexedCache := fs.Bool("label-values-indexed-cache", false, "Enable indexed browse cache for /loki/api/v1/label/{name}/values (hot subset first for empty-query requests)")
+	labelValuesHotLimit := fs.Int("label-values-hot-limit", 200, "Default number of label values returned for empty-query browse requests when indexed cache is enabled")
+	labelValuesIndexMaxEntries := fs.Int("label-values-index-max-entries", 200000, "Maximum indexed values retained per tenant+label when indexed label-values cache is enabled")
+	labelValuesIndexPersistPath := fs.String("label-values-index-persist-path", "", "Path to persisted label-values index snapshot JSON file. Empty disables persistence.")
+	labelValuesIndexPersistInterval := fs.Duration("label-values-index-persist-interval", 30*time.Second, "How often to persist the in-memory label-values index snapshot to disk")
+	labelValuesIndexStartupStale := fs.Duration("label-values-index-startup-stale-threshold", 60*time.Second, "Treat on-disk label-values index snapshot older than this as stale and warm from peers before serving")
+	labelValuesIndexPeerWarmTimeout := fs.Duration("label-values-index-startup-peer-warm-timeout", 5*time.Second, "Maximum time to wait for startup label-values index warm from peers when disk snapshot is stale or missing")
 	allowGlobalTenant := fs.Bool("tenant.allow-global", false, `Allow X-Scope-OrgID "*" to bypass AccountID/ProjectID scoping and use the backend default tenant`)
 
 	// Peer cache (fleet distribution)
@@ -450,6 +464,13 @@ func run(
 			fieldMappingJSON:                envCfg.fieldMappingJSON,
 			streamFieldsCSV:                 *streamFieldsCSV,
 			extraLabelFieldsCSV:             envCfg.extraLabelFields,
+			labelValuesIndexedCache:         *labelValuesIndexedCache,
+			labelValuesHotLimit:             *labelValuesHotLimit,
+			labelValuesIndexMaxEntries:      *labelValuesIndexMaxEntries,
+			labelValuesIndexPersistPath:     *labelValuesIndexPersistPath,
+			labelValuesIndexPersistInterval: *labelValuesIndexPersistInterval,
+			labelValuesIndexStartupStale:    *labelValuesIndexStartupStale,
+			labelValuesIndexPeerWarmTimeout: *labelValuesIndexPeerWarmTimeout,
 			peerSelf:                        *peerSelf,
 			peerDiscovery:                   *peerDiscovery,
 			peerDNS:                         *peerDNS,
@@ -495,6 +516,9 @@ func run(
 		tlsKeyFile:  *tlsKeyFile,
 	}, logger, fatal)
 	handleShutdownFn(runtime.shutdownCh, runtime.server, 30*time.Second, logger)
+	if err := runtime.proxy.Shutdown(context.Background()); err != nil {
+		logger.Error("proxy shutdown hook failed", "error", err)
+	}
 	return nil
 }
 
@@ -969,6 +993,13 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		FieldMappings:                   fieldMappings,
 		StreamFields:                    parseCSV(cfg.streamFieldsCSV),
 		ExtraLabelFields:                parseCSV(cfg.extraLabelFieldsCSV),
+		LabelValuesIndexedCache:         cfg.labelValuesIndexedCache,
+		LabelValuesHotLimit:             cfg.labelValuesHotLimit,
+		LabelValuesIndexMaxEntries:      cfg.labelValuesIndexMaxEntries,
+		LabelValuesIndexPersistPath:     cfg.labelValuesIndexPersistPath,
+		LabelValuesIndexPersistInterval: cfg.labelValuesIndexPersistInterval,
+		LabelValuesIndexStartupStale:    cfg.labelValuesIndexStartupStale,
+		LabelValuesIndexPeerWarmTimeout: cfg.labelValuesIndexPeerWarmTimeout,
 		PeerCache:                       peerCache,
 		PeerAuthToken:                   cfg.peerAuthToken,
 	}, nil
@@ -1068,6 +1099,21 @@ func logProxyStartup(logger *slog.Logger, proxyCfg proxy.Config, peerSelf, peerD
 	}
 	if proxyCfg.LabelStyle == proxy.LabelStyleUnderscores {
 		logger.Info("label translation enabled", "label_style", "underscores", "metadata_field_mode", string(proxyCfg.MetadataFieldMode))
+	}
+	if proxyCfg.LabelValuesIndexedCache {
+		estimatedRAMPerLabelBytes := int64(proxyCfg.LabelValuesIndexMaxEntries) * 96
+		estimatedDiskPerLabelBytes := int64(float64(estimatedRAMPerLabelBytes) * 0.6)
+		logger.Info(
+			"label values indexed cache enabled",
+			"hot_limit", proxyCfg.LabelValuesHotLimit,
+			"max_entries_per_label", proxyCfg.LabelValuesIndexMaxEntries,
+			"persist_path", proxyCfg.LabelValuesIndexPersistPath,
+			"persist_interval", proxyCfg.LabelValuesIndexPersistInterval,
+			"startup_stale_threshold", proxyCfg.LabelValuesIndexStartupStale,
+			"startup_peer_warm_timeout", proxyCfg.LabelValuesIndexPeerWarmTimeout,
+			"estimated_ram_per_label_bytes", estimatedRAMPerLabelBytes,
+			"estimated_disk_per_label_bytes", estimatedDiskPerLabelBytes,
+		)
 	}
 	if proxyCfg.DerivedFields != nil {
 		logger.Info("loaded derived fields", "count", len(proxyCfg.DerivedFields))

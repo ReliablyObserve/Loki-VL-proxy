@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- cap preallocated slice capacities on label-values browse paths to satisfy CodeQL excessive allocation guards for request-driven limits
+
+## [0.27.34] - 2026-04-11
+
+### Configuration
+
+- wire runtime support for indexed label-values cache flags end-to-end (`label-values-indexed-cache`, `label-values-hot-limit`, `label-values-index-max-entries`) to remove chart/runtime drift
+- add persistent indexed label-values snapshot controls (`label-values-index-persist-path`, `label-values-index-persist-interval`, `label-values-index-startup-stale-threshold`, `label-values-index-startup-peer-warm-timeout`)
+
+### Reliability
+
+- restore indexed label-values cache state from disk on startup and persist periodic + graceful-shutdown snapshots for rolling updates
+- add startup peer warm fallback when local snapshot is stale/missing so new pods can reuse fresh fleet cache state before serving
+- gate readiness on indexed cache startup warm completion to keep probe behavior consistent during rollouts
+- enable gzip compression for peer cache transport payloads on `_cache/get` to reduce transfer size/latency on large cache objects
+
+### Tests
+
+- add regression coverage for runtime flag wiring, indexed snapshot persistence/restore, stale-disk peer warm fallback, and peer gzip transport behavior
+- pin e2e compose + manifest guards for indexed cache persistence flags so CI fails on drift
+
+### Documentation
+
+- document indexed cache persistence/warm behavior, sizing estimates, and chart/helm examples
+
 ## [0.27.33] - 2026-04-11
 
 ### Configuration

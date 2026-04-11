@@ -1,8 +1,10 @@
 package cache
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,6 +124,40 @@ func TestPeerCache_ServeHTTP_Hit(t *testing.T) {
 	pc.ServeHTTP(w, r, localCache)
 	if w.Code != 200 || w.Body.String() != "hello" {
 		t.Errorf("expected 200/hello, got %d/%q", w.Code, w.Body.String())
+	}
+}
+
+func TestPeerCache_ServeHTTP_HitCompressed(t *testing.T) {
+	localCache := New(60*time.Second, 1000)
+	defer localCache.Close()
+	payload := []byte(strings.Repeat("x", 1024))
+	localCache.Set("test-key", payload)
+
+	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost"})
+	defer pc.Close()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_cache/get?key=test-key", nil)
+	r.Header.Set("Accept-Encoding", "gzip")
+	pc.ServeHTTP(w, r, localCache)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected gzip content encoding, got %q", w.Header().Get("Content-Encoding"))
+	}
+	zr, err := gzip.NewReader(strings.NewReader(w.Body.String()))
+	if err != nil {
+		t.Fatalf("create gzip reader: %v", err)
+	}
+	defer zr.Close()
+	decoded, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("read gzip payload: %v", err)
+	}
+	if string(decoded) != string(payload) {
+		t.Fatalf("unexpected gzip payload, want len=%d got len=%d", len(payload), len(decoded))
 	}
 }
 

@@ -10,6 +10,7 @@ This guide explains how field and label translation behaves across proxy surface
 | `-metadata-field-mode` | Controls field exposure for field-oriented APIs and structured metadata payloads | `native`, `translated`, `hybrid` |
 | `-emit-structured-metadata` | Enables 3-tuple metadata responses for explicit `categorize-labels` requests (default: `true`) | `false`, `true` |
 | `-field-mapping` | Custom mapping between VL field name and Loki label name | JSON mappings |
+| `-extra-label-fields` | Explicitly extends label-facing APIs and dot/underscore alias resolution for custom fields | comma-separated VL field names |
 
 ## Surfaces Affected
 
@@ -57,6 +58,7 @@ Compatibility behavior:
 - Underscore aliases for known OTel fields are also accepted (`k8s_cluster_name = ...`) and resolve to the same dotted VL field.
 - Stream label outputs remain Loki-safe (underscore keys) when `-label-style=underscores`.
 - Field-oriented and metadata surfaces follow `-metadata-field-mode` (`native`, `translated`, `hybrid`).
+- `-extra-label-fields` can be used to make custom dotted VL fields reliably visible/resolvable through `/labels`, `/label/<name>/values`, and `targetLabels` in volume APIs.
 
 Caveat for Grafana Loki datasource builder:
 - The builder UI can tokenize dotted keys (for example `host.id`) into `host` `.` `id` controls even when the generated LogQL query executes correctly.
@@ -142,6 +144,7 @@ Use mapping when your VL schema does not follow common OTel naming or you need s
    - `native` for OTel-native field UX
 3. Enable `-emit-structured-metadata=true` when clients need metadata in 3-tuple responses via `categorize-labels`.
 4. Add `-field-mapping` only for non-standard schema cases.
+5. Add `-extra-label-fields` for custom fields you want consistently visible on label-facing APIs and Grafana builder workflows.
 
 ## Related
 

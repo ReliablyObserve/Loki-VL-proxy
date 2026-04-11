@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/cache"
@@ -31,6 +32,7 @@ import (
 	mw "github.com/ReliablyObserve/Loki-VL-proxy/internal/middleware"
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/translator"
 	"github.com/gorilla/websocket"
+	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -228,6 +230,24 @@ type Config struct {
 	// ExtraLabelFields extends the auto-discovered label surface with explicit VL field names.
 	// Values may be dotted or underscore aliases; they are normalized to VL-native names.
 	ExtraLabelFields []string
+	// LabelValuesIndexedCache enables indexed browsing for /label/{name}/values.
+	// When enabled, empty-query browsing can return a hot subset first, with optional offset/limit/search.
+	LabelValuesIndexedCache bool
+	// LabelValuesHotLimit is the default number of values returned for empty-query browsing
+	// when LabelValuesIndexedCache is enabled and request limit is not provided.
+	LabelValuesHotLimit int
+	// LabelValuesIndexMaxEntries caps in-memory indexed values per tenant+label.
+	LabelValuesIndexMaxEntries int
+	// LabelValuesIndexPersistPath enables periodic/final persistence of label-values index snapshots.
+	// Empty disables disk persistence.
+	LabelValuesIndexPersistPath string
+	// LabelValuesIndexPersistInterval controls periodic snapshot persistence interval.
+	LabelValuesIndexPersistInterval time.Duration
+	// LabelValuesIndexStartupStale marks on-disk snapshots older than this threshold as stale.
+	// Stale snapshots trigger peer warm fallback before serving.
+	LabelValuesIndexStartupStale time.Duration
+	// LabelValuesIndexPeerWarmTimeout bounds startup peer warm attempts when disk is stale/missing.
+	LabelValuesIndexPeerWarmTimeout time.Duration
 
 	// Peer cache (fleet distribution)
 	PeerCache     *cache.PeerCache // optional peer cache for distributed fleet
@@ -264,11 +284,13 @@ const (
 	maxQueryLength = 65536 // 64KB
 	// maxLimitValue caps the number of results per query.
 	maxLimitValue                     = 10000
+	maxUserDrivenSlicePrealloc        = 512
 	tailWriteTimeout                  = 2 * time.Second
 	maxMultiTenantFanout              = 64
 	maxMultiTenantMergedResponseBytes = 32 << 20
 	maxDetectedScanLines              = 2000
 	maxSyntheticTailSeenEntries       = 4096
+	labelValuesIndexSnapshotCacheKey  = "__label_values_index_snapshot:v1"
 )
 
 // CacheTTLs defines per-endpoint cache TTLs.
@@ -344,6 +366,37 @@ type Proxy struct {
 	queryRangeFreshness             time.Duration
 	queryRangeRecentCacheTTL        time.Duration
 	queryRangeHistoryCacheTTL       time.Duration
+	labelRefreshGroup               singleflight.Group
+	labelValuesIndexedCache         bool
+	labelValuesHotLimit             int
+	labelValuesIndexMaxEntries      int
+	labelValuesIndexPersistPath     string
+	labelValuesIndexPersistInterval time.Duration
+	labelValuesIndexStartupStale    time.Duration
+	labelValuesIndexPeerWarmTimeout time.Duration
+	labelValuesIndexWarmReady       atomic.Bool
+	labelValuesIndexPersistStarted  atomic.Bool
+	labelValuesIndexPersistStop     chan struct{}
+	labelValuesIndexPersistDone     chan struct{}
+	labelValuesIndexMu              sync.RWMutex
+	labelValuesIndex                map[string]*labelValuesIndexState
+}
+
+type labelValueIndexEntry struct {
+	SeenCount uint32 `json:"seen_count"`
+	LastSeen  int64  `json:"last_seen_unix_nano"`
+}
+
+type labelValuesIndexState struct {
+	entries map[string]labelValueIndexEntry
+	dirty   bool
+	ordered []string
+}
+
+type labelValuesIndexSnapshot struct {
+	Version         int                                        `json:"version"`
+	SavedAtUnixNano int64                                      `json:"saved_at_unix_nano"`
+	StatesByKey     map[string]map[string]labelValueIndexEntry `json:"states_by_key"`
 }
 
 type tailConn interface {
@@ -529,6 +582,29 @@ func New(cfg Config) (*Proxy, error) {
 	default:
 		return nil, fmt.Errorf("invalid tail mode %q", tailMode)
 	}
+	labelValuesHotLimit := cfg.LabelValuesHotLimit
+	if labelValuesHotLimit <= 0 {
+		labelValuesHotLimit = 200
+	}
+	labelValuesIndexMaxEntries := cfg.LabelValuesIndexMaxEntries
+	if labelValuesIndexMaxEntries <= 0 {
+		labelValuesIndexMaxEntries = 200000
+	}
+	if labelValuesIndexMaxEntries < labelValuesHotLimit {
+		labelValuesIndexMaxEntries = labelValuesHotLimit
+	}
+	labelValuesIndexPersistInterval := cfg.LabelValuesIndexPersistInterval
+	if labelValuesIndexPersistInterval <= 0 {
+		labelValuesIndexPersistInterval = 30 * time.Second
+	}
+	labelValuesIndexStartupStale := cfg.LabelValuesIndexStartupStale
+	if labelValuesIndexStartupStale <= 0 {
+		labelValuesIndexStartupStale = 60 * time.Second
+	}
+	labelValuesIndexPeerWarmTimeout := cfg.LabelValuesIndexPeerWarmTimeout
+	if labelValuesIndexPeerWarmTimeout <= 0 {
+		labelValuesIndexPeerWarmTimeout = 5 * time.Second
+	}
 
 	labelTranslator := NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings)
 	declaredLabelFields := buildDeclaredLabelFields(cfg.StreamFields, cfg.ExtraLabelFields, labelTranslator)
@@ -590,6 +666,16 @@ func New(cfg Config) (*Proxy, error) {
 		queryRangeFreshness:             queryRangeFreshness,
 		queryRangeRecentCacheTTL:        queryRangeRecentCacheTTL,
 		queryRangeHistoryCacheTTL:       queryRangeHistoryCacheTTL,
+		labelValuesIndexedCache:         cfg.LabelValuesIndexedCache,
+		labelValuesHotLimit:             labelValuesHotLimit,
+		labelValuesIndexMaxEntries:      labelValuesIndexMaxEntries,
+		labelValuesIndexPersistPath:     strings.TrimSpace(cfg.LabelValuesIndexPersistPath),
+		labelValuesIndexPersistInterval: labelValuesIndexPersistInterval,
+		labelValuesIndexStartupStale:    labelValuesIndexStartupStale,
+		labelValuesIndexPeerWarmTimeout: labelValuesIndexPeerWarmTimeout,
+		labelValuesIndexPersistStop:     make(chan struct{}),
+		labelValuesIndexPersistDone:     make(chan struct{}),
+		labelValuesIndex:                make(map[string]*labelValuesIndexState),
 	}, nil
 }
 
@@ -650,6 +736,17 @@ func buildDeclaredLabelFields(streamFields, extraLabelFields []string, lt *Label
 // Init wires cross-component dependencies after construction.
 func (p *Proxy) Init() {
 	p.metrics.SetCircuitBreakerFunc(p.breaker.State)
+	p.labelValuesIndexWarmReady.Store(true)
+	if p.labelValuesIndexedCache {
+		p.warmLabelValuesIndexOnStartup()
+		p.startLabelValuesIndexPersistenceLoop()
+	}
+}
+
+// Shutdown flushes in-memory caches that should survive rolling restarts.
+func (p *Proxy) Shutdown(ctx context.Context) error {
+	p.stopLabelValuesIndexPersistenceLoop(ctx)
+	return p.persistLabelValuesIndexNow("shutdown")
 }
 
 // ReloadTenantMap hot-reloads tenant mappings (called on SIGHUP).
@@ -660,6 +757,9 @@ func (p *Proxy) ReloadTenantMap(m map[string]TenantMapping) {
 		p.compatCache.InvalidatePrefix("")
 	}
 	p.configMu.Unlock()
+	p.labelValuesIndexMu.Lock()
+	p.labelValuesIndex = make(map[string]*labelValuesIndexState)
+	p.labelValuesIndexMu.Unlock()
 }
 
 // ReloadFieldMappings hot-reloads field mappings and rebuilds the label translator.
@@ -673,6 +773,9 @@ func (p *Proxy) ReloadFieldMappings(mappings []FieldMapping) {
 		p.compatCache.InvalidatePrefix("")
 	}
 	p.configMu.Unlock()
+	p.labelValuesIndexMu.Lock()
+	p.labelValuesIndex = make(map[string]*labelValuesIndexState)
+	p.labelValuesIndexMu.Unlock()
 }
 
 // GetMetrics returns the proxy's metrics instance for external telemetry exporters.
@@ -1492,16 +1595,24 @@ func (p *Proxy) snapshotDeclaredLabelFields() []string {
 	return out
 }
 
+func (p *Proxy) vlGetMetadataCoalesced(ctx context.Context, path string, params url.Values) (int, []byte, error) {
+	key := "vlmeta:get:" + getOrgID(ctx) + ":" + path + "?" + params.Encode()
+	status, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
+		return p.vlGet(ctx, path, params)
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return status, body, nil
+}
+
 func (p *Proxy) fetchVLFieldNames(ctx context.Context, path string, params url.Values) ([]string, error) {
-	resp, err := p.vlGet(ctx, path, params)
+	status, body, err := p.vlGetMetadataCoalesced(ctx, path, params)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, &vlAPIError{status: resp.StatusCode, body: string(body)}
+	if status >= 400 {
+		return nil, &vlAPIError{status: status, body: string(body)}
 	}
 	fields, err := decodeVLFieldHits(body)
 	if err != nil {
@@ -1512,15 +1623,12 @@ func (p *Proxy) fetchVLFieldNames(ctx context.Context, path string, params url.V
 }
 
 func (p *Proxy) fetchVLFieldValues(ctx context.Context, path string, params url.Values) ([]string, error) {
-	resp, err := p.vlGet(ctx, path, params)
+	status, body, err := p.vlGetMetadataCoalesced(ctx, path, params)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, &vlAPIError{status: resp.StatusCode, body: string(body)}
+	if status >= 400 {
+		return nil, &vlAPIError{status: status, body: string(body)}
 	}
 	return decodeVLFieldHits(body)
 }
@@ -1540,6 +1648,29 @@ func (p *Proxy) fetchPreferredLabelNames(ctx context.Context, params url.Values)
 		return fallback, nil
 	}
 	return nil, err
+}
+
+func (p *Proxy) fetchPreferredLabelNamesCached(ctx context.Context, params url.Values) ([]string, error) {
+	if p == nil || p.cache == nil {
+		return p.fetchPreferredLabelNames(ctx, params)
+	}
+
+	cacheKey := "label_inventory:" + getOrgID(ctx) + ":" + params.Encode()
+	if cached, ok := p.cache.Get(cacheKey); ok {
+		var labels []string
+		if err := json.Unmarshal(cached, &labels); err == nil {
+			return labels, nil
+		}
+	}
+
+	labels, err := p.fetchPreferredLabelNames(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if encoded, err := json.Marshal(labels); err == nil {
+		p.cache.SetWithTTL(cacheKey, encoded, CacheTTLs["labels"])
+	}
+	return labels, nil
 }
 
 func (p *Proxy) fetchPreferredLabelValues(ctx context.Context, labelName string, params url.Values) ([]string, error) {
@@ -1600,6 +1731,737 @@ func (p *Proxy) fetchPreferredLabelValues(ctx context.Context, labelName string,
 	return values, nil
 }
 
+func (p *Proxy) shouldRefreshLabelsInBackground(remaining, ttl time.Duration) bool {
+	if remaining <= 0 || ttl <= 0 {
+		return false
+	}
+	threshold := (ttl * 4) / 5
+	if threshold <= 0 {
+		threshold = ttl / 2
+	}
+	return remaining <= threshold
+}
+
+func (p *Proxy) labelBackgroundTimeout() time.Duration {
+	if p.client != nil && p.client.Timeout > 0 && p.client.Timeout < 10*time.Second {
+		return p.client.Timeout
+	}
+	return 10 * time.Second
+}
+
+func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end string) {
+	refreshKey := "refresh:labels:" + cacheKey
+	go func() {
+		_, err, _ := p.labelRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), p.labelBackgroundTimeout())
+			defer cancel()
+			if orgID != "" {
+				ctx = context.WithValue(ctx, orgIDKey, orgID)
+			}
+
+			params := url.Values{}
+			if strings.TrimSpace(rawQuery) != "" {
+				translated, terr := p.translateQuery(defaultQuery(rawQuery))
+				if terr == nil {
+					params.Set("query", translated)
+				} else {
+					params.Set("query", "*")
+				}
+			} else {
+				params.Set("query", "*")
+			}
+			if strings.TrimSpace(start) != "" {
+				params.Set("start", start)
+			}
+			if strings.TrimSpace(end) != "" {
+				params.Set("end", end)
+			}
+
+			labels, fetchErr := p.fetchPreferredLabelNames(ctx, params)
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+
+			filtered := make([]string, 0, len(labels))
+			for _, v := range labels {
+				if isVLInternalField(v) {
+					continue
+				}
+				filtered = append(filtered, v)
+			}
+			labels = p.labelTranslator.TranslateLabelsList(filtered)
+			labels = appendSyntheticLabels(labels)
+			p.cache.SetWithTTL(cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
+			return nil, nil
+		})
+		if err != nil {
+			p.log.Debug("background labels refresh failed", "cache_key", cacheKey, "error", err)
+		}
+	}()
+}
+
+func (p *Proxy) refreshLabelValuesCacheAsync(orgID, cacheKey, labelName, rawQuery, start, end, limit string) {
+	refreshKey := "refresh:label_values:" + cacheKey
+	go func() {
+		_, err, _ := p.labelRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), p.labelBackgroundTimeout())
+			defer cancel()
+			if orgID != "" {
+				ctx = context.WithValue(ctx, orgIDKey, orgID)
+			}
+
+			var (
+				values   []string
+				fetchErr error
+			)
+
+			if labelName == "service_name" {
+				values, fetchErr = p.serviceNameValues(ctx, rawQuery, start, end)
+			} else {
+				params := url.Values{}
+				if strings.TrimSpace(rawQuery) != "" {
+					translated, terr := p.translateQuery(defaultQuery(rawQuery))
+					if terr == nil {
+						params.Set("query", translated)
+					} else {
+						params.Set("query", "*")
+					}
+				} else {
+					params.Set("query", "*")
+				}
+				if strings.TrimSpace(start) != "" {
+					params.Set("start", start)
+				}
+				if strings.TrimSpace(end) != "" {
+					params.Set("end", end)
+				}
+				if strings.TrimSpace(limit) != "" {
+					params.Set("limit", limit)
+				}
+				values, fetchErr = p.fetchPreferredLabelValues(ctx, labelName, params)
+			}
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+
+			p.updateLabelValuesIndex(orgID, labelName, values)
+			if p.labelValuesBrowseMode(rawQuery) {
+				if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, "", 0, p.defaultLabelValuesLimit(limit)); ok {
+					values = indexedValues
+				}
+			}
+			p.cache.SetWithTTL(cacheKey, lokiLabelsResponse(values), CacheTTLs["label_values"])
+			return nil, nil
+		})
+		if err != nil {
+			p.log.Debug("background label values refresh failed", "cache_key", cacheKey, "label", labelName, "error", err)
+		}
+	}()
+}
+
+func (p *Proxy) buildLabelValuesIndexSnapshot(now time.Time) labelValuesIndexSnapshot {
+	p.labelValuesIndexMu.RLock()
+	defer p.labelValuesIndexMu.RUnlock()
+
+	states := make(map[string]map[string]labelValueIndexEntry, len(p.labelValuesIndex))
+	for key, state := range p.labelValuesIndex {
+		if state == nil || len(state.entries) == 0 {
+			continue
+		}
+		entries := make(map[string]labelValueIndexEntry, len(state.entries))
+		for value, entry := range state.entries {
+			entries[value] = entry
+		}
+		states[key] = entries
+	}
+
+	return labelValuesIndexSnapshot{
+		Version:         1,
+		SavedAtUnixNano: now.UnixNano(),
+		StatesByKey:     states,
+	}
+}
+
+func (p *Proxy) applyLabelValuesIndexSnapshot(snapshot labelValuesIndexSnapshot) (states int, values int) {
+	restored := make(map[string]*labelValuesIndexState, len(snapshot.StatesByKey))
+	for key, entries := range snapshot.StatesByKey {
+		if len(entries) == 0 {
+			continue
+		}
+		copied := make(map[string]labelValueIndexEntry, len(entries))
+		for value, entry := range entries {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			copied[value] = entry
+			values++
+		}
+		if len(copied) == 0 {
+			continue
+		}
+		restored[key] = &labelValuesIndexState{
+			entries: copied,
+			dirty:   true,
+		}
+		states++
+	}
+
+	p.labelValuesIndexMu.Lock()
+	p.labelValuesIndex = restored
+	p.labelValuesIndexMu.Unlock()
+	return states, values
+}
+
+func (p *Proxy) persistLabelValuesIndexNow(reason string) error {
+	if !p.labelValuesIndexedCache || strings.TrimSpace(p.labelValuesIndexPersistPath) == "" {
+		return nil
+	}
+
+	snapshot := p.buildLabelValuesIndexSnapshot(time.Now().UTC())
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal label index snapshot: %w", err)
+	}
+
+	path := p.labelValuesIndexPersistPath
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create label index snapshot directory: %w", err)
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write label index snapshot temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename label index snapshot temp file: %w", err)
+	}
+
+	if p.cache != nil {
+		ttl := p.labelValuesIndexStartupStale * 3
+		minTTL := p.labelValuesIndexPersistInterval * 2
+		if ttl < minTTL {
+			ttl = minTTL
+		}
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		p.cache.SetWithTTL(labelValuesIndexSnapshotCacheKey, data, ttl)
+	}
+
+	states, values := p.labelValuesIndexCardinality()
+	if reason == "periodic" {
+		p.log.Debug("label values index snapshot persisted", "path", path, "states", states, "values", values, "bytes", len(data))
+	} else {
+		p.log.Info("label values index snapshot persisted", "reason", reason, "path", path, "states", states, "values", values, "bytes", len(data))
+	}
+	return nil
+}
+
+func (p *Proxy) restoreLabelValuesIndexFromDisk() (bool, int64, error) {
+	if !p.labelValuesIndexedCache || strings.TrimSpace(p.labelValuesIndexPersistPath) == "" {
+		return false, 0, nil
+	}
+
+	data, err := os.ReadFile(p.labelValuesIndexPersistPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, 0, nil
+		}
+		return false, 0, fmt.Errorf("read label index snapshot: %w", err)
+	}
+
+	var snapshot labelValuesIndexSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return false, 0, fmt.Errorf("decode label index snapshot: %w", err)
+	}
+	if snapshot.Version != 1 {
+		return false, 0, fmt.Errorf("unsupported label index snapshot version: %d", snapshot.Version)
+	}
+	if snapshot.SavedAtUnixNano <= 0 {
+		return false, 0, fmt.Errorf("invalid label index snapshot timestamp: %d", snapshot.SavedAtUnixNano)
+	}
+
+	states, values := p.applyLabelValuesIndexSnapshot(snapshot)
+	if p.cache != nil {
+		ttl := p.labelValuesIndexStartupStale * 3
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		p.cache.SetWithTTL(labelValuesIndexSnapshotCacheKey, data, ttl)
+	}
+	p.log.Info(
+		"label values index restored from disk",
+		"path", p.labelValuesIndexPersistPath,
+		"saved_at", time.Unix(0, snapshot.SavedAtUnixNano).UTC().Format(time.RFC3339Nano),
+		"states", states,
+		"values", values,
+	)
+	return true, snapshot.SavedAtUnixNano, nil
+}
+
+func (p *Proxy) restoreLabelValuesIndexFromPeers(minSavedAt int64) (bool, int64, error) {
+	if !p.labelValuesIndexedCache || p.cache == nil || p.peerCache == nil {
+		return false, 0, nil
+	}
+	data, ok := p.cache.Get(labelValuesIndexSnapshotCacheKey)
+	if !ok {
+		return false, 0, nil
+	}
+
+	var snapshot labelValuesIndexSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return false, 0, fmt.Errorf("decode peer label index snapshot: %w", err)
+	}
+	if snapshot.Version != 1 || snapshot.SavedAtUnixNano <= 0 {
+		return false, 0, fmt.Errorf("invalid peer label index snapshot metadata")
+	}
+	if snapshot.SavedAtUnixNano <= minSavedAt {
+		return false, snapshot.SavedAtUnixNano, nil
+	}
+
+	states, values := p.applyLabelValuesIndexSnapshot(snapshot)
+	p.log.Info(
+		"label values index warmed from peers",
+		"saved_at", time.Unix(0, snapshot.SavedAtUnixNano).UTC().Format(time.RFC3339Nano),
+		"states", states,
+		"values", values,
+	)
+	return true, snapshot.SavedAtUnixNano, nil
+}
+
+func (p *Proxy) warmLabelValuesIndexOnStartup() {
+	p.labelValuesIndexWarmReady.Store(false)
+	defer p.labelValuesIndexWarmReady.Store(true)
+
+	var diskSavedAt int64
+	loadedFromDisk, savedAt, err := p.restoreLabelValuesIndexFromDisk()
+	if err != nil {
+		p.log.Warn("label values index disk restore failed", "error", err)
+	}
+	if loadedFromDisk {
+		diskSavedAt = savedAt
+	}
+
+	diskFresh := loadedFromDisk && time.Since(time.Unix(0, diskSavedAt)) <= p.labelValuesIndexStartupStale
+	if !diskFresh {
+		if p.cache != nil {
+			p.cache.Invalidate(labelValuesIndexSnapshotCacheKey)
+		}
+		type peerWarmResult struct {
+			ok      bool
+			savedAt int64
+			err     error
+		}
+		timeout := p.labelValuesIndexPeerWarmTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		resCh := make(chan peerWarmResult, 1)
+		go func() {
+			ok, savedAt, peerErr := p.restoreLabelValuesIndexFromPeers(diskSavedAt)
+			resCh <- peerWarmResult{ok: ok, savedAt: savedAt, err: peerErr}
+		}()
+
+		var res peerWarmResult
+		select {
+		case res = <-resCh:
+		case <-time.After(timeout):
+			p.log.Warn("label values index peer warm timed out", "timeout", timeout.String())
+			res = peerWarmResult{ok: false}
+		}
+		if res.err != nil {
+			p.log.Warn("label values index peer warm failed", "error", res.err)
+		} else if res.ok {
+			diskSavedAt = res.savedAt
+			if persistErr := p.persistLabelValuesIndexNow("startup_peer_warm"); persistErr != nil {
+				p.log.Warn("label values index persistence after peer warm failed", "error", persistErr)
+			}
+		}
+	}
+}
+
+func (p *Proxy) startLabelValuesIndexPersistenceLoop() {
+	if !p.labelValuesIndexedCache || strings.TrimSpace(p.labelValuesIndexPersistPath) == "" || p.labelValuesIndexPersistInterval <= 0 {
+		return
+	}
+	if p.labelValuesIndexPersistStarted.Swap(true) {
+		return
+	}
+	go func() {
+		defer close(p.labelValuesIndexPersistDone)
+		ticker := time.NewTicker(p.labelValuesIndexPersistInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := p.persistLabelValuesIndexNow("periodic"); err != nil {
+					p.log.Warn("periodic label values index persistence failed", "error", err)
+				}
+			case <-p.labelValuesIndexPersistStop:
+				return
+			}
+		}
+	}()
+}
+
+func (p *Proxy) stopLabelValuesIndexPersistenceLoop(ctx context.Context) {
+	if !p.labelValuesIndexPersistStarted.Load() {
+		return
+	}
+	select {
+	case <-p.labelValuesIndexPersistStop:
+	default:
+		close(p.labelValuesIndexPersistStop)
+	}
+
+	if ctx == nil {
+		<-p.labelValuesIndexPersistDone
+		return
+	}
+	select {
+	case <-p.labelValuesIndexPersistDone:
+	case <-ctx.Done():
+		p.log.Warn("timeout waiting for label values persistence loop stop", "error", ctx.Err())
+	}
+}
+
+func (p *Proxy) labelValuesIndexCardinality() (states int, values int) {
+	p.labelValuesIndexMu.RLock()
+	defer p.labelValuesIndexMu.RUnlock()
+	for _, state := range p.labelValuesIndex {
+		if state == nil || len(state.entries) == 0 {
+			continue
+		}
+		states++
+		values += len(state.entries)
+	}
+	return states, values
+}
+
+func (p *Proxy) labelValuesBrowseMode(rawQuery string) bool {
+	trimmed := strings.TrimSpace(rawQuery)
+	return trimmed == "" || trimmed == "*"
+}
+
+func (p *Proxy) defaultLabelValuesLimit(limitRaw string) int {
+	if strings.TrimSpace(limitRaw) != "" {
+		limit := parsePositiveInt(limitRaw, p.labelValuesHotLimit)
+		if limit > maxLimitValue {
+			limit = maxLimitValue
+		}
+		return limit
+	}
+	limit := p.labelValuesHotLimit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > maxLimitValue {
+		limit = maxLimitValue
+	}
+	return limit
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func parseNonNegativeInt(raw string, fallback int) int {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
+}
+
+func normalizeLabelValueSearch(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func labelValuesIndexKey(orgID, labelName string) string {
+	return orgID + "|" + strings.ToLower(strings.TrimSpace(labelName))
+}
+
+func labelValueIndexLess(aName string, a labelValueIndexEntry, bName string, b labelValueIndexEntry) bool {
+	if a.SeenCount != b.SeenCount {
+		return a.SeenCount > b.SeenCount
+	}
+	if a.LastSeen != b.LastSeen {
+		return a.LastSeen > b.LastSeen
+	}
+	return aName < bName
+}
+
+func (p *Proxy) labelValueIndexEnsureOrderedLocked(index *labelValuesIndexState) {
+	if index == nil {
+		return
+	}
+	if !index.dirty && len(index.ordered) > 0 {
+		return
+	}
+	ordered := make([]string, 0, len(index.entries))
+	for value := range index.entries {
+		ordered = append(ordered, value)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left := index.entries[ordered[i]]
+		right := index.entries[ordered[j]]
+		return labelValueIndexLess(ordered[i], left, ordered[j], right)
+	})
+	index.ordered = ordered
+	index.dirty = false
+}
+
+func (p *Proxy) updateLabelValuesIndex(orgID, labelName string, values []string) {
+	if !p.labelValuesIndexedCache || len(values) == 0 {
+		return
+	}
+	key := labelValuesIndexKey(orgID, labelName)
+	now := time.Now().UnixNano()
+
+	p.labelValuesIndexMu.Lock()
+	defer p.labelValuesIndexMu.Unlock()
+
+	index, ok := p.labelValuesIndex[key]
+	if !ok {
+		index = &labelValuesIndexState{entries: make(map[string]labelValueIndexEntry, len(values))}
+		p.labelValuesIndex[key] = index
+	}
+
+	for _, value := range values {
+		entry := index.entries[value]
+		if entry.SeenCount < ^uint32(0) {
+			entry.SeenCount++
+		}
+		entry.LastSeen = now
+		index.entries[value] = entry
+	}
+	index.dirty = true
+
+	maxEntries := p.labelValuesIndexMaxEntries
+	if maxEntries <= 0 || len(index.entries) <= maxEntries {
+		return
+	}
+	p.labelValueIndexEnsureOrderedLocked(index)
+	if len(index.ordered) <= maxEntries {
+		return
+	}
+	keep := index.ordered[:maxEntries]
+	pruned := make(map[string]labelValueIndexEntry, len(keep))
+	for _, value := range keep {
+		pruned[value] = index.entries[value]
+	}
+	index.entries = pruned
+	index.ordered = append([]string(nil), keep...)
+	index.dirty = false
+}
+
+func (p *Proxy) selectLabelValuesFromIndex(orgID, labelName, search string, offset, limit int) ([]string, bool) {
+	if !p.labelValuesIndexedCache {
+		return nil, false
+	}
+	if limit <= 0 {
+		limit = p.labelValuesHotLimit
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > maxLimitValue {
+		limit = maxLimitValue
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	key := labelValuesIndexKey(orgID, labelName)
+	search = normalizeLabelValueSearch(search)
+
+	p.labelValuesIndexMu.Lock()
+	defer p.labelValuesIndexMu.Unlock()
+
+	index, ok := p.labelValuesIndex[key]
+	if !ok || len(index.entries) == 0 {
+		return nil, false
+	}
+	p.labelValueIndexEnsureOrderedLocked(index)
+	if len(index.ordered) == 0 {
+		return nil, false
+	}
+
+	// Keep preallocation fixed-size so allocation cannot scale with request input.
+	values := make([]string, 0, maxUserDrivenSlicePrealloc)
+	seen := 0
+	for _, candidate := range index.ordered {
+		if search != "" && !strings.Contains(strings.ToLower(candidate), search) {
+			continue
+		}
+		if seen < offset {
+			seen++
+			continue
+		}
+		values = append(values, candidate)
+		if len(values) >= limit {
+			break
+		}
+	}
+	return values, true
+}
+
+func selectLabelValuesWindow(values []string, search string, offset, limit int) []string {
+	if limit <= 0 {
+		limit = maxLimitValue
+	}
+	if limit > maxLimitValue {
+		limit = maxLimitValue
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	search = normalizeLabelValueSearch(search)
+	// Keep preallocation fixed-size so allocation cannot scale with request input.
+	out := make([]string, 0, maxUserDrivenSlicePrealloc)
+	seen := 0
+	for _, value := range values {
+		if search != "" && !strings.Contains(strings.ToLower(value), search) {
+			continue
+		}
+		if seen < offset {
+			seen++
+			continue
+		}
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (p *Proxy) setJSONCacheWithTTL(cacheKey string, ttl time.Duration, value interface{}) {
+	if p == nil || p.cache == nil {
+		return
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	p.cache.SetWithTTL(cacheKey, encoded, ttl)
+}
+
+func (p *Proxy) refreshDetectedFieldsCacheAsync(orgID, cacheKey, query, start, end string, lineLimit int) {
+	refreshKey := "refresh:detected_fields:" + cacheKey
+	go func() {
+		_, err, _ := p.labelRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), p.labelBackgroundTimeout())
+			defer cancel()
+			if orgID != "" {
+				ctx = context.WithValue(ctx, orgIDKey, orgID)
+			}
+			fields, _, detectErr := p.detectFields(ctx, query, start, end, lineLimit)
+			if detectErr != nil {
+				return nil, detectErr
+			}
+			payload := map[string]interface{}{
+				"status": "success",
+				"data":   fields,
+				"fields": fields,
+				"limit":  lineLimit,
+			}
+			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
+			return nil, nil
+		})
+		if err != nil {
+			p.log.Debug("background detected_fields refresh failed", "cache_key", cacheKey, "error", err)
+		}
+	}()
+}
+
+func (p *Proxy) refreshDetectedLabelsCacheAsync(orgID, cacheKey, query, start, end string, lineLimit int) {
+	refreshKey := "refresh:detected_labels:" + cacheKey
+	go func() {
+		_, err, _ := p.labelRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), p.labelBackgroundTimeout())
+			defer cancel()
+			if orgID != "" {
+				ctx = context.WithValue(ctx, orgIDKey, orgID)
+			}
+			labels, _, detectErr := p.detectLabels(ctx, query, start, end, lineLimit)
+			if detectErr != nil {
+				return nil, detectErr
+			}
+			payload := map[string]interface{}{
+				"status":         "success",
+				"data":           labels,
+				"detectedLabels": labels,
+				"limit":          lineLimit,
+			}
+			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
+			return nil, nil
+		})
+		if err != nil {
+			p.log.Debug("background detected_labels refresh failed", "cache_key", cacheKey, "error", err)
+		}
+	}()
+}
+
+func (p *Proxy) refreshDetectedFieldValuesCacheAsync(orgID, cacheKey, fieldName, query, start, end string, lineLimit int) {
+	refreshKey := "refresh:detected_field_values:" + cacheKey
+	go func() {
+		_, err, _ := p.labelRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), p.labelBackgroundTimeout())
+			defer cancel()
+			if orgID != "" {
+				ctx = context.WithValue(ctx, orgIDKey, orgID)
+			}
+
+			var (
+				values  []string
+				errVals error
+			)
+			if nativeField, ok, resolveErr := p.resolveNativeDetectedField(ctx, query, start, end, fieldName); resolveErr == nil && ok {
+				values, errVals = p.fetchNativeFieldValues(ctx, query, start, end, nativeField, lineLimit)
+			}
+			if values == nil && errVals == nil {
+				_, fieldValues, detectErr := p.detectFields(ctx, query, start, end, lineLimit)
+				if detectErr != nil {
+					return nil, detectErr
+				}
+				values = fieldValues[fieldName]
+				if values == nil && fieldName == "level" {
+					values = fieldValues["detected_level"]
+				}
+			}
+			if errVals != nil {
+				return nil, errVals
+			}
+
+			payload := map[string]interface{}{
+				"status": "success",
+				"data":   values,
+				"values": values,
+				"limit":  lineLimit,
+			}
+			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+			return nil, nil
+		})
+		if err != nil {
+			p.log.Debug("background detected_field_values refresh failed", "cache_key", cacheKey, "field", fieldName, "error", err)
+		}
+	}()
+}
+
 // handleLabels returns label names.
 // Loki: GET /loki/api/v1/labels?start=...&end=...
 // VL:   GET /select/logsql/stream_field_names?query=*&start=...&end=...
@@ -1613,11 +2475,14 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	orgID := r.Header.Get("X-Scope-OrgID")
 	cacheKey := "labels:" + orgID + ":" + r.URL.RawQuery
 
-	if cached, ok := p.cache.Get(cacheKey); ok {
+	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("labels", http.StatusOK, time.Since(start))
 		p.metrics.RecordCacheHit()
+		if p.shouldRefreshLabelsInBackground(remaining, CacheTTLs["labels"]) {
+			p.refreshLabelsCacheAsync(orgID, cacheKey, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"))
+		}
 		return
 	}
 	p.metrics.RecordCacheMiss()
@@ -1698,6 +2563,50 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := r.Header.Get("X-Scope-OrgID")
 	cacheKey := "label_values:" + orgID + ":" + labelName + ":" + r.URL.RawQuery
+	rawQuery := r.FormValue("query")
+	rawLimit := r.FormValue("limit")
+	rawOffset := r.FormValue("offset")
+	search := r.FormValue("search")
+	if strings.TrimSpace(search) == "" {
+		search = r.FormValue("q")
+	}
+	offset := parseNonNegativeInt(rawOffset, 0)
+	limit := p.defaultLabelValuesLimit(rawLimit)
+	if rawLimit == "" && !p.labelValuesBrowseMode(rawQuery) {
+		limit = maxLimitValue
+	}
+
+	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		if p.shouldRefreshLabelsInBackground(remaining, CacheTTLs["label_values"]) {
+			p.refreshLabelValuesCacheAsync(
+				orgID,
+				cacheKey,
+				labelName,
+				r.FormValue("query"),
+				r.FormValue("start"),
+				r.FormValue("end"),
+				r.FormValue("limit"),
+			)
+		}
+		return
+	}
+	p.metrics.RecordCacheMiss()
+
+	if p.labelValuesBrowseMode(rawQuery) {
+		if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, search, offset, limit); ok {
+			result := lokiLabelsResponse(indexedValues)
+			p.cache.SetWithTTL(cacheKey, result, CacheTTLs["label_values"])
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(result)
+			p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
+			return
+		}
+	}
+
 	if labelName == "service_name" {
 		values, err := p.serviceNameValues(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"))
 		if err != nil {
@@ -1706,6 +2615,14 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 			p.metrics.RecordRequest("label_values", status, time.Since(start))
 			return
 		}
+		p.updateLabelValuesIndex(orgID, labelName, values)
+		if p.labelValuesBrowseMode(rawQuery) {
+			if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, search, offset, limit); ok {
+				values = indexedValues
+			} else {
+				values = selectLabelValuesWindow(values, search, offset, limit)
+			}
+		}
 		result := lokiLabelsResponse(values)
 		p.cache.SetWithTTL(cacheKey, result, CacheTTLs["label_values"])
 		w.Header().Set("Content-Type", "application/json")
@@ -1713,15 +2630,6 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
 		return
 	}
-
-	if cached, ok := p.cache.Get(cacheKey); ok {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(cached)
-		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
-		p.metrics.RecordCacheHit()
-		return
-	}
-	p.metrics.RecordCacheMiss()
 
 	params := url.Values{}
 	if q := r.FormValue("query"); q != "" {
@@ -1750,6 +2658,17 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		p.writeError(w, status, err.Error())
 		p.metrics.RecordRequest("label_values", status, time.Since(start))
 		return
+	}
+
+	p.updateLabelValuesIndex(orgID, labelName, values)
+	if p.labelValuesBrowseMode(rawQuery) {
+		if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, search, offset, limit); ok {
+			values = indexedValues
+		} else {
+			values = selectLabelValuesWindow(values, search, offset, limit)
+		}
+	} else if search != "" || offset > 0 || rawLimit != "" {
+		values = selectLabelValuesWindow(values, search, offset, limit)
 	}
 
 	result := lokiLabelsResponse(values)
@@ -1917,7 +2836,7 @@ func (p *Proxy) resolveTargetLabelFields(ctx context.Context, targetLabels strin
 				lookup.Set(key, value)
 			}
 		}
-		available, fetchErr = p.fetchPreferredLabelNames(ctx, lookup)
+		available, fetchErr = p.fetchPreferredLabelNamesCached(ctx, lookup)
 		if fetchErr != nil {
 			p.log.Debug("target label inventory lookup failed; falling back to direct mapping", "error", fetchErr)
 		}
@@ -2085,25 +3004,43 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	if p.handleMultiTenantFanout(w, r, "detected_fields", p.handleDetectedFields) {
 		return
 	}
+	orgID := r.Header.Get("X-Scope-OrgID")
+	cacheKey := "detected_fields:" + orgID + ":" + r.URL.RawQuery
+	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		if p.shouldRefreshLabelsInBackground(remaining, CacheTTLs["detected_fields"]) {
+			p.refreshDetectedFieldsCacheAsync(orgID, cacheKey, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), parseDetectedLineLimit(r))
+		}
+		return
+	}
+	p.metrics.RecordCacheMiss()
+
 	r = withOrgID(r)
 	lineLimit := parseDetectedLineLimit(r)
 	fields, _, err := p.detectFields(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
 	if err != nil {
-		p.writeJSON(w, map[string]interface{}{
+		payload := map[string]interface{}{
 			"status": "success",
 			"data":   []interface{}{},
 			"fields": []interface{}{},
 			"limit":  lineLimit,
-		})
+		}
+		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
+		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
 		return
 	}
-	p.writeJSON(w, map[string]interface{}{
+	payload := map[string]interface{}{
 		"status": "success",
 		"data":   fields,
 		"fields": fields,
 		"limit":  lineLimit,
-	})
+	}
+	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
+	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
 }
 
@@ -2115,6 +3052,7 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	if p.handleMultiTenantFanout(w, r, "detected_field_values", p.handleDetectedFieldValues) {
 		return
 	}
+	orgID := r.Header.Get("X-Scope-OrgID")
 	r = withOrgID(r)
 	// Extract field name from URL: /loki/api/v1/detected_field/{name}/values
 	path := r.URL.Path
@@ -2132,14 +3070,29 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	}
 
 	lineLimit := parseDetectedLineLimit(r)
+	cacheKey := "detected_field_values:" + orgID + ":" + fieldName + ":" + r.URL.RawQuery
+	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		if p.shouldRefreshLabelsInBackground(remaining, CacheTTLs["detected_field_values"]) {
+			p.refreshDetectedFieldValuesCacheAsync(orgID, cacheKey, fieldName, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
+		}
+		return
+	}
+	p.metrics.RecordCacheMiss()
+
 	if nativeField, ok, err := p.resolveNativeDetectedField(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), fieldName); err == nil && ok {
 		if values, valuesErr := p.fetchNativeFieldValues(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), nativeField, lineLimit); valuesErr == nil {
-			p.writeJSON(w, map[string]interface{}{
+			payload := map[string]interface{}{
 				"status": "success",
 				"data":   values,
 				"values": values,
 				"limit":  lineLimit,
-			})
+			}
+			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+			p.writeJSON(w, payload)
 			p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 			return
 		}
@@ -2147,12 +3100,14 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 
 	_, fieldValues, err := p.detectFields(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
 	if err != nil {
-		p.writeJSON(w, map[string]interface{}{
+		payload := map[string]interface{}{
 			"status": "success",
 			"data":   []string{},
 			"values": []string{},
 			"limit":  lineLimit,
-		})
+		}
+		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 		return
 	}
@@ -2161,12 +3116,14 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 		values = fieldValues["detected_level"]
 	}
 
-	p.writeJSON(w, map[string]interface{}{
+	payload := map[string]interface{}{
 		"status": "success",
 		"data":   values,
 		"values": values,
 		"limit":  lineLimit,
-	})
+	}
+	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 }
 
@@ -2311,26 +3268,44 @@ func (p *Proxy) handleDetectedLabels(w http.ResponseWriter, r *http.Request) {
 	if p.handleMultiTenantFanout(w, r, "detected_labels", p.handleDetectedLabels) {
 		return
 	}
+	orgID := r.Header.Get("X-Scope-OrgID")
+	cacheKey := "detected_labels:" + orgID + ":" + r.URL.RawQuery
+	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		if p.shouldRefreshLabelsInBackground(remaining, CacheTTLs["detected_labels"]) {
+			p.refreshDetectedLabelsCacheAsync(orgID, cacheKey, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), parseDetectedLineLimit(r))
+		}
+		return
+	}
+	p.metrics.RecordCacheMiss()
+
 	r = withOrgID(r)
 	lineLimit := parseDetectedLineLimit(r)
 	detectedLabels, _, err := p.detectLabels(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
 	if err != nil {
-		p.writeJSON(w, map[string]interface{}{
+		payload := map[string]interface{}{
 			"status":         "success",
 			"data":           []interface{}{},
 			"detectedLabels": []interface{}{},
 			"limit":          lineLimit,
-		})
+		}
+		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
+		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
 		return
 	}
 
-	p.writeJSON(w, map[string]interface{}{
+	payload := map[string]interface{}{
 		"status":         "success",
 		"data":           detectedLabels,
 		"detectedLabels": detectedLabels,
 		"limit":          lineLimit,
-	})
+	}
+	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
+	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
 }
 
@@ -2861,6 +3836,12 @@ func (p *Proxy) vlLineToTailFrame(vlLine map[string]interface{}) map[string]inte
 
 // handleReady returns readiness status.
 func (p *Proxy) handleReady(w http.ResponseWriter, r *http.Request) {
+	if p.labelValuesIndexedCache && !p.labelValuesIndexWarmReady.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("label values index warming"))
+		return
+	}
+
 	// Probe VL backend health
 	readyReq := withOrgID(r)
 	resp, err := p.vlGet(readyReq.Context(), "/health", nil)

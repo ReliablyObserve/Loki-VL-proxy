@@ -117,6 +117,12 @@ func TestPinnedCompatibilityMatrixMatchesCompose(t *testing.T) {
 	// - native + underscores + emit=true
 	// - translated + underscores + emit=false
 	profileExpectations := []string{
+		"loki-vl-proxy:",
+		`- "-label-values-indexed-cache=true"`,
+		`- "-label-values-hot-limit=200"`,
+		`- "-label-values-index-max-entries=50000"`,
+		`- "-label-values-index-persist-path=/cache/label-values-index.json"`,
+		`- "-label-values-index-persist-interval=5s"`,
 		"loki-vl-proxy-underscore:",
 		`- "-metadata-field-mode=hybrid"`,
 		`- "-emit-structured-metadata=true"`,

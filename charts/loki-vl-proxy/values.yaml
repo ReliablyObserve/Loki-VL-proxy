@@ -130,6 +130,15 @@ extraArgs:
   # stream-response: "true"  # chunked transfer encoding for large results
   # Stream selector optimization — list VL _stream_fields labels for fast index path
   # stream-fields: "app,env,namespace"
+  # Indexed label-values browse cache (high-cardinality UX hardening)
+  # label-values-indexed-cache: "true"
+  # label-values-hot-limit: "200"
+  # label-values-index-max-entries: "200000"
+  # label-values-index-persist-path: "/cache/label-values-index.json"
+  # label-values-index-persist-interval: "30s"
+  # label-values-index-startup-stale-threshold: "60s"
+  # label-values-index-startup-peer-warm-timeout: "5s"
+  # Sizing hint: plan roughly ~96 bytes RAM/value and ~60% of RAM footprint on disk snapshot.
 
 # Go runtime tuning:
 # The chart exports GOMEMLIMIT into the container env.
