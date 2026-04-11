@@ -30,6 +30,11 @@ For Grafana Logs Drilldown and Explore compatibility:
 - `structuredMetadata` and `parsed` are Loki metadata objects (`{"name":"value", ...}`), matching Loki query/tail response shape.
 - Stream labels stay Loki-compatible on the `stream` object.
 - Label APIs prefer VictoriaLogs stream metadata so parsed fields do not leak into Loki label pickers when the backend supports the stream-only endpoints.
+- `-extra-label-fields` extends label-facing APIs (`/labels`, `/label/{name}/values`) with explicit VL fields and improves custom dot/underscore alias resolution.
+- Optional indexed browse mode for label values (`-label-values-indexed-cache=true`) supports hotset-first responses and optional `offset`/`search` (`search` or `q`) on `GET /loki/api/v1/label/{name}/values`.
+- Indexed label-values cache snapshots can be persisted to disk (`-label-values-index-persist-path`) and restored at startup.
+- On stale/missing disk snapshot, startup can warm from peer cache before serving (`-label-values-index-startup-stale-threshold`, `-label-values-index-startup-peer-warm-timeout`).
+- Peer cache payload fetches (`/_cache/get`) support gzip response compression for lower network latency/cost on large cache objects.
 - Parsed fields and structured metadata are surfaced through `detected_fields` and `detected_field/{name}/values`.
 - With `-metadata-field-mode=hybrid` (the default), field-oriented APIs expose both native VictoriaLogs dotted names and translated Loki aliases when they differ, for example `service.name` and `service_name`.
 - Synthetic compatibility labels such as `service_name` and `detected_level` stay available on the stream and label APIs.

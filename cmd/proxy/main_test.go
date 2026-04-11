@@ -830,6 +830,13 @@ func TestBuildProxyConfig(t *testing.T) {
 		fieldMappingJSON:                `[{"vl_field":"service.name","loki_label":"service_name"}]`,
 		streamFieldsCSV:                 "app,namespace",
 		extraLabelFieldsCSV:             "host.id,custom.pipeline.processing",
+		labelValuesIndexedCache:         true,
+		labelValuesHotLimit:             250,
+		labelValuesIndexMaxEntries:      12345,
+		labelValuesIndexPersistPath:     "/cache/label-index.json",
+		labelValuesIndexPersistInterval: 45 * time.Second,
+		labelValuesIndexStartupStale:    2 * time.Minute,
+		labelValuesIndexPeerWarmTimeout: 7 * time.Second,
 		peerSelf:                        "10.0.0.1:3100",
 		peerDiscovery:                   "static",
 		peerStatic:                      "10.0.0.2:3100,10.0.0.3:3100",
@@ -900,6 +907,26 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if len(got.ExtraLabelFields) != 2 || got.ExtraLabelFields[0] != "host.id" || got.ExtraLabelFields[1] != "custom.pipeline.processing" {
 		t.Fatalf("unexpected extra label fields: %+v", got.ExtraLabelFields)
+	}
+	if !got.LabelValuesIndexedCache || got.LabelValuesHotLimit != 250 || got.LabelValuesIndexMaxEntries != 12345 {
+		t.Fatalf(
+			"unexpected indexed label-values config: enabled=%v hot_limit=%d max_entries=%d",
+			got.LabelValuesIndexedCache,
+			got.LabelValuesHotLimit,
+			got.LabelValuesIndexMaxEntries,
+		)
+	}
+	if got.LabelValuesIndexPersistPath != "/cache/label-index.json" ||
+		got.LabelValuesIndexPersistInterval != 45*time.Second ||
+		got.LabelValuesIndexStartupStale != 2*time.Minute ||
+		got.LabelValuesIndexPeerWarmTimeout != 7*time.Second {
+		t.Fatalf(
+			"unexpected label-values index persistence config: path=%q interval=%s stale=%s peer_timeout=%s",
+			got.LabelValuesIndexPersistPath,
+			got.LabelValuesIndexPersistInterval,
+			got.LabelValuesIndexStartupStale,
+			got.LabelValuesIndexPeerWarmTimeout,
+		)
 	}
 	if got.TailMode != proxy.TailModeSynthetic {
 		t.Fatalf("unexpected tail mode: %v", got.TailMode)

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -279,6 +280,21 @@ func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCach
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Cache-TTL-Ms", fmt.Sprintf("%d", remaining.Milliseconds()))
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && len(value) >= 256 {
+		w.Header().Set("Content-Encoding", "gzip")
+		zw, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		if err != nil {
+			http.Error(w, "compression init error", http.StatusInternalServerError)
+			return
+		}
+		if _, err := zw.Write(value); err != nil {
+			_ = zw.Close()
+			http.Error(w, "compression write error", http.StatusInternalServerError)
+			return
+		}
+		_ = zw.Close()
+		return
+	}
 	w.Write(value)
 }
 

@@ -81,7 +81,11 @@ helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-v
   --set extraArgs.backend=http://victorialogs:9428 \
   --set extraArgs.label-values-indexed-cache=true \
   --set extraArgs.label-values-hot-limit=200 \
-  --set extraArgs.label-values-index-max-entries=200000
+  --set extraArgs.label-values-index-max-entries=200000 \
+  --set extraArgs.label-values-index-persist-path=/cache/label-values-index.json \
+  --set extraArgs.label-values-index-persist-interval=30s \
+  --set extraArgs.label-values-index-startup-stale-threshold=60s \
+  --set extraArgs.label-values-index-startup-peer-warm-timeout=5s
 ```
 
 ### Image Selection

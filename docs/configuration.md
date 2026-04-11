@@ -27,7 +27,8 @@ See [Translation Modes Guide](translation-modes.md) for mode-selection profiles 
 | `-metadata-field-mode` | `METADATA_FIELD_MODE` | `hybrid` | `native`, `translated`, or `hybrid` for `detected_fields` and structured metadata exposure |
 | `-emit-structured-metadata` | — | `true` | Enable Loki `categorize-labels` response encoding: requests with `X-Loki-Response-Encoding-Flags: categorize-labels` emit 3-tuples `[timestamp, line, metadata]`, while default/no-flag requests stay canonical 2-tuples |
 | `-field-mapping` | `FIELD_MAPPING` | — | JSON custom field mappings |
-| `-extra-label-fields` | `EXTRA_LABEL_FIELDS` | — | Comma-separated additional VL fields exposed on `/labels` and used for underscore↔dot alias resolution (for example `host.id,k8s.cluster.name`) |
+| `-stream-fields` | — | — | Comma-separated `_stream_fields` labels used for stream selector optimization and label-surface hints |
+| `-extra-label-fields` | `EXTRA_LABEL_FIELDS` | — | Comma-separated additional VL fields to expose on label-facing APIs and alias resolution paths (for example `host.id,k8s.cluster.name`) |
 
 ### Label Style Modes
 
@@ -41,6 +42,95 @@ See [Translation Modes Guide](translation-modes.md) for mode-selection profiles 
 ```bash
 ./loki-vl-proxy -label-style=underscores \
   -field-mapping='[{"vl_field":"my_trace_id","loki_label":"traceID"}]'
+```
+
+### Extra Label Fields (`-extra-label-fields`)
+
+Use this when you need explicit label exposure and alias resolution for fields that are not always discoverable from `stream_field_names`.
+
+What it affects:
+
+- `GET /loki/api/v1/labels`: appends configured fields to the label set.
+- `GET /loki/api/v1/label/{name}/values`: resolves underscore↔dot aliases for custom fields.
+- `GET /loki/api/v1/index/volume` and `GET /loki/api/v1/index/volume_range`: resolves `targetLabels` aliases (for example `host_id` -> `host.id`) before backend grouping.
+
+How values are handled:
+
+- Accepts a comma-separated list.
+- Entries are normalized to canonical VL field names by translator rules.
+- Duplicates are removed.
+- It extends exposure and aliasing only; it does not create or index fields in VictoriaLogs.
+
+Caching and limits:
+
+- It reuses existing label-path caches (`/labels` and `/label/{name}/values`), so repeated lookups do not repeatedly rescan backend metadata.
+- There is no dedicated hard cap on how many entries you can set in `-extra-label-fields`; behavior is intentionally open to match VictoriaLogs field discovery.
+- Existing proxy safeguards still apply (endpoint TTLs, backend timeouts, and standard response-size protections).
+- Practical guidance: keep this list focused on fields you want Loki users to filter on frequently; very large lists can add UI noise in Grafana.
+
+Examples:
+
+```bash
+# Conservative Loki-facing UX + explicit custom fields
+./loki-vl-proxy \
+  -label-style=underscores \
+  -metadata-field-mode=translated \
+  -emit-structured-metadata=true \
+  -extra-label-fields='host.id,k8s.cluster.name,custom.pipeline.processing'
+```
+
+```bash
+# Equivalent via env
+export EXTRA_LABEL_FIELDS='host.id,k8s.cluster.name,custom.pipeline.processing'
+./loki-vl-proxy -label-style=underscores -metadata-field-mode=translated
+```
+
+When to also use `-field-mapping`:
+
+- Use `-extra-label-fields` to extend discovery and alias resolution.
+- Use `-field-mapping` when you need a non-default alias name (for example `custom.pipeline.processing` <-> `pipeline_proc`).
+
+### Indexed Label Values Browse Cache (Optional)
+
+This mode is designed for very high-cardinality labels (for example `k8s_pod_name`) where returning every value on first browse is expensive.
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `-label-values-indexed-cache` | — | `false` | Enable indexed hotset browsing for `GET /loki/api/v1/label/{name}/values` |
+| `-label-values-hot-limit` | — | `200` | Default values returned for empty-query browse when `limit` is not specified |
+| `-label-values-index-max-entries` | — | `200000` | Maximum indexed values retained per tenant+label in memory |
+| `-label-values-index-persist-path` | — | — | Disk path for persisted label-values index snapshot (JSON) |
+| `-label-values-index-persist-interval` | — | `30s` | Periodic snapshot flush interval |
+| `-label-values-index-startup-stale-threshold` | — | `60s` | Disk snapshot freshness threshold before peer warm fallback |
+| `-label-values-index-startup-peer-warm-timeout` | — | `5s` | Startup timeout for peer warm fallback |
+
+Behavior when enabled:
+
+- Empty-query browse (`query` omitted or `query=*`) serves a hot subset first.
+- Supports optional pagination-style parameters on the same endpoint: `limit` and `offset`.
+- Supports optional in-proxy value filtering with `search` (alias `q`), without forcing a full backend refetch when index is warm.
+- Query-scoped requests (`query={...}`) keep standard behavior and still update index state.
+- Startup warm order: restore disk snapshot first, then warm from peer cache when disk snapshot is stale/missing.
+- Rolling update safety: graceful shutdown writes a final snapshot before exit.
+- Readiness behavior: `/ready` stays `503` until label-values startup warm is finished.
+
+Example:
+
+```bash
+./loki-vl-proxy \
+  -label-values-indexed-cache=true \
+  -label-values-hot-limit=200 \
+  -label-values-index-max-entries=200000 \
+  -label-values-index-persist-path=/cache/label-values-index.json \
+  -label-values-index-persist-interval=30s \
+  -label-values-index-startup-stale-threshold=60s \
+  -label-values-index-startup-peer-warm-timeout=5s
+
+Sizing guidance:
+
+- RAM estimate per label key: `label-values-index-max-entries * ~96 bytes`.
+- Disk snapshot estimate per label key: roughly `~60%` of RAM estimate.
+- Total footprint scales with `(tenant_count * indexed_label_count)`.
 ```
 
 ### Metadata Field Modes
