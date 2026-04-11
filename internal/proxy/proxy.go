@@ -284,6 +284,7 @@ const (
 	maxQueryLength = 65536 // 64KB
 	// maxLimitValue caps the number of results per query.
 	maxLimitValue                     = 10000
+	maxUserDrivenSlicePrealloc        = 512
 	tailWriteTimeout                  = 2 * time.Second
 	maxMultiTenantFanout              = 64
 	maxMultiTenantMergedResponseBytes = 32 << 20
@@ -2298,7 +2299,11 @@ func (p *Proxy) selectLabelValuesFromIndex(orgID, labelName, search string, offs
 		return nil, false
 	}
 
-	values := make([]string, 0, limit)
+	valuesCap := limit
+	if valuesCap > maxUserDrivenSlicePrealloc {
+		valuesCap = maxUserDrivenSlicePrealloc
+	}
+	values := make([]string, 0, valuesCap)
 	seen := 0
 	for _, candidate := range index.ordered {
 		if search != "" && !strings.Contains(strings.ToLower(candidate), search) {
@@ -2328,7 +2333,11 @@ func selectLabelValuesWindow(values []string, search string, offset, limit int) 
 	}
 
 	search = normalizeLabelValueSearch(search)
-	out := make([]string, 0, min(limit, len(values)))
+	outCap := min(limit, len(values))
+	if outCap > maxUserDrivenSlicePrealloc {
+		outCap = maxUserDrivenSlicePrealloc
+	}
+	out := make([]string, 0, outCap)
 	seen := 0
 	for _, value := range values {
 		if search != "" && !strings.Contains(strings.ToLower(value), search) {

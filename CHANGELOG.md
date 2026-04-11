@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- cap preallocated slice capacities on label-values browse paths to satisfy CodeQL excessive allocation guards for request-driven limits
+
 ## [0.27.34] - 2026-04-11
 
 ### Configuration
