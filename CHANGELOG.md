@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - harden malformed dotted Drilldown pipeline stages (for example `| cll . \`pipeline.\``) to degrade into safe dotted-prefix regex filters instead of impossible field-existence matchers
 - preserve Grafana datasource dotted-key filter intent by validating `key=value` label filtering for native dotted metadata fields (for example `k8s.cluster.name=my-cluster`) and preventing malformed dot-token fallback regressions
+- normalize malformed spaced dotted triplets with trailing-dot artifacts (for example `cll . \`pipeline.processing.\` = \`vector-processing\``) into valid dotted field comparisons across translated query/query_range datasource operations
 
 ### CI
 
