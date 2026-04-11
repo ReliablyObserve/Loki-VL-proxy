@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -515,4 +516,328 @@ func TestLabelSurface_LabelValuesIndexStartupWarmsFromPeersWhenDiskStale(t *test
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected peer-warmed values: want=%v got=%v", want, got)
 	}
+}
+
+func TestLabelSurface_AsyncRefreshPathsPopulateCache(t *testing.T) {
+	var fieldValuesCalls atomic.Int32
+	var streamsCalls atomic.Int32
+
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/select/logsql/stream_field_names":
+			w.Write([]byte(`{"values":[{"value":"app","hits":3},{"value":"service.name","hits":2},{"value":"service_name","hits":2}]}`))
+		case "/select/logsql/stream_field_values":
+			fieldValuesCalls.Add(1)
+			switch r.URL.Query().Get("field") {
+			case "app":
+				w.Write([]byte(`{"values":[{"value":"alpha","hits":3},{"value":"beta","hits":2}]}`))
+			case "service.name", "service_name":
+				w.Write([]byte(`{"values":[{"value":"svc-a","hits":2}]}`))
+			default:
+				w.Write([]byte(`{"values":[]}`))
+			}
+		case "/select/logsql/field_values":
+			fieldValuesCalls.Add(1)
+			switch r.URL.Query().Get("field") {
+			case "service.name", "service_name", "app":
+				w.Write([]byte(`{"values":[{"value":"svc-a","hits":2}]}`))
+			default:
+				w.Write([]byte(`{"values":[]}`))
+			}
+		case "/select/logsql/field_names":
+			w.Write([]byte(`{"values":[{"value":"service.name","hits":2}]}`))
+		case "/select/logsql/query":
+			w.Write([]byte(`{"_time":"2026-04-04T17:18:49Z","_msg":"level=error msg=ok","_stream":"{service.name=\"svc-a\",service_name=\"svc-a\"}","service.name":"svc-a","service_name":"svc-a"}` + "\n"))
+		case "/select/logsql/streams":
+			streamsCalls.Add(1)
+			w.Write([]byte(`{"values":[{"value":"{service.name=\"svc-a\",service_name=\"svc-a\",detected_level=\"error\"}","hits":4}]}`))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL:                 vlBackend.URL,
+		Cache:                      c,
+		LogLevel:                   "error",
+		LabelStyle:                 LabelStyleUnderscores,
+		MetadataFieldMode:          MetadataFieldModeTranslated,
+		LabelValuesIndexedCache:    true,
+		LabelValuesHotLimit:        10,
+		LabelValuesIndexMaxEntries: 100,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	p.refreshLabelValuesCacheAsync("", "label_values:async", "app", "", "", "", "")
+	waitForCachedKey(t, c, "label_values:async")
+
+	p.refreshDetectedFieldsCacheAsync("", "detected_fields:async", `{service_name="svc-a"}`, "", "", 100)
+	waitForCachedKey(t, c, "detected_fields:async")
+
+	p.refreshDetectedLabelsCacheAsync("", "detected_labels:async", `{service_name="svc-a"}`, "", "", 100)
+	waitForCachedKey(t, c, "detected_labels:async")
+
+	p.refreshDetectedFieldValuesCacheAsync("", "detected_field_values:async:service_name", "service_name", `{service_name="svc-a"}`, "", "", 100)
+	waitForCachedKey(t, c, "detected_field_values:async:service_name")
+
+	p.refreshDetectedFieldValuesCacheAsync("", "detected_field_values:async:level", "level", `{service_name="svc-a"}`, "", "", 100)
+	waitForCachedKey(t, c, "detected_field_values:async:level")
+
+	if fieldValuesCalls.Load() == 0 {
+		t.Fatalf("expected field_values or stream_field_values calls from async refresh paths")
+	}
+	if streamsCalls.Load() == 0 {
+		t.Fatalf("expected streams call from async detected_labels refresh")
+	}
+}
+
+func TestLabelSurface_LabelValueWindowHelpersCoverLimitBranches(t *testing.T) {
+	p := &Proxy{labelValuesHotLimit: 5}
+	if got := p.defaultLabelValuesLimit(""); got != 5 {
+		t.Fatalf("expected default hot limit, got %d", got)
+	}
+	if got := p.defaultLabelValuesLimit("0"); got != 5 {
+		t.Fatalf("expected invalid explicit limit to fallback to hot limit, got %d", got)
+	}
+	if got := p.defaultLabelValuesLimit("999999"); got != maxLimitValue {
+		t.Fatalf("expected explicit limit to clamp to maxLimitValue, got %d", got)
+	}
+	if got := p.defaultLabelValuesLimit("12"); got != 12 {
+		t.Fatalf("expected explicit positive limit to pass through, got %d", got)
+	}
+
+	window := selectLabelValuesWindow([]string{"alpha", "beta", "delta", "gamma"}, "ta", 0, 10000)
+	if len(window) != 2 || window[0] != "beta" || window[1] != "delta" {
+		t.Fatalf("unexpected search window result: %v", window)
+	}
+	window = selectLabelValuesWindow([]string{"alpha", "beta", "delta", "gamma"}, "", -1, 0)
+	if len(window) != 4 {
+		t.Fatalf("expected full window with normalized offset/limit, got %v", window)
+	}
+}
+
+func TestLabelSurface_RefreshLabelsCacheAsyncPopulatesCache(t *testing.T) {
+	var streamFieldNamesCalls atomic.Int32
+
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/select/logsql/stream_field_names":
+			streamFieldNamesCalls.Add(1)
+			w.Write([]byte(`{"values":[{"value":"service.name","hits":2},{"value":"app","hits":2},{"value":"_msg","hits":2}]}`))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL:        vlBackend.URL,
+		Cache:             c,
+		LogLevel:          "error",
+		LabelStyle:        LabelStyleUnderscores,
+		MetadataFieldMode: MetadataFieldModeTranslated,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	cacheKey := "labels:async"
+	p.refreshLabelsCacheAsync("", cacheKey, `{service_name="svc-a"}`, "", "")
+	raw := waitForCachedKey(t, c, cacheKey)
+
+	if streamFieldNamesCalls.Load() == 0 {
+		t.Fatalf("expected stream_field_names backend call")
+	}
+
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode labels response: %v", err)
+	}
+	if !contains(resp.Data, "service_name") {
+		t.Fatalf("expected translated and synthetic labels, got %v", resp.Data)
+	}
+	if contains(resp.Data, "_msg") {
+		t.Fatalf("expected internal labels to be filtered, got %v", resp.Data)
+	}
+}
+
+func TestLabelSurface_FetchPreferredLabelNamesCached_UsesCacheAndRecoversFromInvalidPayload(t *testing.T) {
+	var streamFieldNamesCalls atomic.Int32
+
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/select/logsql/stream_field_names":
+			streamFieldNamesCalls.Add(1)
+			w.Write([]byte(`{"values":[{"value":"app","hits":1}]}`))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	c := cache.New(60*time.Second, 1000)
+	p, err := New(Config{
+		BackendURL:        vlBackend.URL,
+		Cache:             c,
+		LogLevel:          "error",
+		LabelStyle:        LabelStyleUnderscores,
+		MetadataFieldMode: MetadataFieldModeTranslated,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	params := url.Values{}
+	params.Set("query", "*")
+
+	labels, err := p.fetchPreferredLabelNamesCached(context.Background(), params)
+	if err != nil {
+		t.Fatalf("first cached label fetch failed: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "app" {
+		t.Fatalf("unexpected labels: %v", labels)
+	}
+	if streamFieldNamesCalls.Load() != 1 {
+		t.Fatalf("expected one backend call after first fetch, got %d", streamFieldNamesCalls.Load())
+	}
+
+	labels, err = p.fetchPreferredLabelNamesCached(context.Background(), params)
+	if err != nil {
+		t.Fatalf("second cached label fetch failed: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "app" {
+		t.Fatalf("unexpected cached labels: %v", labels)
+	}
+	if streamFieldNamesCalls.Load() != 1 {
+		t.Fatalf("expected cache hit on second fetch, backend calls=%d", streamFieldNamesCalls.Load())
+	}
+
+	cacheKey := "label_inventory::" + params.Encode()
+	c.Set(cacheKey, []byte("{invalid-json"))
+	labels, err = p.fetchPreferredLabelNamesCached(context.Background(), params)
+	if err != nil {
+		t.Fatalf("fetch after invalid cache payload failed: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "app" {
+		t.Fatalf("unexpected labels after cache recovery: %v", labels)
+	}
+	if streamFieldNamesCalls.Load() != 2 {
+		t.Fatalf("expected backend refetch after invalid cache payload, backend calls=%d", streamFieldNamesCalls.Load())
+	}
+}
+
+func TestLabelSurface_DetectedLabelsCacheRoundTripAndInvalidPayload(t *testing.T) {
+	p, err := New(Config{
+		BackendURL:        "http://unused",
+		Cache:             cache.New(60*time.Second, 1000),
+		LogLevel:          "error",
+		LabelStyle:        LabelStyleUnderscores,
+		MetadataFieldMode: MetadataFieldModeTranslated,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	ctx := context.WithValue(context.Background(), orgIDKey, "tenant-a")
+	labels := []map[string]interface{}{
+		{"label": "service_name", "cardinality": 2},
+	}
+	summaries := map[string]*detectedLabelSummary{
+		"service_name": {
+			label:  "service_name",
+			values: map[string]struct{}{"svc-a": {}, "svc-b": {}},
+		},
+	}
+
+	p.setCachedDetectedLabels(ctx, `{service_name="svc-a"}`, "1", "2", 100, labels, summaries)
+	gotLabels, gotSummaries, ok := p.getCachedDetectedLabels(ctx, `{service_name="svc-a"}`, "1", "2", 100)
+	if !ok {
+		t.Fatalf("expected detected labels cache hit")
+	}
+	if len(gotLabels) != 1 || gotLabels[0]["label"] != "service_name" {
+		t.Fatalf("unexpected cached labels: %#v", gotLabels)
+	}
+	if gotSummaries["service_name"] == nil || len(gotSummaries["service_name"].values) != 2 {
+		t.Fatalf("unexpected cached summaries: %#v", gotSummaries)
+	}
+
+	cacheKey := p.detectedLabelsCacheKey(ctx, `{service_name="svc-a"}`, "1", "2", 100)
+	p.cache.Set(cacheKey, []byte("{invalid-json"))
+	gotLabels, gotSummaries, ok = p.getCachedDetectedLabels(ctx, `{service_name="svc-a"}`, "1", "2", 100)
+	if ok || gotLabels != nil || gotSummaries != nil {
+		t.Fatalf("expected invalid cached labels payload to miss cache, got labels=%#v summaries=%#v ok=%v", gotLabels, gotSummaries, ok)
+	}
+
+	withoutCache := &Proxy{}
+	gotLabels, gotSummaries, ok = withoutCache.getCachedDetectedLabels(context.Background(), "*", "1", "2", 10)
+	if ok || gotLabels != nil || gotSummaries != nil {
+		t.Fatalf("expected cache miss when cache is not configured")
+	}
+	withoutCache.setCachedDetectedLabels(context.Background(), "*", "1", "2", 10, nil, nil)
+}
+
+func TestLabelSurface_LabelValuesIndexPersistenceLoop_StartStopAndPersist(t *testing.T) {
+	persistPath := filepath.Join(t.TempDir(), "label-values-index.json")
+
+	p, err := New(Config{
+		BackendURL:                      "http://unused",
+		Cache:                           cache.New(60*time.Second, 1000),
+		LogLevel:                        "error",
+		LabelStyle:                      LabelStyleUnderscores,
+		MetadataFieldMode:               MetadataFieldModeTranslated,
+		LabelValuesIndexedCache:         true,
+		LabelValuesIndexPersistPath:     persistPath,
+		LabelValuesIndexMaxEntries:      1000,
+		LabelValuesHotLimit:             100,
+		LabelValuesIndexPersistInterval: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	p.updateLabelValuesIndex("", "app", []string{"alpha", "beta"})
+	p.startLabelValuesIndexPersistenceLoop()
+	p.startLabelValuesIndexPersistenceLoop()
+
+	time.Sleep(70 * time.Millisecond)
+	p.stopLabelValuesIndexPersistenceLoop(nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	p.stopLabelValuesIndexPersistenceLoop(ctx)
+
+	raw, err := os.ReadFile(persistPath)
+	if err != nil {
+		t.Fatalf("expected persisted index snapshot file, read error: %v", err)
+	}
+	var snapshot labelValuesIndexSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("decode persisted snapshot: %v", err)
+	}
+	if len(snapshot.StatesByKey) == 0 {
+		t.Fatalf("expected persisted snapshot to contain label index state")
+	}
+}
+
+func waitForCachedKey(t *testing.T, c *cache.Cache, key string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, ok := c.Get(key); ok {
+			return raw
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for cache key %q", key)
+	return nil
 }

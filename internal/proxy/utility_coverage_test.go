@@ -342,3 +342,94 @@ func TestPeerCacheMiddleware(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeMetadataPairs_Variants(t *testing.T) {
+	if got := normalizeMetadataPairs(nil); got != nil {
+		t.Fatalf("expected nil for nil input, got %#v", got)
+	}
+
+	fromStringMap := normalizeMetadataPairs(map[string]string{
+		" service.name ": "api",
+		"":               "drop-me",
+	})
+	if len(fromStringMap) != 1 || fromStringMap["service.name"] != "api" {
+		t.Fatalf("unexpected map[string]string normalization: %#v", fromStringMap)
+	}
+
+	fromInterfaceMap := normalizeMetadataPairs(map[string]interface{}{
+		" host.id ": "i-1",
+		"count":     3,
+		"":          "drop-me",
+	})
+	if len(fromInterfaceMap) != 2 || fromInterfaceMap["host.id"] != "i-1" || fromInterfaceMap["count"] != "3" {
+		t.Fatalf("unexpected map[string]interface{} normalization: %#v", fromInterfaceMap)
+	}
+
+	fromPairs := normalizeMetadataPairs([]interface{}{
+		[]interface{}{"k8s.cluster.name", "prod"},
+		[]interface{}{"", "drop-me"},
+		[]string{"host.id", "i-2"},
+		map[string]interface{}{"name": "service.name", "value": "api"},
+		map[string]interface{}{"name": "", "value": "drop-me"},
+	})
+	if len(fromPairs) != 3 {
+		t.Fatalf("unexpected []interface{} normalization cardinality: %#v", fromPairs)
+	}
+	if fromPairs["k8s.cluster.name"] != "prod" || fromPairs["host.id"] != "i-2" || fromPairs["service.name"] != "api" {
+		t.Fatalf("unexpected []interface{} normalization values: %#v", fromPairs)
+	}
+
+	if got := normalizeMetadataPairs(struct{ Name string }{Name: "x"}); got != nil {
+		t.Fatalf("expected nil for unsupported input, got %#v", got)
+	}
+}
+
+func TestNormalizeMetadataPairTuples_AndCategorizedDetection(t *testing.T) {
+	values := [][]interface{}{
+		{"1700000000000000000", "line-one", map[string]interface{}{
+			"structuredMetadata": []interface{}{
+				[]interface{}{"host.id", "i-1"},
+				map[string]interface{}{"name": "service.name", "value": "api"},
+			},
+			"parsed": []interface{}{
+				[]string{"k8s.cluster.name", "cluster-a"},
+			},
+		}},
+		{"1700000001000000000", "line-two", map[string]interface{}{
+			"structuredMetadata": []interface{}{
+				[]interface{}{"", "drop-me"},
+			},
+			"parsed": []interface{}{
+				map[string]interface{}{"name": "", "value": "drop-me"},
+			},
+		}},
+		{"1700000002000000000", "line-three"},
+	}
+
+	if !streamValuesHaveCategorizedMetadata(values) {
+		t.Fatalf("expected categorized metadata to be detected before normalization")
+	}
+	normalizeMetadataPairTuples(values)
+
+	meta0, _ := values[0][2].(map[string]interface{})
+	structured0, _ := meta0["structuredMetadata"].(map[string]string)
+	parsed0, _ := meta0["parsed"].(map[string]string)
+	if len(structured0) != 2 || structured0["host.id"] != "i-1" || structured0["service.name"] != "api" {
+		t.Fatalf("unexpected normalized structured metadata: %#v", structured0)
+	}
+	if len(parsed0) != 1 || parsed0["k8s.cluster.name"] != "cluster-a" {
+		t.Fatalf("unexpected normalized parsed metadata: %#v", parsed0)
+	}
+
+	meta1, _ := values[1][2].(map[string]interface{})
+	if _, ok := meta1["structuredMetadata"]; ok {
+		t.Fatalf("expected empty structuredMetadata to be removed, got %#v", meta1["structuredMetadata"])
+	}
+	if _, ok := meta1["parsed"]; ok {
+		t.Fatalf("expected empty parsed metadata to be removed, got %#v", meta1["parsed"])
+	}
+
+	if streamValuesHaveCategorizedMetadata([][]interface{}{{"1700000003000000000", "line-four"}}) {
+		t.Fatalf("expected false when tuples do not contain categorized metadata object")
+	}
+}
