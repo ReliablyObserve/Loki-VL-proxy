@@ -810,7 +810,7 @@ func TestLabelSurface_LabelValuesIndexPersistenceLoop_StartStopAndPersist(t *tes
 	p.startLabelValuesIndexPersistenceLoop()
 
 	time.Sleep(70 * time.Millisecond)
-	p.stopLabelValuesIndexPersistenceLoop(nil)
+	p.stopLabelValuesIndexPersistenceLoop(context.Background())
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
