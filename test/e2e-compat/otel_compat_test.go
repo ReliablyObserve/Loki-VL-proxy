@@ -657,6 +657,17 @@ func TestOTelDots_ProxyUnderscores(t *testing.T) {
 		}
 	})
 
+	t.Run("label_values_host_id_from_dotted_source", func(t *testing.T) {
+		values := getLabelValues(t, proxyUnderscoreURL, "host_id")
+		if len(values) == 0 {
+			t.Fatal("host_id values should not be empty for dotted VL source")
+		}
+		valSet := toSet(values)
+		if !valSet["i-0abc123def456"] {
+			t.Errorf("expected host_id value from dotted host.id source, got: %v", values)
+		}
+	})
+
 	t.Run("label_values_container_id", func(t *testing.T) {
 		values := getLabelValues(t, proxyUnderscoreURL, "container_id")
 		if len(values) == 0 {
@@ -731,6 +742,34 @@ func TestOTelDots_ProxyUnderscores(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("query_host_id_label_filter_triplet", func(t *testing.T) {
+		streams := queryRange(t, proxyUnderscoreURL, "{service_name=\"host-metadata-svc\"} | host_id = `i-0abc123def456`")
+		if len(streams) == 0 {
+			t.Fatal("query with host_id triplet filter should return results")
+		}
+		assertNoDotsInStreams(t, streams)
+	})
+
+	t.Run("drilldown_volume_targetlabels_host_id", func(t *testing.T) {
+		params := url.Values{}
+		params.Set("query", `{service_name="host-metadata-svc"}`)
+		params.Set("targetLabels", "host_id")
+		params.Set("start", fmt.Sprintf("%d", time.Now().Add(-1*time.Hour).UnixNano()))
+		params.Set("end", fmt.Sprintf("%d", time.Now().Add(1*time.Hour).UnixNano()))
+
+		resp := getJSON(t, proxyUnderscoreURL+"/loki/api/v1/index/volume?"+params.Encode())
+		data, _ := resp["data"].(map[string]interface{})
+		result, _ := data["result"].([]interface{})
+		if len(result) == 0 {
+			t.Fatalf("expected host_id buckets in volume response, got %v", resp)
+		}
+		first, _ := result[0].(map[string]interface{})
+		metric, _ := first["metric"].(map[string]interface{})
+		if _, ok := metric["host_id"]; !ok {
+			t.Fatalf("expected translated host_id metric in volume response, got %v", metric)
+		}
+	})
 }
 
 // ─── SCENARIO 2: VL stores dots, proxy passthrough ──────────────────────────
@@ -777,6 +816,13 @@ func TestOTelDots_ProxyPassthrough(t *testing.T) {
 			t.Log("note: dotted label query returned no results (expected — dots not valid in LogQL)")
 		}
 	})
+
+	t.Run("query_with_dotted_triplet_filter", func(t *testing.T) {
+		streams := queryRange(t, proxyURL, "{service.name=\"host-metadata-svc\"} | host.id = `i-0abc123def456`")
+		if len(streams) == 0 {
+			t.Fatal("query with dotted host.id triplet filter should return results in passthrough mode")
+		}
+	})
 }
 
 // ─── SCENARIO 3: VL stores underscores, proxy passthrough ───────────────────
@@ -811,6 +857,17 @@ func TestOTelUnderscores_ProxyPassthrough(t *testing.T) {
 		streams := queryRange(t, proxyURL, `{service_name="underscore-svc"}`)
 		if len(streams) == 0 {
 			t.Error("underscore service query should return results via passthrough proxy")
+		}
+	})
+
+	t.Run("label_values_host_name_passthrough", func(t *testing.T) {
+		values := getLabelValues(t, proxyURL, "host_name")
+		if len(values) == 0 {
+			t.Fatal("host_name label values should be available for underscore source passthrough")
+		}
+		valSet := toSet(values)
+		if !valSet["host-underscore-1"] {
+			t.Errorf("expected host-underscore-1 in passthrough values, got %v", values)
 		}
 	})
 }

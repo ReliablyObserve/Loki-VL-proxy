@@ -27,6 +27,7 @@ See [Translation Modes Guide](translation-modes.md) for mode-selection profiles 
 | `-metadata-field-mode` | `METADATA_FIELD_MODE` | `hybrid` | `native`, `translated`, or `hybrid` for `detected_fields` and structured metadata exposure |
 | `-emit-structured-metadata` | — | `true` | Enable Loki `categorize-labels` response encoding: requests with `X-Loki-Response-Encoding-Flags: categorize-labels` emit 3-tuples `[timestamp, line, metadata]`, while default/no-flag requests stay canonical 2-tuples |
 | `-field-mapping` | `FIELD_MAPPING` | — | JSON custom field mappings |
+| `-extra-label-fields` | `EXTRA_LABEL_FIELDS` | — | Comma-separated additional VL fields exposed on `/labels` and used for underscore↔dot alias resolution (for example `host.id,k8s.cluster.name`) |
 
 ### Label Style Modes
 

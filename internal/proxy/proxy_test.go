@@ -887,12 +887,12 @@ func TestTranslation_MalformedSpacedDottedTripletNormalizedForDatasourceOps(t *t
 	}))
 	defer vlBackend.Close()
 
-	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bservice_name%3D%22k8s-cluster-events%22%7D+%7C+cll+.+%60pipeline.processing.%60+%3D+%60vector-processing%60&start=1&end=2&limit=10`)
+	doGet(t, vlBackend.URL, `/loki/api/v1/query_range?query=%7Bservice_name%3D%22k8s-cluster-events%22%7D+%7C+custom+.+%60pipeline.processing.%60+%3D+%60vector-processing%60&start=1&end=2&limit=10`)
 
-	if !strings.Contains(receivedQuery, `"cll.pipeline.processing":=vector-processing`) {
+	if !strings.Contains(receivedQuery, `"custom.pipeline.processing":=vector-processing`) {
 		t.Fatalf("expected malformed dotted triplet to normalize to valid dotted equality, got %q", receivedQuery)
 	}
-	if strings.Contains(receivedQuery, "cll . `") {
+	if strings.Contains(receivedQuery, "custom . `") {
 		t.Fatalf("expected malformed spaced dotted syntax to be removed, got %q", receivedQuery)
 	}
 }
