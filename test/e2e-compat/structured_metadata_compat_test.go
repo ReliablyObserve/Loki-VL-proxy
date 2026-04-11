@@ -98,6 +98,25 @@ func TestStructuredMetadata_LabelShapeMatchesLokiExpectations(t *testing.T) {
 	}
 }
 
+func TestStructuredMetadata_DefaultProxyCategorizedIncludesEventMetadata(t *testing.T) {
+	ensureStructuredMetadataData(t)
+
+	resp := queryRangeCategorized(t, proxyURL, `{service.name="structured-metadata-e2e",level="info"}`)
+	labels := firstStreamLabels(t, resp)
+	metadata := firstStreamStructuredMetadata(t, resp)
+
+	for _, want := range []string{"service.name", "k8s.pod.name"} {
+		if _, ok := labels[want]; !ok {
+			t.Fatalf("default passthrough labels missing %q: %+v", want, labels)
+		}
+	}
+	for _, want := range []string{"http.target", "cloud.region"} {
+		if _, ok := metadata[want]; !ok {
+			t.Fatalf("default proxy categorize-labels response missing structuredMetadata %q: %+v", want, metadata)
+		}
+	}
+}
+
 func ensureStructuredMetadataData(t *testing.T) {
 	t.Helper()
 	structuredMetadataOnce.Do(func() {
