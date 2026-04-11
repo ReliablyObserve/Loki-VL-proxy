@@ -21,6 +21,9 @@ jobs:
       - name: Verify dashboard and alerting assets are synced to chart
         run: ./scripts/ci/sync_observability_assets.sh --check
 
+      - name: Unit tests (quality gate policy)
+        run: python3 -m unittest scripts.ci.tests.test_check_quality_gate scripts.ci.tests.test_check_changelog_pr
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.1"

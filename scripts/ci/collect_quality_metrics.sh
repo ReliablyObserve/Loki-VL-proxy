@@ -95,19 +95,55 @@ run_score() {
   local test_name="$1"
   local output
   output="$(go test -v -tags=e2e -run "^${test_name}$" ./test/e2e-compat/ -timeout=180s 2>&1)"
-  echo "$output" >"$TMP_DIR/${test_name}.log"
+  local log_file="$TMP_DIR/${test_name}.log"
+  echo "$output" >"$log_file"
   local score
   score="$(echo "$output" | grep -oE 'Score: [0-9]+/[0-9]+ \([0-9.]+%\)' | tail -1)"
+  local components
+  components="$(python3 - "$log_file" <<'PY'
+import json
+import re
+import sys
+
+pattern = re.compile(r"\b(PASS|FAIL)\s+([A-Za-z0-9_.\-/]+):")
+components = {}
+
+with open(sys.argv[1], "r", encoding="utf-8", errors="ignore") as fh:
+    for line in fh:
+        match = pattern.search(line)
+        if not match:
+            continue
+        status, component = match.group(1), match.group(2)
+        entry = components.setdefault(component, {"passed": 0, "total": 0})
+        entry["total"] += 1
+        if status == "PASS":
+            entry["passed"] += 1
+
+result = {}
+for component in sorted(components.keys()):
+    passed = components[component]["passed"]
+    total = components[component]["total"]
+    pct = 100.0 if total == 0 else round((passed * 100.0) / total, 1)
+    result[component] = {"passed": passed, "total": total, "pct": pct}
+
+print(json.dumps(result))
+PY
+)"
   if [ -z "$score" ]; then
-    echo '{"passed":0,"total":0,"pct":0}'
+    jq -n --argjson components "$components" \
+      '{passed:0,total:0,pct:0,components:$components}'
     return
   fi
   local passed total pct
   passed="$(echo "$score" | sed -E 's/Score: ([0-9]+)\/([0-9]+) \(([0-9.]+)%\)/\1/')"
   total="$(echo "$score" | sed -E 's/Score: ([0-9]+)\/([0-9]+) \(([0-9.]+)%\)/\2/')"
   pct="$(echo "$score" | sed -E 's/Score: ([0-9]+)\/([0-9]+) \(([0-9.]+)%\)/\3/')"
-  jq -n --argjson passed "$passed" --argjson total "$total" --argjson pct "$pct" \
-    '{passed:$passed,total:$total,pct:$pct}'
+  jq -n \
+    --argjson passed "$passed" \
+    --argjson total "$total" \
+    --argjson pct "$pct" \
+    --argjson components "$components" \
+    '{passed:$passed,total:$total,pct:$pct,components:$components}'
 }
 
 start_compat_stack() {

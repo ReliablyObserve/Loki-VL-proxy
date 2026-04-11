@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- harden malformed dotted Drilldown pipeline stages (for example `| cll . \`pipeline.\``) to degrade into safe dotted-prefix regex filters instead of impossible field-existence matchers
+
+### CI
+
+- expose compatibility component-level endpoint scores in PR quality reports and enforce shared component regressions through the quality gate
+
 ## [0.27.29] - 2026-04-11
 
 ### Bug Fixes
@@ -18,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - add breaker regression coverage for upstream HTTP 502, transport connection failure, and canceled transport error paths
 - add a 7-day query-range windowing regression test to verify adaptive parallel window fetch behavior under long time-range fanout
+
+### CI
+
+- enrich PR quality compatibility snapshots with component-level endpoint scores per track (Loki API, Logs Drilldown, VictoriaLogs) and render these as a dedicated report section for direct API-surface visibility
+- harden the quality gate to validate required per-component compatibility signals and fail on shared component regressions or missing component breakdowns
+- add CI unit coverage for quality-gate component checks and bump PR-quality base snapshot cache schema to refresh compatibility report shape
 
 ## [0.27.28] - 2026-04-11
 
