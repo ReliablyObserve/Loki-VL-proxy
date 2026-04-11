@@ -829,6 +829,112 @@ func TestLabelSurface_LabelValuesIndexPersistenceLoop_StartStopAndPersist(t *tes
 	}
 }
 
+func TestLabelSurface_StopLabelValuesIndexPersistenceLoop_TimeoutBranch(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+
+	// Not-started guard branch.
+	p.stopLabelValuesIndexPersistenceLoop(context.Background())
+
+	// Force timeout branch by keeping done channel open until context expires.
+	p.labelValuesIndexPersistStarted.Store(true)
+	p.labelValuesIndexPersistStop = make(chan struct{})
+	p.labelValuesIndexPersistDone = make(chan struct{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	p.stopLabelValuesIndexPersistenceLoop(ctx)
+
+	// Cover already-closed stop-channel branch and immediate done return.
+	close(p.labelValuesIndexPersistDone)
+	p.stopLabelValuesIndexPersistenceLoop(context.Background())
+}
+
+func TestLabelSurface_IndexAndCacheHelpersCoverBranches(t *testing.T) {
+	if !labelValueIndexLess(
+		"a", labelValueIndexEntry{SeenCount: 2, LastSeen: 10},
+		"b", labelValueIndexEntry{SeenCount: 1, LastSeen: 100},
+	) {
+		t.Fatalf("expected higher SeenCount to sort first")
+	}
+	if !labelValueIndexLess(
+		"a", labelValueIndexEntry{SeenCount: 2, LastSeen: 20},
+		"b", labelValueIndexEntry{SeenCount: 2, LastSeen: 10},
+	) {
+		t.Fatalf("expected newer LastSeen to sort first when SeenCount matches")
+	}
+	if !labelValueIndexLess(
+		"a", labelValueIndexEntry{SeenCount: 2, LastSeen: 20},
+		"b", labelValueIndexEntry{SeenCount: 2, LastSeen: 20},
+	) {
+		t.Fatalf("expected lexical tie-breaker to apply when SeenCount and LastSeen match")
+	}
+
+	p := &Proxy{
+		labelValuesIndexedCache:    true,
+		labelValuesHotLimit:        1,
+		labelValuesIndexMaxEntries: 2,
+		labelValuesIndex:           make(map[string]*labelValuesIndexState),
+		cache:                      cache.New(60*time.Second, 1000),
+	}
+	p.updateLabelValuesIndex("tenant-a", "app", []string{"gamma", "alpha", "beta"})
+
+	got, ok := p.selectLabelValuesFromIndex("tenant-a", "app", "", -1, 0)
+	if !ok {
+		t.Fatalf("expected indexed values to be available")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected default hot-limit fallback to return one value, got %v", got)
+	}
+
+	full, ok := p.selectLabelValuesFromIndex("tenant-a", "app", "a", 0, maxLimitValue+500)
+	if !ok || len(full) == 0 {
+		t.Fatalf("expected filtered indexed values with clamped limit, got %v (ok=%v)", full, ok)
+	}
+
+	disabled := &Proxy{labelValuesIndexedCache: false}
+	if values, ok := disabled.selectLabelValuesFromIndex("tenant-a", "app", "", 0, 10); ok || values != nil {
+		t.Fatalf("expected indexed cache disabled path to miss")
+	}
+
+	(*Proxy)(nil).setJSONCacheWithTTL("k:nil", time.Second, map[string]string{"ok": "1"})
+	(&Proxy{}).setJSONCacheWithTTL("k:nocache", time.Second, map[string]string{"ok": "1"})
+	p.setJSONCacheWithTTL("k:marshal-error", time.Second, map[string]interface{}{"bad": make(chan int)})
+	if _, ok := p.cache.Get("k:marshal-error"); ok {
+		t.Fatalf("expected marshal-error payload to not be cached")
+	}
+	p.setJSONCacheWithTTL("k:good", time.Second, map[string]string{"ok": "1"})
+	if _, ok := p.cache.Get("k:good"); !ok {
+		t.Fatalf("expected successful JSON payload to be cached")
+	}
+
+	if parsePositiveInt("0", 7) != 7 || parsePositiveInt("-1", 7) != 7 || parsePositiveInt("9", 7) != 9 {
+		t.Fatalf("unexpected parsePositiveInt behavior")
+	}
+	if parseNonNegativeInt("-1", 7) != 7 || parseNonNegativeInt("0", 7) != 0 || parseNonNegativeInt("9", 7) != 9 {
+		t.Fatalf("unexpected parseNonNegativeInt behavior")
+	}
+
+	if (&Proxy{}).shouldRefreshLabelsInBackground(-1, time.Second) {
+		t.Fatalf("expected refresh=false for non-positive remaining TTL")
+	}
+	if (&Proxy{}).shouldRefreshLabelsInBackground(time.Second, 0) {
+		t.Fatalf("expected refresh=false for non-positive cache TTL")
+	}
+	if !(&Proxy{}).shouldRefreshLabelsInBackground(time.Second, 5*time.Second) {
+		t.Fatalf("expected refresh=true when cache entry is near expiry")
+	}
+
+	if got := (&Proxy{}).labelBackgroundTimeout(); got != 10*time.Second {
+		t.Fatalf("expected default background timeout, got %s", got)
+	}
+	if got := (&Proxy{client: &http.Client{Timeout: 3 * time.Second}}).labelBackgroundTimeout(); got != 3*time.Second {
+		t.Fatalf("expected client timeout override, got %s", got)
+	}
+	if got := (&Proxy{client: &http.Client{Timeout: 30 * time.Second}}).labelBackgroundTimeout(); got != 10*time.Second {
+		t.Fatalf("expected cap to default timeout, got %s", got)
+	}
+}
+
 func waitForCachedKey(t *testing.T, c *cache.Cache, key string) []byte {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
