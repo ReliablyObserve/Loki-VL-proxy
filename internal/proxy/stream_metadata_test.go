@@ -122,6 +122,15 @@ func responseHasEncodingFlag(t *testing.T, body []byte, want string) bool {
 	return false
 }
 
+func valueToString(v interface{}) string {
+	switch typed := v.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
 func TestRequestWantsCategorizedLabels(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	if requestWantsCategorizedLabels(req) {
