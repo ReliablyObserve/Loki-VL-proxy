@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-<!-- Intentionally empty after v0.27.31 release metadata sync -->
+
+### Bug Fixes
+
+- add runtime learning for unique custom underscore-to-dotted field aliases from backend field inventory, with ambiguity safeguards and precedence for explicit mappings and known OTel aliases
+
+### Documentation
+
+- document Grafana Loki datasource builder caveats for dotted field keys and recommend underscore UI mode for stable click-to-filter workflows
 
 ## [0.27.31] - 2026-04-11
 
