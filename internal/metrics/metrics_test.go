@@ -91,6 +91,20 @@ func TestMetrics_Handler_EmptyState(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "loki_vl_proxy_cache_hits_total 0") {
 		t.Error("expected zero cache hits")
 	}
+	body := w.Body.String()
+	for _, needle := range []string{
+		`loki_vl_proxy_requests_total{endpoint="query_range",status="200"} 0`,
+		`loki_vl_proxy_cache_hits_by_endpoint{endpoint="query_range"} 0`,
+		`loki_vl_proxy_backend_duration_seconds_count{endpoint="query_range"} 0`,
+		`loki_vl_proxy_tenant_requests_total{tenant="__none__",endpoint="query_range",status="200"} 0`,
+		`loki_vl_proxy_client_requests_total{client="__none__",endpoint="query_range"} 0`,
+		`loki_vl_proxy_client_status_total{client="__none__",endpoint="query_range",status="200"} 0`,
+		`loki_vl_proxy_circuit_breaker_state 0`,
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("expected pre-registered zero series %q", needle)
+		}
+	}
 }
 
 func TestMetrics_RecordTranslationError(t *testing.T) {

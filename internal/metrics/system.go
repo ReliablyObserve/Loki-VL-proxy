@@ -221,7 +221,8 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// CPU usage
+	// CPU usage (always export; falls back to 0s when /proc is unavailable).
+	userPct, sysPct, iowaitPct := 0.0, 0.0, 0.0
 	now := time.Now()
 	cur, err := readCPUStat()
 	if err == nil {
@@ -231,69 +232,68 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 			totalCur := cur.user + cur.nice + cur.system + cur.idle + cur.iowait + cur.irq + cur.softirq + cur.steal
 			totalDiff := totalCur - totalPrev
 			if totalDiff > 0 {
-				userPct := (cur.user + cur.nice - sm.prevCPU.user - sm.prevCPU.nice) / totalDiff
-				sysPct := (cur.system - sm.prevCPU.system) / totalDiff
-				iowaitPct := (cur.iowait - sm.prevCPU.iowait) / totalDiff
-
-				sb.WriteString("# HELP process_cpu_usage_ratio CPU usage ratio (0-1).\n")
-				sb.WriteString("# TYPE process_cpu_usage_ratio gauge\n")
-				sb.WriteString("# HELP loki_vl_proxy_process_cpu_usage_ratio CPU usage ratio (0-1).\n")
-				sb.WriteString("# TYPE loki_vl_proxy_process_cpu_usage_ratio gauge\n")
-				fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"user\"} %g\n", userPct)
-				fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"system\"} %g\n", sysPct)
-				fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"iowait\"} %g\n", iowaitPct)
-				fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"user\"} %g\n", userPct)
-				fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"system\"} %g\n", sysPct)
-				fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"iowait\"} %g\n", iowaitPct)
+				userPct = (cur.user + cur.nice - sm.prevCPU.user - sm.prevCPU.nice) / totalDiff
+				sysPct = (cur.system - sm.prevCPU.system) / totalDiff
+				iowaitPct = (cur.iowait - sm.prevCPU.iowait) / totalDiff
 			}
 		}
 		sm.prevCPU = cur
 		sm.prevTime = now
 	}
+	sb.WriteString("# HELP process_cpu_usage_ratio CPU usage ratio (0-1).\n")
+	sb.WriteString("# TYPE process_cpu_usage_ratio gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_cpu_usage_ratio CPU usage ratio (0-1).\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_cpu_usage_ratio gauge\n")
+	fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"user\"} %g\n", userPct)
+	fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"system\"} %g\n", sysPct)
+	fmt.Fprintf(sb, "process_cpu_usage_ratio{mode=\"iowait\"} %g\n", iowaitPct)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"user\"} %g\n", userPct)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"system\"} %g\n", sysPct)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_cpu_usage_ratio{mode=\"iowait\"} %g\n", iowaitPct)
 
 	// Memory from /proc/meminfo
 	memTotal, memAvail, memFree := readMemInfo()
+	usageRatio := 0.0
 	if memTotal > 0 {
-		sb.WriteString("# HELP process_memory_total_bytes Total memory.\n")
-		sb.WriteString("# TYPE process_memory_total_bytes gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_memory_total_bytes Total memory.\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_memory_total_bytes gauge\n")
-		fmt.Fprintf(sb, "process_memory_total_bytes %d\n", memTotal)
-		fmt.Fprintf(sb, "loki_vl_proxy_process_memory_total_bytes %d\n", memTotal)
-
-		sb.WriteString("# HELP process_memory_available_bytes Available memory.\n")
-		sb.WriteString("# TYPE process_memory_available_bytes gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_memory_available_bytes Available memory.\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_memory_available_bytes gauge\n")
-		fmt.Fprintf(sb, "process_memory_available_bytes %d\n", memAvail)
-		fmt.Fprintf(sb, "loki_vl_proxy_process_memory_available_bytes %d\n", memAvail)
-
-		sb.WriteString("# HELP process_memory_free_bytes Free memory.\n")
-		sb.WriteString("# TYPE process_memory_free_bytes gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_memory_free_bytes Free memory.\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_memory_free_bytes gauge\n")
-		fmt.Fprintf(sb, "process_memory_free_bytes %d\n", memFree)
-		fmt.Fprintf(sb, "loki_vl_proxy_process_memory_free_bytes %d\n", memFree)
-
 		used := memTotal - memAvail
-		sb.WriteString("# HELP process_memory_usage_ratio Memory usage ratio (0-1).\n")
-		sb.WriteString("# TYPE process_memory_usage_ratio gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_memory_usage_ratio Memory usage ratio (0-1).\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_memory_usage_ratio gauge\n")
-		fmt.Fprintf(sb, "process_memory_usage_ratio %g\n", float64(used)/float64(memTotal))
-		fmt.Fprintf(sb, "loki_vl_proxy_process_memory_usage_ratio %g\n", float64(used)/float64(memTotal))
+		usageRatio = float64(used) / float64(memTotal)
 	}
+	sb.WriteString("# HELP process_memory_total_bytes Total memory.\n")
+	sb.WriteString("# TYPE process_memory_total_bytes gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_memory_total_bytes Total memory.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_memory_total_bytes gauge\n")
+	fmt.Fprintf(sb, "process_memory_total_bytes %d\n", memTotal)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_memory_total_bytes %d\n", memTotal)
+
+	sb.WriteString("# HELP process_memory_available_bytes Available memory.\n")
+	sb.WriteString("# TYPE process_memory_available_bytes gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_memory_available_bytes Available memory.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_memory_available_bytes gauge\n")
+	fmt.Fprintf(sb, "process_memory_available_bytes %d\n", memAvail)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_memory_available_bytes %d\n", memAvail)
+
+	sb.WriteString("# HELP process_memory_free_bytes Free memory.\n")
+	sb.WriteString("# TYPE process_memory_free_bytes gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_memory_free_bytes Free memory.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_memory_free_bytes gauge\n")
+	fmt.Fprintf(sb, "process_memory_free_bytes %d\n", memFree)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_memory_free_bytes %d\n", memFree)
+
+	sb.WriteString("# HELP process_memory_usage_ratio Memory usage ratio (0-1).\n")
+	sb.WriteString("# TYPE process_memory_usage_ratio gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_memory_usage_ratio Memory usage ratio (0-1).\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_memory_usage_ratio gauge\n")
+	fmt.Fprintf(sb, "process_memory_usage_ratio %g\n", usageRatio)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_memory_usage_ratio %g\n", usageRatio)
 
 	// Process RSS from /proc/self/status
 	rss := readProcessRSS()
-	if rss > 0 {
-		sb.WriteString("# HELP process_resident_memory_bytes Process RSS.\n")
-		sb.WriteString("# TYPE process_resident_memory_bytes gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_resident_memory_bytes Process RSS.\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_resident_memory_bytes gauge\n")
-		fmt.Fprintf(sb, "process_resident_memory_bytes %d\n", rss)
-		fmt.Fprintf(sb, "loki_vl_proxy_process_resident_memory_bytes %d\n", rss)
-	}
+	sb.WriteString("# HELP process_resident_memory_bytes Process RSS.\n")
+	sb.WriteString("# TYPE process_resident_memory_bytes gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_resident_memory_bytes Process RSS.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_resident_memory_bytes gauge\n")
+	fmt.Fprintf(sb, "process_resident_memory_bytes %d\n", rss)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_resident_memory_bytes %d\n", rss)
 
 	// Disk IO from /proc/diskstats
 	readBytes, writeBytes := readDiskIO()
@@ -328,42 +328,46 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 	// PSI (Pressure Stall Information) from /proc/pressure/*
 	for _, resource := range []string{"cpu", "memory", "io"} {
 		some10, some60, some300, full10, full60, full300 := readPSI(resource)
-		if some10 >= 0 {
-			fmt.Fprintf(sb, "# HELP process_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource)
-			fmt.Fprintf(sb, "# TYPE process_pressure_%s_some_ratio gauge\n", resource)
-			fmt.Fprintf(sb, "# HELP loki_vl_proxy_process_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource)
-			fmt.Fprintf(sb, "# TYPE loki_vl_proxy_process_pressure_%s_some_ratio gauge\n", resource)
-			fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"10s\"} %g\n", resource, some10/100)
-			fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"60s\"} %g\n", resource, some60/100)
-			fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"300s\"} %g\n", resource, some300/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"10s\"} %g\n", resource, some10/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"60s\"} %g\n", resource, some60/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"300s\"} %g\n", resource, some300/100)
+		if some10 < 0 {
+			some10, some60, some300 = 0, 0, 0
 		}
-		if full10 >= 0 {
-			fmt.Fprintf(sb, "# HELP process_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource)
-			fmt.Fprintf(sb, "# TYPE process_pressure_%s_full_ratio gauge\n", resource)
-			fmt.Fprintf(sb, "# HELP loki_vl_proxy_process_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource)
-			fmt.Fprintf(sb, "# TYPE loki_vl_proxy_process_pressure_%s_full_ratio gauge\n", resource)
-			fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"10s\"} %g\n", resource, full10/100)
-			fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"60s\"} %g\n", resource, full60/100)
-			fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"300s\"} %g\n", resource, full300/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"10s\"} %g\n", resource, full10/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"60s\"} %g\n", resource, full60/100)
-			fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"300s\"} %g\n", resource, full300/100)
+		if full10 < 0 {
+			full10, full60, full300 = 0, 0, 0
 		}
+		fmt.Fprintf(sb, "# HELP process_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource)
+		fmt.Fprintf(sb, "# TYPE process_pressure_%s_some_ratio gauge\n", resource)
+		fmt.Fprintf(sb, "# HELP loki_vl_proxy_process_pressure_%s_some_ratio PSI some pressure (%s).\n", resource, resource)
+		fmt.Fprintf(sb, "# TYPE loki_vl_proxy_process_pressure_%s_some_ratio gauge\n", resource)
+		fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"10s\"} %g\n", resource, some10/100)
+		fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"60s\"} %g\n", resource, some60/100)
+		fmt.Fprintf(sb, "process_pressure_%s_some_ratio{window=\"300s\"} %g\n", resource, some300/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"10s\"} %g\n", resource, some10/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"60s\"} %g\n", resource, some60/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_some_ratio{window=\"300s\"} %g\n", resource, some300/100)
+
+		fmt.Fprintf(sb, "# HELP process_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource)
+		fmt.Fprintf(sb, "# TYPE process_pressure_%s_full_ratio gauge\n", resource)
+		fmt.Fprintf(sb, "# HELP loki_vl_proxy_process_pressure_%s_full_ratio PSI full pressure (%s).\n", resource, resource)
+		fmt.Fprintf(sb, "# TYPE loki_vl_proxy_process_pressure_%s_full_ratio gauge\n", resource)
+		fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"10s\"} %g\n", resource, full10/100)
+		fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"60s\"} %g\n", resource, full60/100)
+		fmt.Fprintf(sb, "process_pressure_%s_full_ratio{window=\"300s\"} %g\n", resource, full300/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"10s\"} %g\n", resource, full10/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"60s\"} %g\n", resource, full60/100)
+		fmt.Fprintf(sb, "loki_vl_proxy_process_pressure_%s_full_ratio{window=\"300s\"} %g\n", resource, full300/100)
 	}
 
 	// Process open FDs
 	fds := countOpenFDs()
-	if fds >= 0 {
-		sb.WriteString("# HELP process_open_fds Open file descriptors.\n")
-		sb.WriteString("# TYPE process_open_fds gauge\n")
-		sb.WriteString("# HELP loki_vl_proxy_process_open_fds Open file descriptors.\n")
-		sb.WriteString("# TYPE loki_vl_proxy_process_open_fds gauge\n")
-		fmt.Fprintf(sb, "process_open_fds %d\n", fds)
-		fmt.Fprintf(sb, "loki_vl_proxy_process_open_fds %d\n", fds)
+	if fds < 0 {
+		fds = 0
 	}
+	sb.WriteString("# HELP process_open_fds Open file descriptors.\n")
+	sb.WriteString("# TYPE process_open_fds gauge\n")
+	sb.WriteString("# HELP loki_vl_proxy_process_open_fds Open file descriptors.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_open_fds gauge\n")
+	fmt.Fprintf(sb, "process_open_fds %d\n", fds)
+	fmt.Fprintf(sb, "loki_vl_proxy_process_open_fds %d\n", fds)
 }
 
 // --- /proc readers ---
