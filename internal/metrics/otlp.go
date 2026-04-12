@@ -699,7 +699,6 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 		p.sumMetric("process_network_transmit_bytes_total", "Network transmit bytes.", "By", p.counterDP("process_network_transmit_bytes_total", txBytes, now)),
 		p.sumMetric("loki_vl_proxy_process_network_transmit_bytes_total", "Network transmit bytes.", "By", p.counterDP("loki_vl_proxy_process_network_transmit_bytes_total", txBytes, now)),
 	)
-
 	userCPU := 0.0
 	systemCPU := 0.0
 	p.systemMu.Lock()
