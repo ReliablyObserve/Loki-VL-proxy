@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.39] - 2026-04-12
+
+### Reliability
+
+- improve long-range windowed `query_range` resiliency by degrading batch parallelism on retryable upstream failures (`backend unavailable` / 502/503/504), adding bounded single-window retries, and widening retry backoff to survive transient breaker/backend spikes
+
+### Tests
+
+- add regression coverage for batch degradation, forced adaptive parallel backoff, and retry-helper classification paths used by long-range windowed queries
+
+## [0.27.38] - 2026-04-12
+
+### Reliability
+
+- harden long-range `query_range` execution by retrying transient per-window backend failures with bounded backoff and returning Loki-style upstream errors instead of collapsing to an expensive direct full-range fallback
+
+### Observability
+
+- scope `process_*` and `loki_vl_proxy_process_*` CPU/disk/network runtime metrics to proxy-process sources (`/proc/self` + cgroup pressure fallback) to avoid host-level attribution drift in scrape and OTLP paths
+
+## [0.27.37] - 2026-04-12
+
+### Reliability
+
+- harden long-range query execution by adding `query_range` fallback from window-split execution to direct backend query path on transient upstream failures
+
+### Performance
+
+- reduce proxy disk write amplification by skipping L2 disk-cache writes for short-lived entries and avoiding unchanged periodic label-index snapshot rewrites
+
+### Observability
+
+- keep `loki_vl_proxy_*` runtime/process metric families consistently queryable across scrape and OTLP flows for dashboard compatibility
+
+## [0.27.36] - 2026-04-12
+
+### Reliability
+
+- add query_range safety fallback from window-split execution to direct backend query path on transient upstream failures, reducing user-facing 5xx during long-range requests
+
+### Performance
+
+- reduce proxy disk write amplification by skipping L2 disk-cache writes for short-lived entries and avoiding unchanged periodic label-index snapshot rewrites
+
+## [0.27.35] - 2026-04-12
+
 ### Security
 
 - cap preallocated slice capacities on label-values browse paths to satisfy CodeQL excessive allocation guards for request-driven limits
@@ -18,6 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI
 
 - fix release asset upload globs to avoid duplicate `.tgz` matches in GitHub Release publishing, which could fail with REST asset update `Not Found`
+
+### Performance
+
+- reduce proxy disk write amplification by skipping L2 disk-cache writes for short-lived entries via `disk-cache-min-ttl` (default `30s`)
+- avoid periodic label-values index snapshot rewrites when index structure is unchanged, lowering background disk I/O and write latency pressure
+
+### Observability
+
+- improve app-scoped metrics compatibility for dashboard/runtime process telemetry by keeping `loki_vl_proxy_*` metric families consistently queryable across scrape and OTLP flows
 
 ## [0.27.34] - 2026-04-11
 

@@ -496,7 +496,6 @@ func TestQueryRangeWindow_PrefilterFailureFallsBackToAllWindows(t *testing.T) {
 		}
 	}
 }
-
 func TestQueryRangeWindow_DoesNotFallbackToDirectQueryOnWindowFetchError(t *testing.T) {
 	start := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Hour).UnixNano()
 	end := start + int64(2*time.Hour) - 1
@@ -692,7 +691,6 @@ func TestQueryRangeWindow_DegradesBatchParallelismOnBackendUnavailable(t *testin
 		t.Fatalf("expected additional backend attempts after degradation, got calls=%d", calls.Load())
 	}
 }
-
 func TestQueryRangeWindow_ParseLokiTimeAndNormalization(t *testing.T) {
 	t.Run("rfc3339", func(t *testing.T) {
 		raw := "2026-04-10T12:00:00Z"
@@ -1014,7 +1012,6 @@ func TestQueryRangePrefilterQuery(t *testing.T) {
 		})
 	}
 }
-
 func newWindowingTestProxy(t *testing.T, backendURL string) *Proxy {
 	t.Helper()
 	c := cache.New(60*time.Second, 10000)
