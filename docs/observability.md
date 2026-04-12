@@ -382,6 +382,37 @@ Start with:
 | [`dashboard/loki-vl-proxy.json`](../dashboard/loki-vl-proxy.json) | Prometheus metrics | Service health, SLOs, cache and endpoint latency trends |
 | [`dashboard/loki-vl-proxy-offenders.json`](../dashboard/loki-vl-proxy-offenders.json) | Native VictoriaLogs datasource | Offender triage with built-in `tenant`, `client`, `cluster`, and `env` filters for route/status load and error analysis |
 
+#### Metrics Dashboard Setup (Scrape and OTLP Push)
+
+The metrics dashboard includes a `Datasource` variable and works with either metric transport mode:
+
+- Prometheus scrape (`/metrics` + `ServiceMonitor`)
+- OTLP push (`-otlp-endpoint=...`) into a Prometheus-compatible backend
+
+Recommended setup:
+
+1. Point `Datasource` to any Prometheus-compatible datasource that contains `loki_vl_proxy_*` metrics.
+2. For scrape mode, use the datasource fed by your `ServiceMonitor`/Prometheus scrape pipeline.
+3. For OTLP push mode, use the datasource fed by your OTLP metrics pipeline.
+4. VictoriaMetrics can be used for both modes when it receives both scrape and OTLP streams.
+
+Transport checklist:
+
+- Scrape mode:
+  - `-server.register-instrumentation=true`
+  - Helm `serviceMonitor.enabled=true`
+- OTLP push mode:
+  - `-otlp-endpoint` configured
+  - `-server.register-instrumentation=false` (optional, recommended when you want push-only)
+
+Quick validation in Grafana Explore against the selected datasource:
+
+```promql
+loki_vl_proxy_uptime_seconds
+```
+
+If this query has data, the `Loki-VL-Proxy Metrics` dashboard should populate out of the box.
+
 Use the offenders dashboard during Loki/proxy incidents to keep visibility on raw operator/client behavior directly from stored logs.
 
 High-signal alert ideas:

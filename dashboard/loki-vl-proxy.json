@@ -1,14 +1,4 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "Prometheus/VictoriaMetrics datasource scraping loki-vl-proxy",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
-  ],
   "annotations": {
     "list": []
   },
@@ -561,10 +551,23 @@
   "templating": {
     "list": [
       {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "regex": "/^(Prometheus|Thanos|VictoriaMetrics|Mimir|Cortex|prometheus)$/",
+        "refresh": 1,
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "current": {"text": "VictoriaMetrics", "value": "VictoriaMetrics"}
+      },
+      {
         "name": "job",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds, job)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
@@ -576,7 +579,7 @@
         "name": "cluster",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds{job=~\"${job:regex}|${job:regex}-headless\"}, cluster)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
@@ -588,7 +591,7 @@
         "name": "env",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\"}, env)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
@@ -600,7 +603,7 @@
         "name": "namespace",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\"}, namespace)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
@@ -612,7 +615,7 @@
         "name": "service",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\"}, service)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
@@ -624,7 +627,7 @@
         "name": "pod",
         "type": "query",
         "query": "label_values(loki_vl_proxy_uptime_seconds{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\"}, pod)",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": "$datasource",
         "current": {"text": "All", "value": "$__all"},
         "allValue": ".*",
         "refresh": 2,
