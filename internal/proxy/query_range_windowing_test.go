@@ -532,7 +532,6 @@ func TestQueryRangeWindow_DegradesBatchParallelismOnBackendUnavailable(t *testin
 		t.Fatalf("expected additional backend attempts after degradation, got calls=%d", calls.Load())
 	}
 }
-
 func TestQueryRangeWindow_ParseLokiTimeAndNormalization(t *testing.T) {
 	t.Run("rfc3339", func(t *testing.T) {
 		raw := "2026-04-10T12:00:00Z"

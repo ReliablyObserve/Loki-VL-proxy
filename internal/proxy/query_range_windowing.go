@@ -132,7 +132,6 @@ func (p *Proxy) proxyLogQueryWindowed(w http.ResponseWriter, r *http.Request, lo
 				}
 				continue
 			}
-
 			status := statusFromQueryRangeWindowErr(err)
 			p.log.Warn("query_range windowed fetch failed",
 				"error", err,
