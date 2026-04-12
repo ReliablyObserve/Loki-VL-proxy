@@ -185,17 +185,18 @@ These are the metrics to use when you want to identify the users or tenants actu
 
 ### Runtime and Process Metrics
 
-The proxy also exports a lightweight built-in set of runtime and process/container health metrics:
+The proxy also exports a lightweight built-in set of runtime and process/container health metrics.
+App-scoped aliases are emitted with the `loki_vl_proxy_` prefix, while legacy `go_*` and `process_*` families remain for compatibility:
 
 | Metric family | Description |
 |---|---|
-| `go_memstats_*`, `go_goroutines`, `go_gc_cycles_total` | Go runtime health |
-| `process_resident_memory_bytes`, `process_open_fds` | process resource usage |
-| `process_cpu_usage_ratio` | CPU pressure split by `mode` |
-| `process_memory_*` | total, free, available, usage ratio |
-| `process_disk_*_bytes_total` | disk I/O counters |
-| `process_network_*_bytes_total` | network I/O counters |
-| `process_pressure_*` | Linux PSI gauges when available |
+| `loki_vl_proxy_go_*` (`go_*` compatibility aliases) | Go runtime health |
+| `loki_vl_proxy_process_resident_memory_bytes`, `loki_vl_proxy_process_open_fds` (`process_*` compatibility aliases) | process resource usage |
+| `loki_vl_proxy_process_cpu_usage_ratio` (`process_cpu_usage_ratio` alias) | CPU pressure split by `mode` |
+| `loki_vl_proxy_process_memory_*` (`process_memory_*` aliases) | total, free, available, usage ratio |
+| `loki_vl_proxy_process_disk_*_bytes_total` (`process_disk_*_bytes_total` aliases) | disk I/O counters |
+| `loki_vl_proxy_process_network_*_bytes_total` (`process_network_*_bytes_total` aliases) | network I/O counters |
+| `loki_vl_proxy_process_pressure_*` (`process_pressure_*` aliases) | Linux PSI gauges when available |
 
 Kubernetes notes:
 - These runtime/system metrics are read from `/proc` and do not require Kubernetes RBAC permissions.

@@ -125,10 +125,18 @@ func TestOTLPPusher_SendsMetrics(t *testing.T) {
 		"loki_vl_proxy_cache_hits_total",
 		"loki_vl_proxy_uptime_seconds",
 		"go_goroutines",
+		"loki_vl_proxy_go_goroutines",
 	} {
 		if !names[required] {
 			t.Fatalf("expected OTLP payload to include %s; names=%v", required, names)
 		}
+	}
+	if runtime.GOOS == "linux" {
+		if !names["loki_vl_proxy_process_disk_read_bytes_total"] {
+			t.Fatalf("expected OTLP payload to include linux process metric alias; names=%v", names)
+		}
+	} else if !names["loki_vl_proxy_process_resident_memory_bytes"] {
+		t.Fatalf("expected OTLP payload to include non-linux process metric alias; names=%v", names)
 	}
 }
 

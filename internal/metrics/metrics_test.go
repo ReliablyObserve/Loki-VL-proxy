@@ -71,6 +71,12 @@ func TestMetrics_Handler_Output(t *testing.T) {
 	if !strings.Contains(body, "loki_vl_proxy_uptime_seconds") {
 		t.Error("missing uptime metric")
 	}
+	if !strings.Contains(body, "loki_vl_proxy_go_goroutines") {
+		t.Error("missing prefixed go runtime metric")
+	}
+	if !strings.Contains(body, "loki_vl_proxy_process_resident_memory_bytes") {
+		t.Error("missing prefixed process metric")
+	}
 }
 
 func TestMetrics_Handler_EmptyState(t *testing.T) {

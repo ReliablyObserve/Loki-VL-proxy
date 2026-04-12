@@ -214,11 +214,17 @@ func (p *OTLPPusher) buildPayload() map[string]interface{} {
 	runtime.ReadMemStats(&memStats)
 	metrics = append(metrics,
 		p.gaugeMetric("go_memstats_alloc_bytes", "Current heap allocation in bytes.", "By", p.gaugeDP("go_memstats_alloc_bytes", float64(memStats.Alloc), now)),
+		p.gaugeMetric("loki_vl_proxy_go_memstats_alloc_bytes", "Current heap allocation in bytes.", "By", p.gaugeDP("loki_vl_proxy_go_memstats_alloc_bytes", float64(memStats.Alloc), now)),
 		p.gaugeMetric("go_memstats_sys_bytes", "Total memory from OS in bytes.", "By", p.gaugeDP("go_memstats_sys_bytes", float64(memStats.Sys), now)),
+		p.gaugeMetric("loki_vl_proxy_go_memstats_sys_bytes", "Total memory from OS in bytes.", "By", p.gaugeDP("loki_vl_proxy_go_memstats_sys_bytes", float64(memStats.Sys), now)),
 		p.gaugeMetric("go_memstats_heap_inuse_bytes", "Heap in-use bytes.", "By", p.gaugeDP("go_memstats_heap_inuse_bytes", float64(memStats.HeapInuse), now)),
+		p.gaugeMetric("loki_vl_proxy_go_memstats_heap_inuse_bytes", "Heap in-use bytes.", "By", p.gaugeDP("loki_vl_proxy_go_memstats_heap_inuse_bytes", float64(memStats.HeapInuse), now)),
 		p.gaugeMetric("go_memstats_heap_idle_bytes", "Heap idle bytes.", "By", p.gaugeDP("go_memstats_heap_idle_bytes", float64(memStats.HeapIdle), now)),
+		p.gaugeMetric("loki_vl_proxy_go_memstats_heap_idle_bytes", "Heap idle bytes.", "By", p.gaugeDP("loki_vl_proxy_go_memstats_heap_idle_bytes", float64(memStats.HeapIdle), now)),
 		p.gaugeMetric("go_goroutines", "Current number of goroutines.", "{goroutine}", p.gaugeDP("go_goroutines", float64(runtime.NumGoroutine()), now)),
+		p.gaugeMetric("loki_vl_proxy_go_goroutines", "Current number of goroutines.", "{goroutine}", p.gaugeDP("loki_vl_proxy_go_goroutines", float64(runtime.NumGoroutine()), now)),
 		p.sumMetric("go_gc_cycles_total", "Total GC cycles completed.", "", p.counterDP("go_gc_cycles_total", int64(memStats.NumGC), now)),
+		p.sumMetric("loki_vl_proxy_go_gc_cycles_total", "Total GC cycles completed.", "", p.counterDP("loki_vl_proxy_go_gc_cycles_total", int64(memStats.NumGC), now)),
 	)
 
 	if circuitBreakerMetric := p.circuitBreakerMetric(now); circuitBreakerMetric != nil {
@@ -638,7 +644,10 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 	if runtime.GOOS != "linux" {
 		var mem runtime.MemStats
 		runtime.ReadMemStats(&mem)
-		metrics = append(metrics, p.gaugeMetric("process_resident_memory_bytes", "Resident memory size.", "By", p.gaugeDP("process_resident_memory_bytes", float64(mem.Sys), now)))
+		metrics = append(metrics,
+			p.gaugeMetric("process_resident_memory_bytes", "Resident memory size.", "By", p.gaugeDP("process_resident_memory_bytes", float64(mem.Sys), now)),
+			p.gaugeMetric("loki_vl_proxy_process_resident_memory_bytes", "Resident memory size.", "By", p.gaugeDP("loki_vl_proxy_process_resident_memory_bytes", float64(mem.Sys), now)),
+		)
 		return metrics
 	}
 	readBytes, writeBytes := readDiskIO()
@@ -647,19 +656,30 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 	if memTotal > 0 {
 		metrics = append(metrics,
 			p.gaugeMetric("process_memory_total_bytes", "Total memory.", "By", p.gaugeDP("process_memory_total_bytes", float64(memTotal), now)),
+			p.gaugeMetric("loki_vl_proxy_process_memory_total_bytes", "Total memory.", "By", p.gaugeDP("loki_vl_proxy_process_memory_total_bytes", float64(memTotal), now)),
 			p.gaugeMetric("process_memory_available_bytes", "Available memory.", "By", p.gaugeDP("process_memory_available_bytes", float64(memAvail), now)),
+			p.gaugeMetric("loki_vl_proxy_process_memory_available_bytes", "Available memory.", "By", p.gaugeDP("loki_vl_proxy_process_memory_available_bytes", float64(memAvail), now)),
 			p.gaugeMetric("process_memory_free_bytes", "Free memory.", "By", p.gaugeDP("process_memory_free_bytes", float64(memFree), now)),
+			p.gaugeMetric("loki_vl_proxy_process_memory_free_bytes", "Free memory.", "By", p.gaugeDP("loki_vl_proxy_process_memory_free_bytes", float64(memFree), now)),
 			p.gaugeMetric("process_memory_usage_ratio", "Memory usage ratio (0-1).", "1", p.gaugeDP("process_memory_usage_ratio", float64(memTotal-memAvail)/float64(memTotal), now)),
+			p.gaugeMetric("loki_vl_proxy_process_memory_usage_ratio", "Memory usage ratio (0-1).", "1", p.gaugeDP("loki_vl_proxy_process_memory_usage_ratio", float64(memTotal-memAvail)/float64(memTotal), now)),
 		)
 	}
 	if rss := readProcessRSS(); rss > 0 {
-		metrics = append(metrics, p.gaugeMetric("process_resident_memory_bytes", "Process RSS.", "By", p.gaugeDP("process_resident_memory_bytes", float64(rss), now)))
+		metrics = append(metrics,
+			p.gaugeMetric("process_resident_memory_bytes", "Process RSS.", "By", p.gaugeDP("process_resident_memory_bytes", float64(rss), now)),
+			p.gaugeMetric("loki_vl_proxy_process_resident_memory_bytes", "Process RSS.", "By", p.gaugeDP("loki_vl_proxy_process_resident_memory_bytes", float64(rss), now)),
+		)
 	}
 	metrics = append(metrics,
 		p.sumMetric("process_disk_read_bytes_total", "Disk read bytes.", "By", p.counterDP("process_disk_read_bytes_total", readBytes, now)),
+		p.sumMetric("loki_vl_proxy_process_disk_read_bytes_total", "Disk read bytes.", "By", p.counterDP("loki_vl_proxy_process_disk_read_bytes_total", readBytes, now)),
 		p.sumMetric("process_disk_written_bytes_total", "Disk written bytes.", "By", p.counterDP("process_disk_written_bytes_total", writeBytes, now)),
+		p.sumMetric("loki_vl_proxy_process_disk_written_bytes_total", "Disk written bytes.", "By", p.counterDP("loki_vl_proxy_process_disk_written_bytes_total", writeBytes, now)),
 		p.sumMetric("process_network_receive_bytes_total", "Network receive bytes.", "By", p.counterDP("process_network_receive_bytes_total", rxBytes, now)),
+		p.sumMetric("loki_vl_proxy_process_network_receive_bytes_total", "Network receive bytes.", "By", p.counterDP("loki_vl_proxy_process_network_receive_bytes_total", rxBytes, now)),
 		p.sumMetric("process_network_transmit_bytes_total", "Network transmit bytes.", "By", p.counterDP("process_network_transmit_bytes_total", txBytes, now)),
+		p.sumMetric("loki_vl_proxy_process_network_transmit_bytes_total", "Network transmit bytes.", "By", p.counterDP("loki_vl_proxy_process_network_transmit_bytes_total", txBytes, now)),
 	)
 	if cur, err := readCPUStat(); err == nil {
 		total := cur.user + cur.nice + cur.system + cur.idle + cur.iowait + cur.irq + cur.softirq + cur.steal
@@ -668,6 +688,11 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 				p.gaugeDP("process_cpu_usage_ratio", (cur.user+cur.nice)/total, now, attr("mode", "user")),
 				p.gaugeDP("process_cpu_usage_ratio", cur.system/total, now, attr("mode", "system")),
 				p.gaugeDP("process_cpu_usage_ratio", cur.iowait/total, now, attr("mode", "iowait")),
+			))
+			metrics = append(metrics, p.gaugeMetric("loki_vl_proxy_process_cpu_usage_ratio", "CPU usage ratio (0-1).", "1",
+				p.gaugeDP("loki_vl_proxy_process_cpu_usage_ratio", (cur.user+cur.nice)/total, now, attr("mode", "user")),
+				p.gaugeDP("loki_vl_proxy_process_cpu_usage_ratio", cur.system/total, now, attr("mode", "system")),
+				p.gaugeDP("loki_vl_proxy_process_cpu_usage_ratio", cur.iowait/total, now, attr("mode", "iowait")),
 			))
 		}
 	}
@@ -679,6 +704,11 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 				p.gaugeDP("", some60/100, now, attr("window", "60s")),
 				p.gaugeDP("", some300/100, now, attr("window", "300s")),
 			))
+			metrics = append(metrics, p.gaugeMetric("loki_vl_proxy_process_pressure_"+resource+"_some_ratio", "PSI some pressure.", "1",
+				p.gaugeDP("", some10/100, now, attr("window", "10s")),
+				p.gaugeDP("", some60/100, now, attr("window", "60s")),
+				p.gaugeDP("", some300/100, now, attr("window", "300s")),
+			))
 		}
 		if full10 >= 0 {
 			metrics = append(metrics, p.gaugeMetric("process_pressure_"+resource+"_full_ratio", "PSI full pressure.", "1",
@@ -686,10 +716,18 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 				p.gaugeDP("", full60/100, now, attr("window", "60s")),
 				p.gaugeDP("", full300/100, now, attr("window", "300s")),
 			))
+			metrics = append(metrics, p.gaugeMetric("loki_vl_proxy_process_pressure_"+resource+"_full_ratio", "PSI full pressure.", "1",
+				p.gaugeDP("", full10/100, now, attr("window", "10s")),
+				p.gaugeDP("", full60/100, now, attr("window", "60s")),
+				p.gaugeDP("", full300/100, now, attr("window", "300s")),
+			))
 		}
 	}
 	if fds := countOpenFDs(); fds >= 0 {
-		metrics = append(metrics, p.gaugeMetric("process_open_fds", "Open file descriptors.", "{file}", p.gaugeDP("process_open_fds", float64(fds), now)))
+		metrics = append(metrics,
+			p.gaugeMetric("process_open_fds", "Open file descriptors.", "{file}", p.gaugeDP("process_open_fds", float64(fds), now)),
+			p.gaugeMetric("loki_vl_proxy_process_open_fds", "Open file descriptors.", "{file}", p.gaugeDP("loki_vl_proxy_process_open_fds", float64(fds), now)),
+		)
 	}
 	return metrics
 }
