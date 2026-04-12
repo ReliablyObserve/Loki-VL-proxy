@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.37] - 2026-04-12
+
 ### Reliability
 
 - harden long-range query execution by adding `query_range` fallback from window-split execution to direct backend query path on transient upstream failures
