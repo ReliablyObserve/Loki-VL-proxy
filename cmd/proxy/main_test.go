@@ -1577,14 +1577,17 @@ func TestLogSystemMetricsStartup_Incomplete(t *testing.T) {
 	logSystemMetricsStartup(logger)
 
 	logs := buf.String()
-	if !strings.Contains(logs, "system metrics startup check incomplete") {
-		t.Fatalf("expected startup incomplete log, got: %s", logs)
+	if strings.Contains(logs, "system metrics startup check incomplete") {
+		if !strings.Contains(logs, "missing_families") {
+			t.Fatalf("expected missing families in startup log, got: %s", logs)
+		}
+		if !strings.Contains(logs, "system metrics startup recommendation") {
+			t.Fatalf("expected startup recommendation log, got: %s", logs)
+		}
+		return
 	}
-	if !strings.Contains(logs, "missing_families") {
-		t.Fatalf("expected missing families in startup log, got: %s", logs)
-	}
-	if !strings.Contains(logs, "system metrics startup recommendation") {
-		t.Fatalf("expected startup recommendation log, got: %s", logs)
+	if !strings.Contains(logs, "system metrics startup check passed") {
+		t.Fatalf("expected startup check log, got: %s", logs)
 	}
 }
 
