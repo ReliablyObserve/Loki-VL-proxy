@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Reliability
+
+- harden long-range query execution by adding `query_range` fallback from window-split execution to direct backend query path on transient upstream failures
+
+### Performance
+
+- reduce proxy disk write amplification by skipping L2 disk-cache writes for short-lived entries and avoiding unchanged periodic label-index snapshot rewrites
+
+### Observability
+
+- keep `loki_vl_proxy_*` runtime/process metric families consistently queryable across scrape and OTLP flows for dashboard compatibility
+
 ## [0.27.36] - 2026-04-12
 
 ### Reliability
