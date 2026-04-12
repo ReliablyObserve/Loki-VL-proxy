@@ -548,8 +548,16 @@ func TestOTLPPusher_SystemMetrics_EmitsZeroWhenProcDataMissing(t *testing.T) {
 	}
 
 	prev := ProcRoot()
+	prevSelfRoot := selfProcRoot
+	prevCgroupRoot := cgroupRoot
 	SetProcRoot(root)
-	t.Cleanup(func() { SetProcRoot(prev) })
+	selfProcRoot = root
+	cgroupRoot = filepath.Join(root, "sys", "fs", "cgroup")
+	t.Cleanup(func() {
+		SetProcRoot(prev)
+		selfProcRoot = prevSelfRoot
+		cgroupRoot = prevCgroupRoot
+	})
 
 	pusher := NewOTLPPusher(OTLPConfig{Endpoint: "http://unused"}, NewMetrics())
 	metrics := pusher.systemMetrics(time.Now().UnixNano())

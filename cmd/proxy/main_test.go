@@ -1550,8 +1550,8 @@ func TestLogSystemMetricsStartup_Passed(t *testing.T) {
 	if strings.Contains(logs, "system metrics startup check incomplete") {
 		t.Fatalf("did not expect startup incomplete log, got: %s", logs)
 	}
-	if !strings.Contains(logs, "system metrics startup recommendation") {
-		t.Fatalf("expected startup recommendation log for non-host proc scope, got: %s", logs)
+	if strings.Contains(logs, "system metrics startup recommendation") {
+		t.Fatalf("did not expect startup recommendation log on complete startup check, got: %s", logs)
 	}
 }
 
@@ -1561,7 +1561,6 @@ func TestLogSystemMetricsStartup_Incomplete(t *testing.T) {
 	}
 
 	root := withSyntheticProcRoot(t, map[string]string{
-		"stat":            "cpu  100 5 20 300 7 0 1 2\n",
 		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
