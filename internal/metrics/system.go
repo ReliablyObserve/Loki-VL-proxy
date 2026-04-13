@@ -323,7 +323,7 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 	fmt.Fprintf(sb, "loki_vl_proxy_process_resident_memory_bytes %d\n", rss)
 
 	// Disk IO from /proc/self/io
-	readBytes, writeBytes := readDiskIO()
+	readBytes, writeBytes, readOps, writeOps := readDiskIO()
 	sb.WriteString("# HELP process_disk_read_bytes_total Disk read bytes.\n")
 	sb.WriteString("# TYPE process_disk_read_bytes_total counter\n")
 	sb.WriteString("# HELP loki_vl_proxy_process_disk_read_bytes_total Disk read bytes.\n")
@@ -336,6 +336,12 @@ func (sm *SystemMetrics) WritePrometheus(sb *strings.Builder) {
 	sb.WriteString("# TYPE loki_vl_proxy_process_disk_written_bytes_total counter\n")
 	fmt.Fprintf(sb, "process_disk_written_bytes_total %d\n", writeBytes)
 	fmt.Fprintf(sb, "loki_vl_proxy_process_disk_written_bytes_total %d\n", writeBytes)
+	sb.WriteString("# HELP loki_vl_proxy_process_disk_read_operations_total Disk read operations.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_disk_read_operations_total counter\n")
+	fmt.Fprintf(sb, "loki_vl_proxy_process_disk_read_operations_total %d\n", readOps)
+	sb.WriteString("# HELP loki_vl_proxy_process_disk_write_operations_total Disk write operations.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_process_disk_write_operations_total counter\n")
+	fmt.Fprintf(sb, "loki_vl_proxy_process_disk_write_operations_total %d\n", writeOps)
 
 	// Network IO from /proc/net/dev in the process network namespace.
 	rxBytes, txBytes := readNetIO()
@@ -477,10 +483,10 @@ func parseProcessRSSData(data string) int64 {
 	return 0
 }
 
-func readDiskIO() (readBytes, writeBytes int64) {
+func readDiskIO() (readBytes, writeBytes, readOps, writeOps int64) {
 	data, err := procReadFile(selfProcPath("self", "io"))
 	if err != nil {
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 	return parseProcessIOData(string(data))
 }
@@ -499,7 +505,7 @@ func parseDiskIOData(data string) (readBytes, writeBytes int64) {
 	return
 }
 
-func parseProcessIOData(data string) (readBytes, writeBytes int64) {
+func parseProcessIOData(data string) (readBytes, writeBytes, readOps, writeOps int64) {
 	for _, line := range strings.Split(data, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
@@ -510,6 +516,10 @@ func parseProcessIOData(data string) (readBytes, writeBytes int64) {
 			continue
 		}
 		switch strings.TrimSuffix(fields[0], ":") {
+		case "syscr":
+			readOps = val
+		case "syscw":
+			writeOps = val
 		case "read_bytes":
 			readBytes = val
 		case "write_bytes":

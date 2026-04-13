@@ -118,7 +118,7 @@ func TestInspectSystemStartup_WithSyntheticHostProc(t *testing.T) {
 		"meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
 		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"self/stat":       "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 50 25 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"self/io":         "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"self/io":         "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
@@ -144,7 +144,7 @@ func TestInspectSystemStartup_ReportsMissingFamilies(t *testing.T) {
 		"stat":            "cpu  100 5 20 300 7 0 1 2\n",
 		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"self/stat":       "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 50 25 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"self/io":         "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"self/io":         "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
@@ -176,7 +176,7 @@ func TestInspectSystemStartup_HostScope_NoHostMountRecommendation(t *testing.T) 
 		"host/proc/meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
 		"host/proc/self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"host/proc/self/stat":       "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 50 25 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"host/proc/self/io":         "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"host/proc/self/io":         "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"host/proc/diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"host/proc/net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"host/proc/pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
@@ -206,7 +206,7 @@ func TestInspectSystemStartup_ReportsPSIParseFailure(t *testing.T) {
 		"meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
 		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"self/stat":       "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 50 25 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"self/io":         "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"self/io":         "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"pressure/cpu":    "invalid",
@@ -365,9 +365,9 @@ func TestParseDiskIOData(t *testing.T) {
 }
 
 func TestParseProcessIOData(t *testing.T) {
-	readBytes, writeBytes := parseProcessIOData("rchar: 10\nwchar: 20\nread_bytes: 3072\nwrite_bytes: 5120\n")
-	if readBytes != 3072 || writeBytes != 5120 {
-		t.Fatalf("unexpected process io values: read=%d write=%d", readBytes, writeBytes)
+	readBytes, writeBytes, readOps, writeOps := parseProcessIOData("rchar: 10\nwchar: 20\nsyscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n")
+	if readBytes != 3072 || writeBytes != 5120 || readOps != 11 || writeOps != 13 {
+		t.Fatalf("unexpected process io values: read=%d write=%d read_ops=%d write_ops=%d", readBytes, writeBytes, readOps, writeOps)
 	}
 }
 
@@ -429,7 +429,7 @@ func TestProcReaders_UseSyntheticProcFS(t *testing.T) {
 		"meminfo":      "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
 		"self/status":  "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"self/stat":    "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 50 25 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"self/io":      "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"self/io":      "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"diskstats":    "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":      "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 11 0 0 0 0 0 0 0 22 0 0 0 0 0 0 0\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"pressure/cpu": "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
@@ -456,9 +456,9 @@ func TestProcReaders_UseSyntheticProcFS(t *testing.T) {
 		t.Fatalf("unexpected rss value: %d", rss)
 	}
 
-	readBytes, writeBytes := readDiskIO()
-	if readBytes != 3072 || writeBytes != 5120 {
-		t.Fatalf("unexpected disk io values: read=%d write=%d", readBytes, writeBytes)
+	readBytes, writeBytes, readOps, writeOps := readDiskIO()
+	if readBytes != 3072 || writeBytes != 5120 || readOps != 11 || writeOps != 13 {
+		t.Fatalf("unexpected disk io values: read=%d write=%d read_ops=%d write_ops=%d", readBytes, writeBytes, readOps, writeOps)
 	}
 
 	rxBytes, txBytes := readNetIO()
@@ -482,7 +482,7 @@ func TestSystemMetrics_WritePrometheus_UsesSyntheticLinuxProcFS(t *testing.T) {
 		"meminfo":         "MemTotal: 1024 kB\nMemAvailable: 512 kB\nMemFree: 128 kB\n",
 		"self/status":     "Name:\tproxy\nVmRSS:\t123 kB\n",
 		"self/stat":       "12345 (loki-vl-proxy) R 1 1 1 0 -1 4194560 100 0 0 0 55 30 0 0 20 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-		"self/io":         "read_bytes: 3072\nwrite_bytes: 5120\n",
+		"self/io":         "syscr: 11\nsyscw: 13\nread_bytes: 3072\nwrite_bytes: 5120\n",
 		"diskstats":       "   8       0 sda 1 2 6 4 5 6 10 8 0 0 0 0\n",
 		"net/dev":         "Inter-|   Receive                                                |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n  eth0: 101 1 0 0 0 0 0 0 202 2 0 0 0 0 0 0\n",
 		"pressure/cpu":    "some avg10=1.00 avg60=2.00 avg300=3.00 total=10\nfull avg10=4.00 avg60=5.00 avg300=6.00 total=20\n",
@@ -511,6 +511,8 @@ func TestSystemMetrics_WritePrometheus_UsesSyntheticLinuxProcFS(t *testing.T) {
 		"process_pressure_memory_full_ratio",
 		"process_open_fds",
 		"process_resident_memory_bytes",
+		"loki_vl_proxy_process_disk_read_operations_total",
+		"loki_vl_proxy_process_disk_write_operations_total",
 	} {
 		if !strings.Contains(output, metric) {
 			t.Fatalf("missing %q in output:\n%s", metric, output)
@@ -558,8 +560,8 @@ func TestProcReaders_DoNotReturnNegativeValues(t *testing.T) {
 	if rss := readProcessRSS(); rss < 0 {
 		t.Fatalf("unexpected negative rss: %d", rss)
 	}
-	if readBytes, writeBytes := readDiskIO(); readBytes < 0 || writeBytes < 0 {
-		t.Fatalf("unexpected negative disk io: read=%d write=%d", readBytes, writeBytes)
+	if readBytes, writeBytes, readOps, writeOps := readDiskIO(); readBytes < 0 || writeBytes < 0 || readOps < 0 || writeOps < 0 {
+		t.Fatalf("unexpected negative disk io: read=%d write=%d read_ops=%d write_ops=%d", readBytes, writeBytes, readOps, writeOps)
 	}
 	if rxBytes, txBytes := readNetIO(); rxBytes < 0 || txBytes < 0 {
 		t.Fatalf("unexpected negative net io: rx=%d tx=%d", rxBytes, txBytes)
