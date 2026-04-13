@@ -1292,6 +1292,19 @@ func compatCacheResponseAllowed(rec *httptest.ResponseRecorder) bool {
 	return contentType == "" || strings.Contains(contentType, "application/json")
 }
 
+func patternsPayloadEmpty(body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+	var resp struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false
+	}
+	return len(resp.Data) == 0
+}
+
 func (p *Proxy) compatCacheMiddleware(endpoint, route string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -1336,6 +1349,9 @@ func (p *Proxy) compatCacheMiddleware(endpoint, route string, next http.HandlerF
 		}
 		_, _ = w.Write(body)
 		if compatCacheResponseAllowed(rec) {
+			if endpoint == "patterns" && patternsPayloadEmpty(body) {
+				return
+			}
 			p.compatCache.SetWithTTL(cacheKey, append([]byte(nil), body...), ttl)
 		}
 	}
