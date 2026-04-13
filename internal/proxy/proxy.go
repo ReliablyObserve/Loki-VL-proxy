@@ -219,6 +219,8 @@ type Config struct {
 	QueryRangeFreshness             time.Duration
 	QueryRangeRecentCacheTTL        time.Duration
 	QueryRangeHistoryCacheTTL       time.Duration
+	QueryRangePrefilterIndexStats   bool
+	QueryRangePrefilterMinWindows   int
 
 	// Label translation
 	LabelStyle        LabelStyle        // how to translate VL field names to Loki labels
@@ -366,6 +368,8 @@ type Proxy struct {
 	queryRangeFreshness             time.Duration
 	queryRangeRecentCacheTTL        time.Duration
 	queryRangeHistoryCacheTTL       time.Duration
+	queryRangePrefilterIndexStats   bool
+	queryRangePrefilterMinWindows   int
 	labelRefreshGroup               singleflight.Group
 	labelValuesIndexedCache         bool
 	labelValuesHotLimit             int
@@ -574,6 +578,10 @@ func New(cfg Config) (*Proxy, error) {
 	if queryRangeHistoryCacheTTL < 0 {
 		queryRangeHistoryCacheTTL = 0
 	}
+	queryRangePrefilterMinWindows := cfg.QueryRangePrefilterMinWindows
+	if queryRangePrefilterMinWindows <= 0 {
+		queryRangePrefilterMinWindows = 8
+	}
 	tailMode := cfg.TailMode
 	if tailMode == "" {
 		tailMode = TailModeAuto
@@ -667,6 +675,8 @@ func New(cfg Config) (*Proxy, error) {
 		queryRangeFreshness:             queryRangeFreshness,
 		queryRangeRecentCacheTTL:        queryRangeRecentCacheTTL,
 		queryRangeHistoryCacheTTL:       queryRangeHistoryCacheTTL,
+		queryRangePrefilterIndexStats:   cfg.QueryRangePrefilterIndexStats,
+		queryRangePrefilterMinWindows:   queryRangePrefilterMinWindows,
 		labelValuesIndexedCache:         cfg.LabelValuesIndexedCache,
 		labelValuesHotLimit:             labelValuesHotLimit,
 		labelValuesIndexMaxEntries:      labelValuesIndexMaxEntries,
@@ -2455,6 +2465,10 @@ func (p *Proxy) refreshDetectedFieldValuesCacheAsync(orgID, cacheKey, fieldName,
 			)
 			if nativeField, ok, resolveErr := p.resolveNativeDetectedField(ctx, query, start, end, fieldName); resolveErr == nil && ok {
 				values, errVals = p.fetchNativeFieldValues(ctx, query, start, end, nativeField, lineLimit)
+				if errVals == nil && len(values) == 0 {
+					// Keep Drilldown UX non-empty for synthetic/derived labels when native values are empty.
+					values = nil
+				}
 			}
 			if values == nil && errVals == nil {
 				_, fieldValues, detectErr := p.detectFields(ctx, query, start, end, lineLimit)
@@ -2466,8 +2480,14 @@ func (p *Proxy) refreshDetectedFieldValuesCacheAsync(orgID, cacheKey, fieldName,
 					values = fieldValues["detected_level"]
 				}
 			}
+			if len(values) == 0 {
+				values = p.detectedLabelValuesForField(ctx, fieldName, query, start, end, lineLimit)
+			}
 			if errVals != nil {
 				return nil, errVals
+			}
+			if values == nil {
+				values = []string{}
 			}
 
 			payload := map[string]interface{}{
@@ -3108,16 +3128,18 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 
 	if nativeField, ok, err := p.resolveNativeDetectedField(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), fieldName); err == nil && ok {
 		if values, valuesErr := p.fetchNativeFieldValues(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), nativeField, lineLimit); valuesErr == nil {
-			payload := map[string]interface{}{
-				"status": "success",
-				"data":   values,
-				"values": values,
-				"limit":  lineLimit,
+			if len(values) > 0 {
+				payload := map[string]interface{}{
+					"status": "success",
+					"data":   values,
+					"values": values,
+					"limit":  lineLimit,
+				}
+				p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+				p.writeJSON(w, payload)
+				p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
+				return
 			}
-			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
-			p.writeJSON(w, payload)
-			p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
-			return
 		}
 	}
 
@@ -3138,6 +3160,12 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	if values == nil && fieldName == "level" {
 		values = fieldValues["detected_level"]
 	}
+	if len(values) == 0 {
+		values = p.detectedLabelValuesForField(r.Context(), fieldName, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
+	}
+	if values == nil {
+		values = []string{}
+	}
 
 	payload := map[string]interface{}{
 		"status": "success",
@@ -3148,6 +3176,26 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
 	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
+}
+
+func (p *Proxy) detectedLabelValuesForField(ctx context.Context, fieldName, query, start, end string, lineLimit int) []string {
+	_, summaries, err := p.detectLabels(ctx, query, start, end, lineLimit)
+	if err != nil || summaries == nil {
+		return nil
+	}
+	summary := summaries[fieldName]
+	if summary == nil {
+		return nil
+	}
+	values := make([]string, 0, len(summary.values))
+	for value := range summary.values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
 }
 
 // handlePatterns returns log patterns for Grafana Logs Drilldown.
@@ -4246,10 +4294,29 @@ func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*ht
 
 // vlGetCoalesced wraps vlGet with request coalescing.
 func (p *Proxy) vlGetCoalesced(ctx context.Context, key, path string, params url.Values) ([]byte, error) {
-	_, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
+	status, body, err := p.vlGetCoalescedWithStatus(ctx, key, path, params)
+	if err != nil {
+		return nil, err
+	}
+	if status >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", status)
+		}
+		return nil, errors.New(msg)
+	}
+	return body, nil
+}
+
+// vlGetCoalescedWithStatus wraps vlGet with request coalescing and returns status + body.
+func (p *Proxy) vlGetCoalescedWithStatus(ctx context.Context, key, path string, params url.Values) (int, []byte, error) {
+	status, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
 		return p.vlGet(ctx, path, params)
 	})
-	return body, err
+	if err != nil {
+		return 0, nil, err
+	}
+	return status, body, nil
 }
 
 // vlPostCoalesced wraps vlPost with request coalescing and returns status + body.
