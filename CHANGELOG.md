@@ -7,18 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Bug Fixes
+## [1.0.0] - 2026-04-13
 
-- harden Drilldown include/exclude translation for repeated same-field clicks by keeping the latest equality/regex filter per field and preventing impossible AND chains from accumulating
+### Highlights
+
+- official `1.0.0` stable release of Loki-VL-proxy as a production Loki API compatibility layer on top of VictoriaLogs
+- full compatibility-first delivery model with dedicated CI suites for Loki API, Logs Drilldown, and VictoriaLogs behavior
+- proven long-range query hardening for 2d/7d+ workloads with adaptive execution, retries, and partial-response safety paths
+
+### Features
+
+- Loki API coverage for query/query_range, labels, series, index endpoints, buildinfo, and readiness/metrics paths
+- Logs Drilldown support including detected labels/fields/values flows and include/exclude filter translation
+- native dot/underscore metadata compatibility modes for Loki-style and OTel/VL-style field conventions
+- chart-driven runtime controls for translation, structured metadata, caching, retry behavior, and query windowing
+
+### Performance
+
+- split-window query execution with adaptive parallelism and prefiltering to skip empty windows before fanout
+- stream-aware batching and overlap-aware coalescing to reduce repeated backend work across refresh/back-navigation traffic
+- disk + memory cache improvements, peer cache sharing, and write-amplification reductions for steadier runtime behavior
+
+### Reliability
+
+- bounded retries and degraded-batch fallback for transient backend pressure instead of immediate user-visible hard failures
+- direct fallback safeguards and adaptive timeout budgeting for expensive long-range query patterns
+- startup/runtime cache hardening with consistency protections for rolling updates and recovery scenarios
 
 ### Observability
 
-- use OTel semantic end-user fields in request logs by emitting `enduser.name` for trusted user-header flows while keeping `enduser.id` as stable identity and `enduser.source` as provenance
-- stop duplicating OTel resource attributes (`service.*`, `deployment.environment.name`, `telemetry.sdk.*`) in per-line JSON log payloads to prevent downstream `message.*` field explosion
+- OTel semantic logging alignment for HTTP, network, auth, and end-user context
+- standardized `loki_vl_proxy_*` KPI metrics for cache, query windowing, retries, degraded batches, and partial responses
+- dashboard and docs updates for zero/no-data hardening and stable scrape/OTLP visibility
+
+### Bug Fixes
+
+- harden Drilldown include/exclude behavior for repeated same-field clicks by keeping the latest field filter authoritative and preventing impossible accumulated chains
+- use OTel semantic end-user fields in request logs (`enduser.name`/`enduser.id`/`enduser.source`) for clearer identity provenance
+- stop duplicating OTel resource attributes (`service.*`, `deployment.environment.name`, `telemetry.sdk.*`) in per-line JSON payloads to prevent downstream `message.*` field explosion
 
 ### Documentation
 
-- add compose-backed Playwright screenshot workflow and publish updated local UI gallery assets for Explore and Logs Drilldown views
+- add compose-backed Playwright screenshot workflow and publish refreshed UI gallery assets for Explore, Tail, and Drilldown
+- refresh docs for compatibility profiles, cache behavior, and runtime tuning guidance
 
 ## [0.27.42] - 2026-04-13
 
