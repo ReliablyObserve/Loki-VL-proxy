@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -267,11 +269,13 @@ func formatDetectedLabelSummaries(summaries map[string]*detectedLabelSummary) []
 			"label":       summary.label,
 			"cardinality": len(summary.values),
 		})
-		delete(summaries, "service_name")
 	}
 
 	names := make([]string, 0, len(summaries))
 	for label := range summaries {
+		if label == "service_name" {
+			continue
+		}
 		names = append(names, label)
 	}
 	sort.Strings(names)
@@ -287,7 +291,12 @@ func formatDetectedLabelSummaries(summaries map[string]*detectedLabelSummary) []
 }
 
 func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string) ([]string, error) {
-	logsqlQuery, err := p.translateQuery(defaultQuery(query))
+	selectorQuery := streamSelectorPrefix(query)
+	if selectorQuery == "" {
+		selectorQuery = defaultFieldDetectionQuery(query)
+	}
+	detectionQuery := defaultQuery(selectorQuery)
+	logsqlQuery, err := p.translateQuery(detectionQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -303,11 +312,14 @@ func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string)
 
 	resp, err := p.vlGet(ctx, "/select/logsql/streams", params)
 	if err != nil {
-		return nil, err
+		return p.serviceNameValuesFromDetectedLabels(ctx, detectionQuery, start, end)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		return p.serviceNameValuesFromDetectedLabels(ctx, detectionQuery, start, end)
+	}
 	var vlResp struct {
 		Values []struct {
 			Value string `json:"value"`
@@ -328,6 +340,63 @@ func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string)
 		}
 		seen[serviceName] = struct{}{}
 		values = append(values, serviceName)
+	}
+	sort.Strings(values)
+	if len(values) == 0 {
+		return p.serviceNameValuesFromDetectedLabels(ctx, detectionQuery, start, end)
+	}
+	return values, nil
+}
+
+func streamSelectorPrefix(query string) string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return ""
+	}
+	inQuote := byte(0)
+	escape := false
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if inQuote != 0 {
+			if ch == '\\' && inQuote == '"' {
+				escape = true
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '`' {
+			inQuote = ch
+			continue
+		}
+		if ch == '|' {
+			return strings.TrimSpace(query[:i])
+		}
+	}
+	return query
+}
+
+func (p *Proxy) serviceNameValuesFromDetectedLabels(ctx context.Context, query, start, end string) ([]string, error) {
+	_, summaries, err := p.detectLabels(ctx, query, start, end, detectedFieldsSampleLimit)
+	if err != nil {
+		return nil, err
+	}
+	summary := summaries["service_name"]
+	if summary == nil {
+		return []string{}, nil
+	}
+	values := make([]string, 0, len(summary.values))
+	for value := range summary.values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		values = append(values, value)
 	}
 	sort.Strings(values)
 	return values, nil
@@ -856,6 +925,13 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, nil, fmt.Errorf("%s", msg)
+	}
 	fieldList, fieldValues := p.detectFieldsFromBody(body)
 	fieldList, fieldValues = mergeNativeDetectedFields(fieldList, fieldValues, nativeFields)
 	p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
@@ -1154,6 +1230,13 @@ func (p *Proxy) fetchNativeFieldValues(ctx context.Context, query, start, end, f
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 	var parsed vlFieldValuesResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, err
@@ -1204,6 +1287,13 @@ func (p *Proxy) detectNativeLabels(ctx context.Context, query, start, end string
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 	var parsed vlStreamsResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, err
@@ -1254,6 +1344,13 @@ func (p *Proxy) detectScannedLabels(ctx context.Context, query, start, end strin
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 	return scanDetectedLabelSummaries(body, p.labelTranslator), nil
 }
 

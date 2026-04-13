@@ -3188,7 +3188,6 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 			"fields": []interface{}{},
 			"limit":  lineLimit,
 		}
-		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
 		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
 		return
@@ -3268,7 +3267,6 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 			"values": []string{},
 			"limit":  lineLimit,
 		}
-		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
 		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 		return
@@ -3480,7 +3478,6 @@ func (p *Proxy) handleDetectedLabels(w http.ResponseWriter, r *http.Request) {
 			"detectedLabels": []interface{}{},
 			"limit":          lineLimit,
 		}
-		p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
 		p.writeJSON(w, payload)
 		p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
 		return
