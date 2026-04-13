@@ -3496,7 +3496,7 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
-	params.Set("query", logsqlQuery+" | sort by (_time desc)")
+	params.Set("query", logsqlQuery)
 	if s := r.FormValue("start"); s != "" {
 		params.Set("start", formatVLTimestamp(s))
 	}
@@ -3650,7 +3650,7 @@ func (p *Proxy) computeVolumeResult(ctx context.Context, query, start, end, targ
 	logsqlQuery, _ := p.translateQuery(query)
 
 	params := url.Values{}
-	params.Set("query", logsqlQuery+" | sort by (_time desc)")
+	params.Set("query", logsqlQuery)
 	if s := start; s != "" {
 		params.Set("start", formatVLTimestamp(s))
 	}
@@ -4043,7 +4043,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := url.Values{}
-	params.Set("query", logsqlQuery+" | sort by (_time desc)")
+	params.Set("query", logsqlQuery)
 	if s := startParam; s != "" {
 		params.Set("start", formatVLTimestamp(s))
 	}
