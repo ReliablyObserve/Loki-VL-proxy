@@ -257,10 +257,12 @@ func TestQueryRangeWindow_WarmQueryRangeWindowsAsync_PrimesCache(t *testing.T) {
 		fmt.Sprintf("/loki/api/v1/query_range?query=%s&start=%d&end=%d&limit=100", url.QueryEscape(`{app="nginx"}`), window.startNs, window.endNs),
 		nil,
 	)
+	if err := req.ParseForm(); err != nil {
+		t.Fatalf("parse form: %v", err)
+	}
+	cacheKey := p.queryRangeWindowCacheKey(req, `{app="nginx"}`, "100", window, false, false)
 
 	p.warmQueryRangeWindowsAsync(req, `{app="nginx"}`, "100", []queryRangeWindow{window}, false, false)
-
-	cacheKey := p.queryRangeWindowCacheKey(req, `{app="nginx"}`, "100", window, false, false)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if _, ok := p.cache.Get(cacheKey); ok {
