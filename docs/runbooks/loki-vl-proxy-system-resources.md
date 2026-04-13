@@ -1,4 +1,4 @@
-# LokiVLProxy System Resources
+# LokiVLProxy Operational Resources
 
 ## Alerts Covered
 
@@ -19,9 +19,9 @@
 1. Confirm proxy health:
    - `curl -fsS http://<proxy>:3100/ready`
 2. Confirm metrics endpoint includes system families:
-   - `curl -fsS http://<proxy>:3100/metrics | rg "process_memory_usage_ratio|process_cpu_usage_ratio|process_pressure_"`
+   - `curl -fsS http://<proxy>:3100/metrics | rg "loki_vl_proxy_process_memory_usage_ratio|loki_vl_proxy_process_cpu_usage_ratio|loki_vl_proxy_process_pressure_|loki_vl_proxy_process_disk_(read|write)_operations_total"`
 3. Inspect startup diagnostics in proxy logs for system-metrics check output.
-4. Check dashboard section `System Resources` for memory, PSI, disk, and network trends.
+4. Check dashboard section `Operational Resources` for memory, CPU, PSI, disk IOPS/throughput, and network trends.
 
 ## Kubernetes-Specific Checks
 
@@ -41,7 +41,7 @@
    - move to nodes with higher memory/IO capacity when sustained pressure persists
 3. Validate backend health:
    - correlate with VictoriaLogs latency and error metrics
-   - inspect backend disk/network saturation
+   - inspect backend disk/network saturation and compare with proxy-side disk/network direction graphs
 
 ## Recovery Criteria
 

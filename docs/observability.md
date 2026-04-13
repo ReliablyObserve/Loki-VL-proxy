@@ -8,7 +8,9 @@ Loki-VL-proxy emits the same core operational signals in two forms:
 | Metrics | Push | OTLP HTTP JSON to `/v1/metrics` | OpenTelemetry Collector, vendor OTLP gateways |
 | Logs | Stream | Structured JSON on stdout/stderr | Fluent Bit, Vector, OpenTelemetry Collector, Docker/Kubernetes log agents |
 
-The intent is parity, not two separate products. Prometheus scrape and OTLP push carry the same proxy-centric metrics with the same names, labels, and units for the important operational paths:
+The intent is parity, not two separate products. Prometheus scrape and OTLP push carry the same proxy-centric metric families, units, and low-cardinality request dimensions for the important operational paths. Prometheus uses label keys such as `system`, `direction`, `endpoint`, `route`, and `status`; OTLP exports the same dimensions as semantically aligned attributes such as `loki.api.system`, `proxy.direction`, `loki.request.type`, `http.route`, and `http.response.status_code`.
+
+That shared model is what makes the packaged dashboard portable across scrape-backed and OTLP-backed setups without rewriting the operator view:
 
 - request volume and latency
 - backend latency
@@ -48,16 +50,21 @@ Default logs are emitted as JSON and already use OTel-friendly top-level keys:
   },
   "body": "request",
   "component": "proxy",
-  "http.route": "query_range",
+  "http.route": "/loki/api/v1/query_range",
+  "url.path": "/loki/api/v1/query_range",
   "http.request.method": "GET",
   "http.response.status_code": 200,
-  "event.duration_ms": 42,
+  "loki.request.type": "query_range",
+  "loki.api.system": "loki",
+  "proxy.direction": "downstream",
+  "event.duration": 42000000,
   "loki.tenant.id": "team-a",
   "loki.query": "{service_name=\"api\"} |= \"error\"",
   "client.address": "10.0.0.12:51884",
   "enduser.id": "grafana-user@example.com",
   "enduser.source": "grafana_user",
   "cache.result": "miss",
+  "proxy.duration_ms": 42,
   "upstream.calls": 1,
   "upstream.status_code": 200,
   "upstream.duration_ms": 31,
@@ -89,13 +96,15 @@ The proxy writes structured logs for:
 | `severity.text` / `severity.number` | log severity |
 | `body` | message body |
 | `component` | internal subsystem (`proxy`, `disk_cache`, `cache_warmer`, `otlp_metrics`) |
-| `http.*` | request semantics |
+| `http.*` / `url.path` | request semantics and normalized route vs actual request path |
+| `event.duration` | request or upstream call duration in nanoseconds |
 | `client.address` | remote address |
 | `enduser.id` | stable trusted user/client identity when available |
 | `enduser.name` | display/login user name from trusted user headers when available |
 | `enduser.source` | trusted header source for end-user attribution (`grafana_user`, `forwarded_user`, etc.) |
 | `auth.*` | datasource/auth principal context (separate from `enduser.id`) |
 | `cache.result` | compatibility cache result (`hit`, `miss`, `bypass`) |
+| `proxy.*` | proxy-facing convenience fields such as total request duration and measured proxy overhead |
 | `upstream.*` | backend call count, status, and latency |
 | `loki.*` | Loki/proxy-specific attributes |
 
@@ -140,17 +149,31 @@ resource metadata to avoid `message.service.*` duplication in storage.
 | `-otel-service-instance-id` | `service.instance.id` |
 | `-deployment-environment` | `deployment.environment.name` |
 
+### Request Dimensions
+
+Request-oriented metrics use stable low-cardinality dimensions so dashboards can slice by user-visible API shape without leaking raw paths or query content.
+
+| Dimension | Prometheus scrape | OTLP push | Example |
+|---|---|---|---|
+| API system | `system` | `loki.api.system` | `loki`, `vl` |
+| Direction | `direction` | `proxy.direction` | `downstream`, `upstream` |
+| Request type | `endpoint` | `loki.request.type` | `query_range`, `labels`, `patterns` |
+| Route template | `route` | `http.route` | `/loki/api/v1/query_range`, `/select/logsql/query` |
+| Final status | `status` | `http.response.status_code` | `200`, `429`, `500` |
+
+Downstream routes are the normalized Loki API templates registered by the proxy. Upstream routes are the stable VictoriaLogs or rules/alerts backend path templates used by the proxy itself. Raw request paths and query strings stay in logs, not in metric labels.
+
 ### Core Proxy Metrics
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `loki_vl_proxy_requests_total` | counter | `endpoint`, `status` | all proxied requests |
-| `loki_vl_proxy_request_duration_seconds` | histogram | `endpoint` | end-to-end request latency |
-| `loki_vl_proxy_backend_duration_seconds` | histogram | `endpoint` | upstream VictoriaLogs latency only |
+| `loki_vl_proxy_requests_total` | counter | `system`, `direction`, `endpoint`, `route`, `status` | all proxied requests, sliced by downstream Loki path or upstream backend path |
+| `loki_vl_proxy_request_duration_seconds` | histogram | `system`, `direction`, `endpoint`, `route` | end-to-end request latency |
+| `loki_vl_proxy_backend_duration_seconds` | histogram | `system`, `direction`, `endpoint`, `route` | upstream backend latency only (`system="vl"`, `direction="upstream"`) |
 | `loki_vl_proxy_cache_hits_total` | counter | none | global cache hits |
 | `loki_vl_proxy_cache_misses_total` | counter | none | global cache misses |
-| `loki_vl_proxy_cache_hits_by_endpoint` | counter | `endpoint` | cache hits per endpoint |
-| `loki_vl_proxy_cache_misses_by_endpoint` | counter | `endpoint` | cache misses per endpoint |
+| `loki_vl_proxy_cache_hits_by_endpoint` | counter | `system`, `direction`, `endpoint`, `route` | cache hits per normalized route |
+| `loki_vl_proxy_cache_misses_by_endpoint` | counter | `system`, `direction`, `endpoint`, `route` | cache misses per normalized route |
 | `loki_vl_proxy_translations_total` | counter | none | successful LogQL to LogsQL translations |
 | `loki_vl_proxy_translation_errors_total` | counter | none | failed translations |
 | `loki_vl_proxy_coalesced_total` | counter | none | requests served from coalesced results |
@@ -195,15 +218,15 @@ These are the metrics to use when you want to identify the users or tenants actu
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `loki_vl_proxy_tenant_requests_total` | counter | `tenant`, `endpoint`, `status` | request volume by tenant |
-| `loki_vl_proxy_tenant_request_duration_seconds` | histogram | `tenant`, `endpoint` | latency by tenant |
-| `loki_vl_proxy_client_requests_total` | counter | `client`, `endpoint` | request volume by client identity |
+| `loki_vl_proxy_tenant_requests_total` | counter | `system`, `direction`, `tenant`, `endpoint`, `route`, `status` | request volume by tenant |
+| `loki_vl_proxy_tenant_request_duration_seconds` | histogram | `system`, `direction`, `tenant`, `endpoint`, `route` | latency by tenant |
+| `loki_vl_proxy_client_requests_total` | counter | `system`, `direction`, `client`, `endpoint`, `route` | request volume by client identity |
 | `loki_vl_proxy_client_response_bytes_total` | counter | `client` | response bytes by client |
-| `loki_vl_proxy_client_status_total` | counter | `client`, `endpoint`, `status` | final status breakdown by client |
+| `loki_vl_proxy_client_status_total` | counter | `system`, `direction`, `client`, `endpoint`, `route`, `status` | final status breakdown by client |
 | `loki_vl_proxy_client_inflight_requests` | gauge | `client` | current parallelism by client |
-| `loki_vl_proxy_client_request_duration_seconds` | histogram | `client`, `endpoint` | request latency by client |
-| `loki_vl_proxy_client_query_length_chars` | histogram | `client`, `endpoint` | query size outliers by client |
-| `loki_vl_proxy_client_errors_total` | counter | `endpoint`, `reason` | categorized 4xx-style client errors |
+| `loki_vl_proxy_client_request_duration_seconds` | histogram | `system`, `direction`, `client`, `endpoint`, `route` | request latency by client |
+| `loki_vl_proxy_client_query_length_chars` | histogram | `system`, `direction`, `client`, `endpoint`, `route` | query size outliers by client |
+| `loki_vl_proxy_client_errors_total` | counter | `system`, `direction`, `endpoint`, `route`, `reason` | categorized downstream client errors |
 
 ### Runtime and Process Metrics
 
@@ -217,6 +240,7 @@ App-scoped aliases are emitted with the `loki_vl_proxy_` prefix, while legacy `g
 | `loki_vl_proxy_process_cpu_usage_ratio` (`process_cpu_usage_ratio` alias) | CPU pressure split by `mode` |
 | `loki_vl_proxy_process_memory_*` (`process_memory_*` aliases) | total, free, available, usage ratio |
 | `loki_vl_proxy_process_disk_*_bytes_total` (`process_disk_*_bytes_total` aliases) | disk I/O counters |
+| `loki_vl_proxy_process_disk_*_operations_total` | disk read/write operation counters |
 | `loki_vl_proxy_process_network_*_bytes_total` (`process_network_*_bytes_total` aliases) | network I/O counters |
 | `loki_vl_proxy_process_pressure_*` (`process_pressure_*` aliases) | Linux PSI gauges when available |
 
@@ -226,29 +250,38 @@ Kubernetes notes:
 - On startup, the proxy logs a system-metrics readiness check with missing families and remediation hints instead of failing silently.
 - If you mount host `/proc` (`-proc-root=/host/proc`), these metrics will reflect host scope; keep default pod `/proc` for pod/container scope.
 - For per-pod attribution in OTLP backends, set `OTEL_SERVICE_INSTANCE_ID` from pod name and `OTEL_SERVICE_NAMESPACE` from pod namespace (the upstream chart now injects these by default).
+- CI includes a metric-name guard so new app metrics must stay under the `loki_vl_proxy_*` prefix unless explicitly allowlisted for compatibility.
 
 ### PromQL Drilldowns For Slowness And Client Errors
 
-Use these queries to quickly isolate backend slowness vs proxy/client-side failures:
+Use these queries to quickly isolate downstream client pain, upstream slowness, and route-specific cache efficiency:
 
 | Goal | Query |
 |---|---|
-| Backend p95 latency by endpoint | `histogram_quantile(0.95, sum(rate(loki_vl_proxy_backend_duration_seconds_bucket[5m])) by (le, endpoint))` |
-| Proxy p99 end-to-end latency by endpoint | `histogram_quantile(0.99, sum(rate(loki_vl_proxy_request_duration_seconds_bucket[5m])) by (le, endpoint))` |
-| Tenant p99 latency | `histogram_quantile(0.99, sum(rate(loki_vl_proxy_tenant_request_duration_seconds_bucket[5m])) by (le, tenant, endpoint))` |
-| 5xx rate by endpoint | `sum(rate(loki_vl_proxy_requests_total{status=~"5.."}[5m])) by (endpoint)` |
-| Client bad_request by client+endpoint | `sum(rate(loki_vl_proxy_client_errors_total{reason="bad_request"}[5m])) by (client, endpoint)` |
-| Client rate_limited by client+endpoint | `sum(rate(loki_vl_proxy_client_errors_total{reason="rate_limited"}[5m])) by (client, endpoint)` |
+| Downstream p95 latency by route | `histogram_quantile(0.95, sum(rate(loki_vl_proxy_request_duration_seconds_bucket{system="loki",direction="downstream"}[5m])) by (le, endpoint, route))` |
+| Upstream p95 latency by route | `histogram_quantile(0.95, sum(rate(loki_vl_proxy_backend_duration_seconds_bucket{system="vl",direction="upstream"}[5m])) by (le, endpoint, route))` |
+| Downstream 5xx rate by route | `sum(rate(loki_vl_proxy_requests_total{system="loki",direction="downstream",status=~"5.."}[5m])) by (endpoint, route)` |
+| Tenant p99 latency by route | `histogram_quantile(0.99, sum(rate(loki_vl_proxy_tenant_request_duration_seconds_bucket{system="loki",direction="downstream"}[5m])) by (le, tenant, endpoint, route))` |
+| Route cache hit ratio | `sum(rate(loki_vl_proxy_cache_hits_by_endpoint{system="loki",direction="downstream"}[5m])) by (endpoint, route) / clamp_min(sum(rate(loki_vl_proxy_cache_hits_by_endpoint{system="loki",direction="downstream"}[5m])) by (endpoint, route) + sum(rate(loki_vl_proxy_cache_misses_by_endpoint{system="loki",direction="downstream"}[5m])) by (endpoint, route), 1)` |
+| Client bad_request by route | `sum(rate(loki_vl_proxy_client_errors_total{system="loki",direction="downstream",reason="bad_request"}[5m])) by (endpoint, route)` |
 
-For latency histograms, keep dashboards on `p50`, `p95`, and `p99` rather than averages. Averages hide tail latency incidents.
+For latency histograms, keep dashboards on `p50`, `p95`, and `p99` rather than averages. Averages hide tail latency incidents. For exact proxy-only overhead, use structured logs (`proxy.overhead_ms`) alongside the latency histograms; subtracting histogram quantiles is not mathematically reliable.
 
-The packaged `Loki-VL-Proxy` dashboard also includes a `System Resources` section with:
+The packaged `Loki-VL-Proxy` dashboard includes an `Operational Resources` section with:
 
-- memory usage ratio
+- memory saturation and memory footprint/headroom
 - CPU usage split by mode
+- disk IOPS up/down and disk throughput up/down
+- network up/down
 - PSI pressure (cpu/memory/io)
-- disk and network throughput
-- process RSS and open file descriptors
+- process RSS and open file descriptors by pod
+
+The top of the dashboard is organized as a left-to-right operator flow:
+
+- `Main Overview - Client -> Proxy -> VictoriaLogs`
+- `Client Edge - Request Quality & Shape`
+- `Heavy Consumers - Client Load Drivers`
+- `Proxy -> VictoriaLogs Query Pipeline`
 
 It also includes a `Query-Range Windowing` section for cache/tuning signals:
 

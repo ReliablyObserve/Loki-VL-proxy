@@ -34,6 +34,7 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 
 - Loki-compatible read API for Grafana datasource, Explore, Drilldown, and API clients.
 - Strict tuple contracts: default 2-tuple, explicit 3-tuple only via `categorize-labels`.
+- Grafana Logs Drilldown patterns support through `/loki/api/v1/patterns`, with explicit `-patterns-enabled` control when deployments need it disabled.
 - Multi-tenant read fanout with tenant isolation guardrails.
 - Rules and alerts read compatibility from `vmalert`.
 
@@ -46,9 +47,11 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 
 ### Operations
 
-- Structured metrics and logs for cache, latency, fanout, tenant/client visibility.
+- Route-aware upstream/downstream metrics and semconv-aligned structured logs for client, proxy, and VictoriaLogs visibility.
+- Packaged operator dashboard covering `Client -> Proxy -> VictoriaLogs`, query-range resilience, cache behavior, and operational resources.
 - Helm-ready deployment model for production clusters.
 - Compatibility CI tracks for Loki, Logs Drilldown, and VictoriaLogs.
+- CI guardrails to keep new app metrics under the `loki_vl_proxy_*` prefix.
 - Runbook-backed alerting assets for operational response.
 
 Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Observability](docs/observability.md), [Testing](docs/testing.md)
@@ -202,6 +205,15 @@ helm install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
   --set extraArgs.backend=http://victorialogs:9428
 ```
 
+For Grafana Logs Drilldown pattern discovery, keep the default `patterns-enabled=true` or set it explicitly during rollout:
+
+```bash
+helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set extraArgs.patterns-enabled=true
+```
+
 For high-cardinality label-value browsing, tune indexed browse cache directly via chart flags:
 
 ```bash
@@ -332,7 +344,7 @@ See [Performance](docs/performance.md), [Fleet Cache](docs/fleet-cache.md), [Sca
 - [High Error Rate](docs/runbooks/loki-vl-proxy-high-error-rate.md)
 - [High Latency](docs/runbooks/loki-vl-proxy-high-latency.md)
 - [Rate Limiting](docs/runbooks/loki-vl-proxy-rate-limiting.md)
-- [System Resources](docs/runbooks/loki-vl-proxy-system-resources.md)
+- [Operational Resources](docs/runbooks/loki-vl-proxy-system-resources.md)
 - [Tenant High Error Rate](docs/runbooks/loki-vl-proxy-tenant-high-error-rate.md)
 
 ### Testing and Release
