@@ -358,6 +358,9 @@ func TestRun_DefaultEnablesStructuredMetadata(t *testing.T) {
 	if !captured.proxyCfg.patternsEnabled {
 		t.Fatal("expected -patterns-enabled to default to true")
 	}
+	if captured.proxyCfg.patternsAutodetectFromQueries {
+		t.Fatal("expected -patterns-autodetect-from-queries to default to false")
+	}
 	if captured.proxyCfg.patternsPersistPath != "" {
 		t.Fatalf("expected -patterns-persist-path to default empty, got %q", captured.proxyCfg.patternsPersistPath)
 	}
@@ -822,6 +825,7 @@ func TestBuildProxyConfig(t *testing.T) {
 		streamResponse:                  true,
 		emitStructuredMetadata:          true,
 		patternsEnabled:                 false,
+		patternsAutodetectFromQueries:   true,
 		queryRangeWindowing:             true,
 		queryRangeSplitInterval:         30 * time.Minute,
 		queryRangeMaxParallel:           4,
@@ -903,6 +907,9 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if got.PatternsEnabled == nil || *got.PatternsEnabled {
 		t.Fatalf("expected patterns endpoint to be disabled in built config")
+	}
+	if !got.PatternsAutodetectFromQueries {
+		t.Fatalf("expected patterns autodetect from queries to be enabled")
 	}
 	if !got.QueryRangeWindowingEnabled {
 		t.Fatalf("expected query range windowing to be enabled")

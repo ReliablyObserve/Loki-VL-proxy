@@ -66,6 +66,7 @@ type proxyRuntimeConfig struct {
 	streamResponse                     bool
 	emitStructuredMetadata             bool
 	patternsEnabled                    bool
+	patternsAutodetectFromQueries      bool
 	queryRangeWindowing                bool
 	queryRangeSplitInterval            time.Duration
 	queryRangeMaxParallel              int
@@ -330,6 +331,7 @@ func run(
 	streamResponse := fs.Bool("stream-response", false, "Stream log responses via chunked transfer encoding")
 	emitStructuredMetadata := fs.Bool("emit-structured-metadata", true, "Include Loki 3-tuple stream values [timestamp, line, metadata] in query responses")
 	patternsEnabled := fs.Bool("patterns-enabled", true, "Enable /loki/api/v1/patterns endpoint (Grafana Logs Drilldown patterns)")
+	patternsAutodetectFromQueries := fs.Bool("patterns-autodetect-from-queries", false, "Warm /loki/api/v1/patterns cache from successful query/query_range log responses (opt-in global autodetect)")
 	queryRangeWindowing := fs.Bool("query-range-windowing", true, "Enable query_range window splitting and window-level cache reuse for log queries")
 	queryRangeSplitInterval := fs.Duration("query-range-split-interval", time.Hour, "Time window size used for query_range split/merge (for example 15m, 1h, 24h)")
 	queryRangeMaxParallel := fs.Int("query-range-max-parallel", 2, "Maximum number of query_range windows fetched in parallel when adaptive parallelism is disabled")
@@ -468,6 +470,7 @@ func run(
 			streamResponse:                     *streamResponse,
 			emitStructuredMetadata:             *emitStructuredMetadata,
 			patternsEnabled:                    *patternsEnabled,
+			patternsAutodetectFromQueries:      *patternsAutodetectFromQueries,
 			queryRangeWindowing:                *queryRangeWindowing,
 			queryRangeSplitInterval:            *queryRangeSplitInterval,
 			queryRangeMaxParallel:              *queryRangeMaxParallel,
@@ -1017,6 +1020,7 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		StreamResponse:                     cfg.streamResponse,
 		EmitStructuredMetadata:             cfg.emitStructuredMetadata,
 		PatternsEnabled:                    boolPointer(cfg.patternsEnabled),
+		PatternsAutodetectFromQueries:      cfg.patternsAutodetectFromQueries,
 		QueryRangeWindowingEnabled:         cfg.queryRangeWindowing,
 		QueryRangeSplitInterval:            cfg.queryRangeSplitInterval,
 		QueryRangeMaxParallel:              cfg.queryRangeMaxParallel,

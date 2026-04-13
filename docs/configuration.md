@@ -27,6 +27,7 @@ See [Translation Modes Guide](translation-modes.md) for mode-selection profiles 
 | `-metadata-field-mode` | `METADATA_FIELD_MODE` | `hybrid` | `native`, `translated`, or `hybrid` for `detected_fields` and structured metadata exposure |
 | `-emit-structured-metadata` | — | `true` | Enable Loki `categorize-labels` response encoding: requests with `X-Loki-Response-Encoding-Flags: categorize-labels` emit 3-tuples `[timestamp, line, metadata]`, while default/no-flag requests stay canonical 2-tuples |
 | `-patterns-enabled` | — | `true` | Enable `GET /loki/api/v1/patterns` (Grafana Logs Drilldown patterns view). When `false`, the endpoint returns `404 not_found` |
+| `-patterns-autodetect-from-queries` | — | `false` | Warm `/loki/api/v1/patterns` cache from successful `query` and `query_range` responses (global autodetect mode, opt-in) |
 | `-patterns-persist-path` | — | — | Disk path for persisted patterns snapshot JSON file (empty disables persistence) |
 | `-patterns-persist-interval` | — | `30s` | Periodic flush interval for in-memory patterns snapshot |
 | `-patterns-startup-stale-threshold` | — | `60s` | Freshness threshold used by startup warm logic/peer snapshot cache |
@@ -146,6 +147,7 @@ Behavior:
 
 - Pattern cache entries are retained long-term and updated in-place by cache key.
 - Every detected pattern response is appended to the in-memory snapshot map (no periodic TTL-based pruning in snapshot state).
+- Optional global autodetect (`-patterns-autodetect-from-queries=true`) passively mines successful `query` and `query_range` responses and pre-warms matching `/patterns` cache keys.
 - Snapshot is persisted to disk periodically and on graceful shutdown.
 - Startup restore order: disk snapshot first, then peer merge (newest entry wins per cache key).
 - Readiness stays `503` during startup warm when patterns persistence is configured.

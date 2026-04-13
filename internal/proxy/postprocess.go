@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"container/heap"
 	"encoding/json"
 	"net"
@@ -179,52 +181,125 @@ func extractLineFormatTemplate(query string) string {
 // It tokenizes lines with punctuation-aware splitting, clusters by similarity,
 // and returns Grafana Logs Drilldown compatible pattern buckets.
 func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]interface{} {
-	stepSeconds := int64(60)
-	if step != "" {
-		if d, err := time.ParseDuration(step); err == nil && d > 0 {
-			stepSeconds = int64(d / time.Second)
-		} else if seconds, err := strconv.Atoi(step); err == nil && seconds > 0 {
-			stepSeconds = int64(seconds)
-		}
+	stepSeconds := parsePatternStepSeconds(step)
+	miner := newPatternMiner()
+	if len(vlBody) == 0 {
+		return nil
 	}
 
-	lines := strings.Split(string(vlBody), "\n")
-	miner := newPatternMiner()
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	scanner := bufio.NewScanner(bytes.NewReader(vlBody))
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	entry := make(map[string]interface{}, 16)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
 			continue
 		}
-
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		for key := range entry {
+			delete(entry, key)
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		msg, _ := entry["_msg"].(string)
+		msg, _ := stringifyEntryValue(entry["_msg"])
 		if msg == "" {
 			continue
 		}
-		timeStr, _ := entry["_time"].(string)
-		ts, err := time.Parse(time.RFC3339Nano, timeStr)
-		if err != nil {
-			if ts, err = time.Parse(time.RFC3339, timeStr); err != nil {
-				continue
-			}
+		unixSeconds, ok := parsePatternUnixSeconds(entry["_time"])
+		if !ok {
+			continue
 		}
 		labels := buildEntryLabels(entry)
 		level := strings.TrimSpace(labels["detected_level"])
 		if level == "" {
 			level = strings.TrimSpace(labels["level"])
 		}
-		bucket := ts.Unix()
+		bucket := unixSeconds
 		if stepSeconds > 0 {
 			bucket = (bucket / stepSeconds) * stepSeconds
 		}
 		miner.Observe(level, msg, bucket)
 	}
+	return buildPatternResponse(miner, limit)
+}
 
-	// Sort by count descending
+func extractLogPatternsFromWindowEntries(entries []queryRangeWindowEntry, step string, limit int) []map[string]interface{} {
+	if len(entries) == 0 {
+		return nil
+	}
+	stepSeconds := parsePatternStepSeconds(step)
+	miner := newPatternMiner()
+	for _, entry := range entries {
+		if len(entry.Value) < 2 {
+			continue
+		}
+		unixSeconds, ok := parsePatternUnixSeconds(entry.Value[0])
+		if !ok {
+			continue
+		}
+		msg, ok := stringifyEntryValue(entry.Value[1])
+		if !ok || strings.TrimSpace(msg) == "" {
+			continue
+		}
+		level := strings.TrimSpace(entry.Stream["detected_level"])
+		if level == "" {
+			level = strings.TrimSpace(entry.Stream["level"])
+		}
+		bucket := unixSeconds
+		if stepSeconds > 0 {
+			bucket = (bucket / stepSeconds) * stepSeconds
+		}
+		miner.Observe(level, msg, bucket)
+	}
+	return buildPatternResponse(miner, limit)
+}
+
+func parsePatternStepSeconds(step string) int64 {
+	stepSeconds := int64(60)
+	if step == "" {
+		return stepSeconds
+	}
+	if d, err := time.ParseDuration(step); err == nil && d > 0 {
+		return int64(d / time.Second)
+	}
+	if seconds, err := strconv.Atoi(step); err == nil && seconds > 0 {
+		return int64(seconds)
+	}
+	return stepSeconds
+}
+
+func parsePatternUnixSeconds(raw interface{}) (int64, bool) {
+	timeStr, ok := stringifyEntryValue(raw)
+	if !ok {
+		return 0, false
+	}
+	timeStr = strings.TrimSpace(timeStr)
+	if timeStr == "" {
+		return 0, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, timeStr); err == nil {
+		return parsed.Unix(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, timeStr); err == nil {
+		return parsed.Unix(), true
+	}
+	value, err := strconv.ParseInt(timeStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	switch l := len(timeStr); {
+	case l >= 19:
+		return value / 1_000_000_000, true
+	case l >= 16:
+		return value / 1_000_000, true
+	case l >= 13:
+		return value / 1_000, true
+	default:
+		return value, true
+	}
+}
+
+func buildPatternResponse(miner *patternMiner, limit int) []map[string]interface{} {
 	if limit <= 0 {
 		limit = 50
 	}

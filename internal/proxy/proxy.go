@@ -257,6 +257,9 @@ type Config struct {
 	// PatternsEnabled controls /loki/api/v1/patterns availability.
 	// Nil defaults to true for backward compatibility.
 	PatternsEnabled *bool
+	// PatternsAutodetectFromQueries passively extracts patterns from successful
+	// log query/query_range responses and warms /patterns cache entries.
+	PatternsAutodetectFromQueries bool
 	// Query range windowing/cache options.
 	// When enabled, eligible log query_range requests are split into time windows,
 	// fetched with bounded parallelism, and merged in Loki-compatible direction order.
@@ -413,6 +416,7 @@ type Proxy struct {
 	streamResponse                        bool
 	emitStructuredMetadata                bool
 	patternsEnabled                       bool
+	patternsAutodetectFromQueries         bool
 	labelTranslator                       *LabelTranslator
 	metadataFieldMode                     MetadataFieldMode
 	streamFieldsMap                       map[string]bool  // known _stream_fields for VL stream selector optimization
@@ -474,6 +478,8 @@ type Proxy struct {
 	patternsPersistDone                   chan struct{}
 	patternsSnapshotMu                    sync.RWMutex
 	patternsSnapshotEntries               map[string]patternSnapshotEntry
+	patternsSnapshotPatternCount          int64
+	patternsSnapshotPayloadBytes          int64
 	labelValuesIndexWarmReady             atomic.Bool
 	labelValuesIndexPersistStarted        atomic.Bool
 	labelValuesIndexPersistDirty          atomic.Bool
@@ -503,6 +509,7 @@ type labelValuesIndexSnapshot struct {
 type patternSnapshotEntry struct {
 	Value             []byte `json:"value"`
 	UpdatedAtUnixNano int64  `json:"updated_at_unix_nano"`
+	PatternCount      int    `json:"pattern_count,omitempty"`
 }
 
 type patternsSnapshot struct {
@@ -801,6 +808,7 @@ func New(cfg Config) (*Proxy, error) {
 		streamResponse:                        cfg.StreamResponse,
 		emitStructuredMetadata:                cfg.EmitStructuredMetadata,
 		patternsEnabled:                       patternsEnabled,
+		patternsAutodetectFromQueries:         cfg.PatternsAutodetectFromQueries,
 		labelTranslator:                       labelTranslator,
 		metadataFieldMode:                     metadataFieldMode,
 		streamFieldsMap:                       buildStreamFieldsMap(cfg.StreamFields),
@@ -2068,16 +2076,69 @@ func (p *Proxy) refreshLabelValuesCacheAsync(orgID, cacheKey, labelName, rawQuer
 }
 
 func (p *Proxy) recordPatternSnapshotEntry(cacheKey string, payload []byte, now time.Time) {
-	if !p.patternsEnabled || strings.TrimSpace(p.patternsPersistPath) == "" {
+	if !p.patternsEnabled {
 		return
 	}
-	p.patternsSnapshotMu.Lock()
-	p.patternsSnapshotEntries[cacheKey] = patternSnapshotEntry{
-		Value:             append([]byte(nil), payload...),
-		UpdatedAtUnixNano: now.UnixNano(),
+	patternCount := patternCountFromPayload(payload)
+	if patternCount > 0 {
+		p.metrics.RecordPatternsStored(patternCount)
 	}
+	if strings.TrimSpace(p.patternsPersistPath) == "" {
+		return
+	}
+	copied := append([]byte(nil), payload...)
+	p.patternsSnapshotMu.Lock()
+	if existing, ok := p.patternsSnapshotEntries[cacheKey]; ok {
+		p.patternsSnapshotPatternCount -= int64(existing.PatternCount)
+		p.patternsSnapshotPayloadBytes -= int64(len(existing.Value))
+	}
+	p.patternsSnapshotEntries[cacheKey] = patternSnapshotEntry{
+		Value:             copied,
+		UpdatedAtUnixNano: now.UnixNano(),
+		PatternCount:      patternCount,
+	}
+	p.patternsSnapshotPatternCount += int64(patternCount)
+	p.patternsSnapshotPayloadBytes += int64(len(copied))
+	p.updatePatternSnapshotMetricsLocked()
 	p.patternsSnapshotMu.Unlock()
 	p.patternsPersistDirty.Store(true)
+}
+
+func patternCountFromPayload(payload []byte) int {
+	if len(payload) == 0 {
+		return 0
+	}
+	var resp patternsResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return 0
+	}
+	return len(resp.Data)
+}
+
+func patternCountFromSnapshot(snapshot patternsSnapshot) int {
+	total := 0
+	for key, entry := range snapshot.EntriesByKey {
+		if strings.TrimSpace(key) == "" || len(entry.Value) == 0 {
+			continue
+		}
+		if entry.PatternCount > 0 {
+			total += entry.PatternCount
+			continue
+		}
+		total += patternCountFromPayload(entry.Value)
+	}
+	return total
+}
+
+func (p *Proxy) updatePatternSnapshotMetricsLocked() {
+	if p == nil || p.metrics == nil {
+		return
+	}
+	p.metrics.SetPatternsInMemory(
+		int(p.patternsSnapshotPatternCount),
+		len(p.patternsSnapshotEntries),
+		p.patternsSnapshotPayloadBytes,
+	)
 }
 
 func (p *Proxy) buildPatternsSnapshot(now time.Time) patternsSnapshot {
@@ -2089,9 +2150,14 @@ func (p *Proxy) buildPatternsSnapshot(now time.Time) patternsSnapshot {
 		if strings.TrimSpace(key) == "" || len(entry.Value) == 0 {
 			continue
 		}
+		patternCount := entry.PatternCount
+		if patternCount <= 0 {
+			patternCount = patternCountFromPayload(entry.Value)
+		}
 		entries[key] = patternSnapshotEntry{
 			Value:             append([]byte(nil), entry.Value...),
 			UpdatedAtUnixNano: entry.UpdatedAtUnixNano,
+			PatternCount:      patternCount,
 		}
 	}
 
@@ -2102,13 +2168,14 @@ func (p *Proxy) buildPatternsSnapshot(now time.Time) patternsSnapshot {
 	}
 }
 
-func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) int {
+func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) (int, int) {
 	if p.cache == nil {
-		return 0
+		return 0, 0
 	}
 
 	nowUnix := time.Now().UTC().UnixNano()
-	applied := 0
+	appliedEntries := 0
+	appliedPatterns := 0
 
 	p.patternsSnapshotMu.Lock()
 	defer p.patternsSnapshotMu.Unlock()
@@ -2123,19 +2190,32 @@ func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) int {
 		if existing, ok := p.patternsSnapshotEntries[key]; ok && existing.UpdatedAtUnixNano >= incoming.UpdatedAtUnixNano {
 			continue
 		}
+		incomingPatternCount := incoming.PatternCount
+		if incomingPatternCount <= 0 {
+			incomingPatternCount = patternCountFromPayload(incoming.Value)
+		}
 		copied := append([]byte(nil), incoming.Value...)
+		if existing, ok := p.patternsSnapshotEntries[key]; ok {
+			p.patternsSnapshotPatternCount -= int64(existing.PatternCount)
+			p.patternsSnapshotPayloadBytes -= int64(len(existing.Value))
+		}
 		p.patternsSnapshotEntries[key] = patternSnapshotEntry{
 			Value:             copied,
 			UpdatedAtUnixNano: incoming.UpdatedAtUnixNano,
+			PatternCount:      incomingPatternCount,
 		}
+		p.patternsSnapshotPatternCount += int64(incomingPatternCount)
+		p.patternsSnapshotPayloadBytes += int64(len(copied))
 		p.cache.SetWithTTL(key, copied, patternsCacheRetention)
-		applied++
+		appliedEntries++
+		appliedPatterns += incomingPatternCount
 	}
+	p.updatePatternSnapshotMetricsLocked()
 
-	if applied > 0 {
+	if appliedEntries > 0 {
 		p.patternsPersistDirty.Store(true)
 	}
-	return applied
+	return appliedEntries, appliedPatterns
 }
 
 func (p *Proxy) persistPatternsNow(reason string) error {
@@ -2177,11 +2257,16 @@ func (p *Proxy) persistPatternsNow(reason string) error {
 	}
 
 	entryCount := len(snapshot.EntriesByKey)
-	if reason == "periodic" {
-		p.log.Debug("patterns snapshot persisted", "path", path, "entries", entryCount, "bytes", len(data))
-	} else {
-		p.log.Info("patterns snapshot persisted", "reason", reason, "path", path, "entries", entryCount, "bytes", len(data))
-	}
+	patternCount := patternCountFromSnapshot(snapshot)
+	p.log.Info(
+		"patterns snapshot persisted",
+		"reason", reason,
+		"path", path,
+		"entries", entryCount,
+		"patterns", patternCount,
+		"bytes", len(data),
+	)
+	p.metrics.SetPatternsPersistedDiskBytes(int64(len(data)))
 	p.patternsPersistDirty.Store(false)
 	return nil
 }
@@ -2209,7 +2294,9 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 		return false, 0, fmt.Errorf("invalid patterns snapshot timestamp: %d", snapshot.SavedAtUnixNano)
 	}
 
-	applied := p.applyPatternsSnapshot(snapshot)
+	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(snapshot)
+	p.metrics.RecordPatternsRestoredFromDisk(appliedPatterns, appliedEntries)
+	p.metrics.SetPatternsPersistedDiskBytes(int64(len(data)))
 	if p.cache != nil {
 		ttl := p.patternsStartupStale * 3
 		if ttl <= 0 {
@@ -2221,7 +2308,9 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 		"patterns snapshot restored from disk",
 		"path", p.patternsPersistPath,
 		"saved_at", time.Unix(0, snapshot.SavedAtUnixNano).UTC().Format(time.RFC3339Nano),
-		"entries_applied", applied,
+		"entries_applied", appliedEntries,
+		"patterns_applied", appliedPatterns,
+		"bytes", len(data),
 	)
 	return true, snapshot.SavedAtUnixNano, nil
 }
@@ -2351,15 +2440,19 @@ func (p *Proxy) restorePatternsFromPeers(minSavedAt int64) (bool, int64, error) 
 		}
 	}
 
-	applied := p.applyPatternsSnapshot(merged)
-	if applied == 0 || mergedSavedAt <= minSavedAt {
+	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(merged)
+	if appliedEntries == 0 || mergedSavedAt <= minSavedAt {
 		return false, mergedSavedAt, nil
 	}
+	p.metrics.RecordPatternsRestoredFromPeers(appliedPatterns, appliedEntries)
 
 	p.log.Info(
 		"patterns snapshot warmed from peers",
 		"saved_at", time.Unix(0, mergedSavedAt).UTC().Format(time.RFC3339Nano),
-		"entries_applied", applied,
+		"entries_applied", appliedEntries,
+		"patterns_applied", appliedPatterns,
+		"entries_updated", appliedEntries,
+		"patterns_updated", appliedPatterns,
 		"peers", len(peers),
 	)
 	return true, mergedSavedAt, nil
@@ -2419,6 +2512,11 @@ func (p *Proxy) startPatternsPersistenceLoop() {
 	if p.patternsPersistStarted.Swap(true) {
 		return
 	}
+	p.log.Info(
+		"patterns snapshot backup enabled",
+		"path", p.patternsPersistPath,
+		"interval", p.patternsPersistInterval.String(),
+	)
 
 	go func() {
 		defer close(p.patternsPersistDone)
@@ -3904,7 +4002,8 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = withOrgID(r)
-	cacheKey := "patterns:" + r.Header.Get("X-Scope-OrgID") + ":" + r.URL.RawQuery
+	orgID := r.Header.Get("X-Scope-OrgID")
+	cacheKey := "patterns:" + orgID + ":" + r.URL.RawQuery
 	if cached, ok := p.cache.Get(cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
@@ -3916,6 +4015,21 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	query := r.FormValue("query")
 	if strings.TrimSpace(query) == "" {
 		query = "*"
+	}
+	startParam := r.FormValue("start")
+	endParam := r.FormValue("end")
+	stepParam := r.FormValue("step")
+	patternLimit := parsePatternLimit(r.FormValue("limit"))
+	autodetectCacheKey := p.patternsAutodetectCacheKey(orgID, query, startParam, endParam, stepParam)
+	if autodetectCacheKey != "" && autodetectCacheKey != cacheKey {
+		if cached, ok := p.cache.Get(autodetectCacheKey); ok {
+			body := limitPatternPayload(cached, patternLimit)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+			p.metrics.RecordCacheHit()
+			return
+		}
 	}
 
 	logsqlQuery, err := p.translateQuery(query)
@@ -3930,20 +4044,13 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery+" | sort by (_time desc)")
-	if s := r.FormValue("start"); s != "" {
+	if s := startParam; s != "" {
 		params.Set("start", formatVLTimestamp(s))
 	}
-	if e := r.FormValue("end"); e != "" {
+	if e := endParam; e != "" {
 		params.Set("end", formatVLTimestamp(e))
 	}
 	params.Set("limit", "1000")
-
-	patternLimit := 50
-	if raw := strings.TrimSpace(r.FormValue("limit")); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			patternLimit = n
-		}
-	}
 
 	resp, err := p.vlPost(r.Context(), "/select/logsql/query", params)
 	if err != nil {
@@ -3966,7 +4073,8 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patterns := extractLogPatterns(body, r.FormValue("step"), patternLimit)
+	patterns := extractLogPatterns(body, stepParam, patternLimit)
+	p.metrics.RecordPatternsDetected(len(patterns))
 	result := map[string]interface{}{
 		"status": "success",
 		"data":   patterns,
@@ -3981,10 +4089,114 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	if len(patterns) > 0 {
 		p.cache.SetWithTTL(cacheKey, resultBody, patternsCacheRetention)
 		p.recordPatternSnapshotEntry(cacheKey, resultBody, time.Now().UTC())
+		if autodetectCacheKey != "" && autodetectCacheKey != cacheKey {
+			p.cache.SetWithTTL(autodetectCacheKey, resultBody, patternsCacheRetention)
+			p.recordPatternSnapshotEntry(autodetectCacheKey, resultBody, time.Now().UTC())
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(resultBody)
 	p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+}
+
+func parsePatternLimit(raw string) int {
+	patternLimit := 50
+	if raw = strings.TrimSpace(raw); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			patternLimit = n
+		}
+	}
+	if patternLimit > maxPatternResponseLimit {
+		return maxPatternResponseLimit
+	}
+	return patternLimit
+}
+
+func limitPatternPayload(payload []byte, limit int) []byte {
+	if limit <= 0 || limit >= maxPatternResponseLimit || len(payload) == 0 {
+		return payload
+	}
+	var resp patternsResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return payload
+	}
+	if len(resp.Data) <= limit {
+		return payload
+	}
+	resp.Data = resp.Data[:limit]
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		return payload
+	}
+	return encoded
+}
+
+func (p *Proxy) patternsAutodetectCacheKey(orgID, query, start, end, step string) string {
+	if strings.TrimSpace(query) == "" {
+		return ""
+	}
+	params := url.Values{}
+	params.Set("query", strings.TrimSpace(query))
+	if trimmed := strings.TrimSpace(start); trimmed != "" {
+		params.Set("start", trimmed)
+	}
+	if trimmed := strings.TrimSpace(end); trimmed != "" {
+		params.Set("end", trimmed)
+	}
+	if trimmed := strings.TrimSpace(step); trimmed != "" {
+		params.Set("step", trimmed)
+	}
+	return "patterns:" + orgID + ":" + params.Encode()
+}
+
+func (p *Proxy) maybeAutodetectPatternsFromNDJSON(orgID, query, start, end, step string, body []byte) {
+	if !p.patternsEnabled || !p.patternsAutodetectFromQueries || len(body) == 0 {
+		return
+	}
+	cacheKey := p.patternsAutodetectCacheKey(orgID, query, start, end, step)
+	if cacheKey == "" {
+		return
+	}
+	patterns := extractLogPatterns(body, step, maxPatternResponseLimit)
+	if len(patterns) == 0 {
+		return
+	}
+	p.metrics.RecordPatternsDetected(len(patterns))
+	resultBody, err := json.Marshal(map[string]interface{}{
+		"status": "success",
+		"data":   patterns,
+	})
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	p.cache.SetWithTTL(cacheKey, resultBody, patternsCacheRetention)
+	p.recordPatternSnapshotEntry(cacheKey, resultBody, now)
+}
+
+func (p *Proxy) maybeAutodetectPatternsFromWindowEntries(orgID, query, start, end, step string, entries []queryRangeWindowEntry) {
+	if !p.patternsEnabled || !p.patternsAutodetectFromQueries || len(entries) == 0 {
+		return
+	}
+	cacheKey := p.patternsAutodetectCacheKey(orgID, query, start, end, step)
+	if cacheKey == "" {
+		return
+	}
+	patterns := extractLogPatternsFromWindowEntries(entries, step, maxPatternResponseLimit)
+	if len(patterns) == 0 {
+		return
+	}
+	p.metrics.RecordPatternsDetected(len(patterns))
+	resultBody, err := json.Marshal(map[string]interface{}{
+		"status": "success",
+		"data":   patterns,
+	})
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	p.cache.SetWithTTL(cacheKey, resultBody, patternsCacheRetention)
+	p.recordPatternSnapshotEntry(cacheKey, resultBody, now)
 }
 
 // handleFormatQuery returns the query as-is (pretty-printing is client-side for LogQL).
@@ -5592,6 +5804,14 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 	}
 
 	body, _ := io.ReadAll(resp.Body)
+	p.maybeAutodetectPatternsFromNDJSON(
+		r.Header.Get("X-Scope-OrgID"),
+		r.FormValue("query"),
+		r.FormValue("start"),
+		r.FormValue("end"),
+		r.FormValue("step"),
+		body,
+	)
 
 	// VL returns newline-delimited JSON, each line is a log entry.
 	// Loki expects: {"status":"success","data":{"resultType":"streams","result":[...]}}

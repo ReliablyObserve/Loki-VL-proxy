@@ -16,6 +16,7 @@ Proxy behavior:
 
 - The proxy fetches matching logs and runs Drain-like token clustering.
 - Patterns are derived from live query results, not from a static dictionary.
+- Optional global autodetect mode (`-patterns-autodetect-from-queries=true`) additionally warms pattern cache from successful `query` and `query_range` responses.
 - Maximum patterns returned per request are clamped to `1000`.
 
 Loki behavior reference:
@@ -45,6 +46,7 @@ Retention model:
 ## Disk And Startup Flags
 
 - `-patterns-enabled`
+- `-patterns-autodetect-from-queries`
 - `-patterns-persist-path`
 - `-patterns-persist-interval`
 - `-patterns-startup-stale-threshold`
