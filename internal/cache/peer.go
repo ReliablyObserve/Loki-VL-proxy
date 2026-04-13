@@ -339,7 +339,7 @@ func (pc *PeerCache) updatePeers(peers []string) {
 	for _, p := range peers {
 		pc.ring.add(p)
 	}
-	pc.log.Info("peer cache updated", "peers", len(peers), "self", pc.selfAddr)
+	pc.log.Info("peer cache updated", "cache.peer.count", len(peers), "server.address", pc.selfAddr)
 }
 
 func (pc *PeerCache) discoveryLoop() {

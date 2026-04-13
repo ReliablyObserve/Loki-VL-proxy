@@ -1011,7 +1011,7 @@ func logProxyStartup(logger *slog.Logger, proxyCfg proxy.Config, peerSelf, peerD
 	}
 	if proxyCfg.PeerCache != nil {
 		c.SetL3(proxyCfg.PeerCache)
-		logger.Info("peer cache enabled", "self", peerSelf, "discovery", peerDiscovery)
+		logger.Info("peer cache enabled", "server.address", peerSelf, "cache.peer.discovery", peerDiscovery)
 	}
 	if compat != nil {
 		logger.Info("compatibility edge cache active", "tier", "tier0")
@@ -1045,6 +1045,6 @@ func logSystemMetricsStartup(logger *slog.Logger) {
 		)
 	}
 	for _, rec := range check.Recommendations {
-		logger.Info("system metrics startup recommendation", "message", rec)
+		logger.Info("system metrics startup recommendation", "event.recommendation", rec)
 	}
 }

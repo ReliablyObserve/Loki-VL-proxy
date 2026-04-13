@@ -3819,20 +3819,31 @@ func buildStreamValue(ts, msg string, structuredMetadata map[string]string, pars
 	if !emitStructuredMetadata {
 		return []interface{}{ts, msg}
 	}
-	_ = categorizedLabels
 
-	// Legacy-safe fallback: flatten metadata into a simple map[string]string.
-	flat := make(map[string]string, len(structuredMetadata)+len(parsedFields))
-	for key, value := range structuredMetadata {
-		flat[key] = value
+	// Loki-compatible tuple enrichment is only emitted for categorize-labels.
+	if !categorizedLabels {
+		return []interface{}{ts, msg}
 	}
-	for key, value := range parsedFields {
-		flat[key] = value
+
+	metadata := make(map[string]interface{}, 2)
+	if len(structuredMetadata) > 0 {
+		sm := make(map[string]string, len(structuredMetadata))
+		for key, value := range structuredMetadata {
+			sm[key] = value
+		}
+		metadata["structuredMetadata"] = sm
 	}
-	if len(flat) > 0 {
-		return []interface{}{ts, msg, flat}
+	if len(parsedFields) > 0 {
+		parsed := make(map[string]string, len(parsedFields))
+		for key, value := range parsedFields {
+			parsed[key] = value
+		}
+		metadata["parsed"] = parsed
 	}
-	return []interface{}{ts, msg}
+
+	// Loki returns an empty object when categorize-labels is enabled but no
+	// structured metadata / parsed fields are present for the row.
+	return []interface{}{ts, msg, metadata}
 }
 
 func (p *Proxy) classifyEntryFields(entry map[string]interface{}, originalQuery string) (map[string]string, map[string]string, map[string]string) {
@@ -4168,76 +4179,25 @@ func requestWantsCategorizedLabels(r *http.Request) bool {
 	return false
 }
 
-func requestStructuredMetadataOverride(r *http.Request) (bool, bool) {
-	if r == nil {
-		return false, false
-	}
-	if raw := strings.TrimSpace(r.FormValue("structured_metadata")); raw != "" {
-		if enabled, err := strconv.ParseBool(raw); err == nil {
-			return enabled, true
-		}
-	}
-	if raw := strings.TrimSpace(r.Header.Get("X-Loki-Response-Encoding-Flags")); raw != "" {
-		for _, part := range strings.Split(raw, ",") {
-			if strings.EqualFold(strings.TrimSpace(part), "structured-metadata") {
-				return true, true
-			}
-		}
-	}
-	return false, false
-}
-
-func requestLooksLikeGrafana(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	if strings.TrimSpace(r.Header.Get("X-Grafana-User")) != "" {
-		return true
-	}
-	if strings.TrimSpace(r.Header.Get("X-Grafana-Org-Id")) != "" {
-		return true
-	}
-	if strings.TrimSpace(r.Header.Get("X-Dashboard-Uid")) != "" {
-		return true
-	}
-	ua := strings.ToLower(strings.TrimSpace(r.Header.Get("User-Agent")))
-	return strings.Contains(ua, "grafana")
-}
-
 func tupleModeForRequest(r *http.Request, emitStructuredMetadata bool) string {
-	isGrafana := requestLooksLikeGrafana(r)
-	overrideEnabled, overrideSet := requestStructuredMetadataOverride(r)
-
-	if isGrafana {
-		if !emitStructuredMetadata {
-			return "grafana_default_2tuple"
-		}
-		if overrideSet && overrideEnabled {
-			return "grafana_optin_3tuple"
-		}
-		return "grafana_default_3tuple"
+	if !emitStructuredMetadata {
+		return "default_2tuple"
 	}
-	if emitStructuredMetadata {
-		return "nongrafana_3tuple"
+	if requestWantsCategorizedLabels(r) {
+		return "categorize_labels_3tuple"
 	}
-	return "nongrafana_2tuple"
+	return "default_3tuple"
 }
 
 func (p *Proxy) shouldEmitStructuredMetadata(r *http.Request) bool {
 	if !p.emitStructuredMetadata {
 		return false
 	}
-	// Allow explicit per-request override via query/header flags.
-	// - structured_metadata=true|false
-	// - X-Loki-Response-Encoding-Flags: structured-metadata
-	if enabled, ok := requestStructuredMetadataOverride(r); ok {
-		return enabled
-	}
-	// Keep Grafana default on canonical 2-tuples unless explicit opt-in is sent.
-	if requestLooksLikeGrafana(r) {
-		return false
-	}
-	return true
+	// Full Loki-compat behavior:
+	// - Default query values are canonical 2-tuples [ts, line].
+	// - Enriched 3-tuples are emitted only when the request explicitly asks for
+	//   categorize-labels via X-Loki-Response-Encoding-Flags.
+	return requestWantsCategorizedLabels(r)
 }
 
 func (p *Proxy) handleMultiTenantFanout(w http.ResponseWriter, r *http.Request, endpoint string, single func(http.ResponseWriter, *http.Request)) bool {
@@ -5535,9 +5495,8 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 			"loki.query", truncateQuery(query, 200),
 			"client.address", r.RemoteAddr,
 			"network.peer.address", r.RemoteAddr,
-			"user.id", clientID,
 			"enduser.id", clientID,
-			"loki.client.source", clientSource,
+			"enduser.source", clientSource,
 			"cache.result", telemetry.cacheResult,
 			"proxy.duration_ms", elapsed.Milliseconds(),
 			"proxy.overhead_ms", proxyOverhead.Milliseconds(),
@@ -5548,7 +5507,6 @@ func (p *Proxy) requestLogger(endpoint string, next http.HandlerFunc) http.Handl
 		}
 		if authUser != "" {
 			logAttrs = append(logAttrs,
-				"user.name", authUser,
 				"auth.principal", authUser,
 				"auth.source", authSource,
 			)
