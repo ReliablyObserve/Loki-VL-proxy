@@ -28,6 +28,15 @@ helm install loki-vl-proxy ./charts/loki-vl-proxy \
 
 For multi-replica fleets with HPA, prefer `peerCache.enabled=true` over static peer lists. The chart creates a headless service and the proxy refreshes DNS-discovered peers automatically, so scaling events do not require manual replica or peer updates.
 
+For Grafana Logs Drilldown pattern discovery, keep the default `extraArgs.patterns-enabled=true` or set it explicitly during rollout if you need to control the surface area:
+
+```yaml
+extraArgs:
+  backend: http://victorialogs:9428
+  label-style: underscores
+  patterns-enabled: "true"
+```
+
 ### Required Configuration
 
 | Flag | Required | Description |
@@ -62,7 +71,7 @@ Treat these as one versioned operational package:
 
 | Asset | Canonical source | Purpose |
 |------|------------------|---------|
-| Grafana operations dashboard | [`dashboard/loki-vl-proxy.json`](../dashboard/loki-vl-proxy.json) | SLO and troubleshooting views for request, cache, tenant, and backend signals from proxy metrics |
+| Grafana operations dashboard | [`dashboard/loki-vl-proxy.json`](../dashboard/loki-vl-proxy.json) | Operator view for `Client -> Proxy -> VictoriaLogs`, route-aware RED signals, cache behavior, long-range query tuning, and operational resources |
 | Alert rules | [`alerting/loki-vl-proxy-prometheusrule.yaml`](../alerting/loki-vl-proxy-prometheusrule.yaml) | PrometheusRule/vmalert-oriented alert set with standardized labels and annotations |
 | SRE runbooks | [`docs/runbooks/alerts.md`](runbooks/alerts.md) | Index plus per-alert runbook files referenced directly from alert `runbook_url` |
 
@@ -206,21 +215,21 @@ See the dedicated [Observability Guide](observability.md) for the full metrics c
 
 The proxy exposes Prometheus metrics at `/metrics`:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `loki_vl_proxy_requests_total{endpoint,status}` | counter | Total requests by endpoint and HTTP status |
-| `loki_vl_proxy_request_duration_seconds{endpoint}` | histogram | Request latency by endpoint |
-| `loki_vl_proxy_cache_hits_total` | counter | L1 cache hits |
-| `loki_vl_proxy_cache_misses_total` | counter | L1 cache misses |
-| `loki_vl_proxy_translations_total` | counter | LogQL→LogsQL translations |
-| `loki_vl_proxy_translation_errors_total` | counter | Failed translations |
-| `loki_vl_proxy_uptime_seconds` | gauge | Process uptime |
+| Metric | Type | Primary dimensions | Description |
+|--------|------|--------------------|-------------|
+| `loki_vl_proxy_requests_total` | counter | `system`, `direction`, `endpoint`, `route`, `status` | Total requests by downstream Loki route or upstream backend route |
+| `loki_vl_proxy_request_duration_seconds` | histogram | `system`, `direction`, `endpoint`, `route` | End-to-end request latency |
+| `loki_vl_proxy_backend_duration_seconds` | histogram | `system`, `direction`, `endpoint`, `route` | Upstream-only latency for VictoriaLogs and rules/alerts backends |
+| `loki_vl_proxy_cache_hits_by_endpoint` / `loki_vl_proxy_cache_misses_by_endpoint` | counter | `system`, `direction`, `endpoint`, `route` | Cache efficiency by normalized route |
+| `loki_vl_proxy_tenant_requests_total` / `loki_vl_proxy_client_requests_total` | counter | tenant/client plus route dimensions | Hot tenants and clients per route |
+| `loki_vl_proxy_process_*` | gauges/counters | metric family specific | Runtime, CPU, memory, disk, network, and PSI health |
 
 ### Key Ratios to Monitor
 
-- **Cache hit ratio**: `cache_hits / (cache_hits + cache_misses)` — target >80%
-- **Error rate**: `requests_total{status=~"5.."} / requests_total` — target <1%
-- **P99 latency**: from histogram — target <2s for queries, <100ms for labels
+- **Route cache hit ratio**: `cache_hits_by_endpoint / (cache_hits_by_endpoint + cache_misses_by_endpoint)` by `endpoint,route` — target >80% on stable metadata paths
+- **Downstream error rate**: `requests_total{system="loki",direction="downstream",status=~"5.."}` over total downstream requests — target <1%
+- **Upstream latency**: `backend_duration_seconds` by `endpoint,route` — use this to separate VictoriaLogs slowness from proxy-side work
+- **End-to-end latency**: `request_duration_seconds{system="loki",direction="downstream"}` by `endpoint,route` — compare with upstream latency and request logs
 
 ### OTLP Push
 
@@ -233,6 +242,8 @@ Push metrics to an OTLP collector:
 ```
 
 The OTLP exporter reuses the same core proxy metric names that `/metrics` exposes, so dashboards and alert logic can stay aligned across scrape and push modes.
+
+For exact proxy-only overhead on translated paths, use structured request logs with `proxy.overhead_ms`, `proxy.duration_ms`, and `upstream.duration_ms`. The metrics intentionally keep route-aware end-to-end and upstream histograms, while logs carry the per-request decomposition.
 
 ---
 

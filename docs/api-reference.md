@@ -10,13 +10,13 @@
 | `GET /loki/api/v1/labels` | Implemented | `/select/logsql/stream_field_names` with fallback to `/select/logsql/field_names` | 60s | 3 |
 | `GET /loki/api/v1/label/{name}/values` | Implemented | `/select/logsql/stream_field_values` with fallback to `/select/logsql/field_values` | 60s | 3 |
 | `GET /loki/api/v1/series` | Implemented | `/select/logsql/streams` | 30s | 2 |
-| `GET /loki/api/v1/index/stats` | Implemented | `/select/logsql/hits` | - | 2 |
-| `GET /loki/api/v1/index/volume` | Implemented | `/select/logsql/hits` (field grouping) | - | 2 |
-| `GET /loki/api/v1/index/volume_range` | Implemented | `/select/logsql/hits` (step) | - | 2 |
+| `GET /loki/api/v1/index/stats` | Implemented | `/select/logsql/hits` | 10s | 2 |
+| `GET /loki/api/v1/index/volume` | Implemented | `/select/logsql/hits` (field grouping) | 10s | 2 |
+| `GET /loki/api/v1/index/volume_range` | Implemented | `/select/logsql/hits` (step) | 10s | 2 |
 | `GET /loki/api/v1/detected_fields` | Implemented | `/select/logsql/field_names` | 30s | 1 |
-| `GET /loki/api/v1/detected_field/{name}/values` | Implemented | `/select/logsql/field_values` | - | 1 |
-| `GET /loki/api/v1/detected_labels` | Implemented | `/select/logsql/field_names` | - | 1 |
-| `GET /loki/api/v1/patterns` | Implemented (toggleable) | `/select/logsql/query` + Drain-like token clustering | - | 4 |
+| `GET /loki/api/v1/detected_field/{name}/values` | Implemented | `/select/logsql/field_values` | 30s | 1 |
+| `GET /loki/api/v1/detected_labels` | Implemented | `/select/logsql/field_names` | 30s | 1 |
+| `GET /loki/api/v1/patterns` | Implemented (toggleable) | `/select/logsql/query` + Drain-like token clustering | 20s | 4 |
 | `GET /loki/api/v1/format_query` | Implemented | - (passthrough) | - | 1 |
 | `WS /loki/api/v1/tail` | Implemented | `/select/logsql/tail` (WebSocket->NDJSON) | - | 2 |
 
