@@ -153,6 +153,44 @@ extraArgs:
   # Sizing hint: plan roughly ~96 bytes RAM/value and ~60% of RAM footprint on disk snapshot.
   # System metrics scope override (chart auto-injects when systemMetrics.hostProc.enabled=true):
   # proc-root: "/host/proc"
+  #
+  # Full optional flag catalog (commented defaults from runtime):
+  # cache-max-bytes: "268435456"                # 256Mi L1 max bytes
+  # compat-cache-enabled: "true"                # enable Tier0 compatibility-edge cache
+  # compat-cache-max-percent: "10"              # Tier0 share of L1 cache budget (max 50)
+  # backend-timeout: "120s"                     # upstream request timeout
+  # backend-tls-skip-verify: "false"
+  # deployment-environment: ""                  # OTel deployment.environment.name
+  # otel-service-name: "loki-vl-proxy"
+  # otel-service-namespace: ""
+  # otel-service-instance-id: ""
+  # otlp-headers: ""                            # comma-separated key=value pairs
+  # response-gzip: "true"
+  # max-lines: "1000"
+  # auth.enabled: "false"                       # require tenant header
+  # tenant.allow-global: "false"                # allow global tenant map wildcard entry
+  # metrics.max-tenants: "256"
+  # metrics.max-clients: "256"
+  # metrics.trust-proxy-headers: "false"
+  # server.register-instrumentation: "true"     # expose /metrics
+  # server.enable-pprof: "false"
+  # server.enable-query-analytics: "false"
+  # server.admin-auth-token: ""                 # bearer token for admin/debug endpoints
+  # tail.mode: "auto"                           # auto | native | synthetic
+  # tail.allowed-origins: ""                    # comma-separated websocket origin allowlist
+  # ruler-backend: ""                           # optional /rules passthrough backend
+  # alerts-backend: ""                          # optional /alerts passthrough backend
+  # extra-label-fields: "service.name,host.name"
+  # peer-auth-token: ""                         # token required for /_cache/get peer calls
+  # peer-discovery: "dns"                       # chart-managed via peerCache.* values
+  # peer-dns: ""                                # chart-managed when peerCache.enabled=true
+  # peer-self: ""                               # chart-managed when peerCache.enabled=true
+  # peer-static: ""                             # used with peer-discovery=static
+  # disk-cache-min-ttl: "30s"                   # skip L2 writes for very short-lived entries
+  # tls-cert-file: ""                           # enable HTTPS listener when cert+key set
+  # tls-key-file: ""
+  # tls-client-ca-file: ""
+  # tls-require-client-cert: "false"
 
 # Go runtime tuning:
 # The chart exports GOMEMLIMIT into the container env.
