@@ -6,7 +6,7 @@ const baseUrl = process.env.GRAFANA_URL || "http://127.0.0.1:3002";
 const proxyQueryUrl = process.env.PROXY_QUERY_URL || "http://127.0.0.1:3100";
 const vlInsertUrl =
   process.env.VL_INSERT_URL ||
-  "http://127.0.0.1:9428/insert/jsonline?_stream_fields=app,service_name,level,detected_level,env,cluster,namespace";
+  "http://127.0.0.1:9428/insert/jsonline?_stream_fields=app,service_name,level,detected_level";
 const explicitExecutablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
 const outDir =
   process.env.SCREENSHOT_OUT_DIR ||
@@ -156,6 +156,9 @@ async function ingestFreshLogs(seedApp, serviceName) {
         cluster: "local",
         namespace: "demo",
         traceID: `trace-${Math.floor(i / 3)}`,
+        "k8s.cluster.name": "demo-cluster",
+        "service.instance.id": `instance-${(i % 3) + 1}`,
+        "host.id": "host-demo-1",
       })
     );
   }
@@ -191,6 +194,9 @@ function startBackgroundIngest(seedApp, serviceName, intervalMs = 1500) {
       cluster: "local",
       namespace: "demo",
       traceID: `trace-live-${Date.now()}`,
+      "k8s.cluster.name": "demo-cluster",
+      "service.instance.id": "instance-live",
+      "host.id": "host-demo-1",
     });
     try {
       await fetch(vlInsertUrl, {
@@ -233,6 +239,111 @@ async function waitForSeedVisible(seedApp, timeoutMs = 30000) {
   throw new Error("seeded logs not visible via proxy query in time");
 }
 
+async function clickStructuredMetadataInclude(page) {
+  const metadataKeyRegex = /k8s[._]cluster[._]name/i;
+  const queryEditor = page
+    .locator('[data-testid="query-editor-rows"], [data-testid="query-editor-row"]')
+    .first();
+
+  const logLine = page
+    .getByText(/screenshot (streaming|sample) line/i)
+    .first();
+  await logLine.waitFor({ state: "visible", timeout: 15000 });
+  await logLine.click();
+  await waitForGrafanaReady(page);
+
+  const structuredHeader = page.getByText(/structured metadata/i).first();
+  await structuredHeader.waitFor({ state: "visible", timeout: 15000 });
+
+  const metadataKey = page.getByText(metadataKeyRegex).first();
+  await metadataKey.waitFor({ state: "visible", timeout: 15000 });
+
+  const metadataRow = page.locator('tr, [role="row"], div').filter({ has: metadataKey }).first();
+  if (await metadataRow.isVisible().catch(() => false)) {
+    await metadataRow.hover().catch(() => {});
+  }
+
+  const originalQuery = ((await queryEditor.innerText().catch(() => "")) || "").toLowerCase();
+  let clicked = false;
+  let queryChanged = false;
+
+  const rowButtons = metadataRow.locator("button");
+  const rowButtonCount = await rowButtons.count().catch(() => 0);
+  for (let i = 0; i < Math.min(rowButtonCount, 6); i += 1) {
+    const action = rowButtons.nth(i);
+    if (!(await action.isVisible().catch(() => false))) {
+      continue;
+    }
+    await action.click().catch(() => {});
+    await page.waitForTimeout(700);
+    const queryText = ((await queryEditor.innerText().catch(() => "")) || "").toLowerCase();
+    if (metadataKeyRegex.test(queryText) && queryText !== originalQuery) {
+      clicked = true;
+      queryChanged = true;
+      break;
+    }
+  }
+
+  const candidateActions = [
+    metadataRow.getByRole("button", { name: /include/i }).first(),
+    metadataRow.getByText(/^include$/i).first(),
+    metadataRow.getByRole("button", { name: /add filter with key/i }).first(),
+    metadataRow.getByRole("button", { name: /\+/ }).first(),
+    metadataRow.getByRole("button", { name: /add to query|add filter/i }).first(),
+    metadataRow.locator('button[aria-label*="Add filter"]').first(),
+    metadataRow.locator('button[title*="Add filter"]').first(),
+    metadataRow.locator('button[aria-label*="Add"]').first(),
+    page.getByRole("button", { name: /include/i }).first(),
+    page.getByText(/^include$/i).first(),
+    page.getByRole("button", { name: /add filter with key/i }).first(),
+    page.getByRole("button", { name: /\+/ }).first(),
+    page.getByRole("button", { name: /add to query|add filter/i }).first(),
+    page.locator('button[aria-label*="Add filter"]').first(),
+    page.locator('button[title*="Add filter"]').first(),
+    page.locator('button[aria-label*="Add"]').first(),
+  ];
+
+  if (!queryChanged) {
+    for (const action of candidateActions) {
+      if (await action.isVisible().catch(() => false)) {
+        await action.click().catch(() => {});
+        clicked = true;
+        await page.waitForTimeout(700);
+        const queryText = ((await queryEditor.innerText().catch(() => "")) || "").toLowerCase();
+        if (metadataKeyRegex.test(queryText) && queryText !== originalQuery) {
+          queryChanged = true;
+          break;
+        }
+      }
+    }
+  }
+  if (!clicked) {
+    const debugButtons = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll("button"));
+      return nodes
+        .map((btn) => ({
+          text: (btn.textContent || "").trim(),
+          aria: btn.getAttribute("aria-label") || "",
+          title: btn.getAttribute("title") || "",
+        }))
+        .filter((b) => b.text || b.aria || b.title)
+        .slice(0, 40);
+    });
+    // eslint-disable-next-line no-console
+    console.error("DEBUG button candidates:", JSON.stringify(debugButtons));
+    throw new Error("failed to click include/plus action from structured metadata");
+  }
+  if (!queryChanged) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "structured metadata include/plus click did not mutate query text in this Grafana build"
+    );
+  }
+
+  await page.waitForTimeout(1200);
+  await queryEditor.waitFor({ state: "visible", timeout: 10000 });
+}
+
 async function main() {
   await fs.mkdir(outDir, { recursive: true });
 
@@ -271,8 +382,19 @@ async function main() {
     await firstRow.click();
     await waitForGrafanaReady(page);
   }
+  await clickStructuredMetadataInclude(page);
   await page.screenshot({
     path: path.join(outDir, "explore-details.png"),
+    fullPage: true,
+  });
+
+  await page.goto(`${baseUrl}${buildDrilldownUrl(proxyUid)}`);
+  await waitForGrafanaReady(page);
+  await page
+    .getByRole("combobox", { name: "Filter by labels" })
+    .waitFor({ state: "visible", timeout: 30000 });
+  await page.screenshot({
+    path: path.join(outDir, "drilldown-main.png"),
     fullPage: true,
   });
 
@@ -290,7 +412,7 @@ async function main() {
     throw new Error("drilldown screenshot capture found empty logs");
   }
   await page.screenshot({
-    path: path.join(outDir, "drilldown-main.png"),
+    path: path.join(outDir, "drilldown-service.png"),
     fullPage: true,
   });
 

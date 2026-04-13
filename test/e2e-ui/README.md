@@ -40,6 +40,7 @@ Default output path:
 - `docs/images/ui/explore-main.png`
 - `docs/images/ui/explore-details.png`
 - `docs/images/ui/drilldown-main.png`
+- `docs/images/ui/drilldown-service.png`
 - `docs/images/ui/explore-tail-multitenant.png`
 
 Default screenshot time window is `now-5m` for high signal density. Override with:

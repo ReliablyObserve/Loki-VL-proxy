@@ -138,6 +138,7 @@ Output directory:
 - `docs/images/ui/explore-main.png`
 - `docs/images/ui/explore-details.png`
 - `docs/images/ui/drilldown-main.png`
+- `docs/images/ui/drilldown-service.png`
 - `docs/images/ui/explore-tail-multitenant.png`
 
 The capture script writes a fresh seed batch and continues background log ingestion while taking screenshots, so Explore range queries, live tail, and Drilldown screenshots include visible active data.

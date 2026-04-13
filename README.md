@@ -53,9 +53,9 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 
 Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Observability](docs/observability.md), [Testing](docs/testing.md)
 
-## UI Gallery (Compose + Playwright)
+## UI Gallery
 
-These screenshots are generated from the local compose stack (`test/e2e-compat`) with seeded test data and a short time window (`now-5m`).
+VictoriaLogs backend with Loki-VL-proxy as the Loki-compatible query layer.
 
 <a href="docs/images/ui/explore-main.png">
   <img src="docs/images/ui/explore-main.png" alt="Grafana Explore main view" width="240" />
@@ -65,6 +65,9 @@ These screenshots are generated from the local compose stack (`test/e2e-compat`)
 </a>
 <a href="docs/images/ui/drilldown-main.png">
   <img src="docs/images/ui/drilldown-main.png" alt="Grafana Logs Drilldown main view" width="240" />
+</a>
+<a href="docs/images/ui/drilldown-service.png">
+  <img src="docs/images/ui/drilldown-service.png" alt="Grafana Logs Drilldown service detail view" width="240" />
 </a>
 <a href="docs/images/ui/explore-tail-multitenant.png">
   <img src="docs/images/ui/explore-tail-multitenant.png" alt="Grafana Explore multi-tenant view" width="240" />
