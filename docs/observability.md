@@ -265,7 +265,7 @@ It also includes a `Long-Range Resilience KPIs` section for phase tuning:
 - retry/degraded-batch/partial-response rate
 - prefilter hit ratio
 
-Dashboard datasource notes (ops.sand hardening):
+Dashboard datasource notes:
 
 - datasource variable regex is intentionally permissive (`/.*/`) so the dashboard works with scrape-backed and OTLP-backed metric datasources without renaming
 - key stat panels use explicit zero fallbacks so dashboards remain readable during cold starts and low-traffic windows

@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Observability
 
 - add phase KPI metrics for long-range resilience and tuning: `loki_vl_proxy_window_retry_total`, `loki_vl_proxy_window_degraded_batch_total`, `loki_vl_proxy_window_partial_response_total`, and `loki_vl_proxy_window_prefilter_hit_ratio`
-- update the packaged proxy metrics dashboard and observability docs for ops.sand no-data hardening and phase KPI visibility
+- update the packaged proxy metrics dashboard and observability docs for no-data hardening and phase KPI visibility
 
 ### Tests
 
