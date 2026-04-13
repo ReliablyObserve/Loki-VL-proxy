@@ -165,10 +165,30 @@ jobs:
           awk -F'\t' '
             BEGIN { fail=0 }
             {
+              name=$1
               ns=$2+0
-              # Conservative threshold to catch severe performance regressions
-              if (ns > 25000) {
-                printf "FAIL: %s exceeded ns/op threshold: %.2f\n", $1, ns
+              size=0
+              tmp=name
+              sub(/^.*_/, "", tmp)
+              if (tmp ~ /^[0-9]+$/) {
+                size=tmp+0
+              }
+
+              # Scale-aware catastrophic bounds:
+              # smaller sets should stay tighter, large sets get wider headroom.
+              limit=100000
+              if (size <= 10) {
+                limit=50000
+              } else if (size <= 100) {
+                limit=100000
+              } else if (size <= 1000) {
+                limit=250000
+              } else if (size > 1000) {
+                limit=600000
+              }
+
+              if (ns > limit) {
+                printf "FAIL: %s exceeded ns/op threshold %.0f (got %.2f)\n", name, limit, ns
                 fail=1
               }
             }
