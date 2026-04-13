@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.41] - 2026-04-13
+
 ### Performance
 
 - add long-range phase-2 stream-aware window batching controls to reduce backend saturation spikes on expensive 2d/7d query mixes
