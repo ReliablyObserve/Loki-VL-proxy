@@ -90,6 +90,7 @@ extraArgs:
   label-values-indexed-cache: "false"
   label-values-hot-limit: "200"
   label-values-index-max-entries: "200000"
+  patterns-enabled: "true"
   log-level: "info"
   # Hardening
   http-read-timeout: "30s"
@@ -119,6 +120,7 @@ extraArgs:
   # - label-style: passthrough | underscores
   # - metadata-field-mode: native | translated | hybrid
   # - emit-structured-metadata: true | false
+  # - patterns-enabled: true | false
   #
   # Common profile examples:
   # 1) Loki/Grafana conservative:
