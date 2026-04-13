@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Operational flow dashboard for Loki-VL-proxy with a left-to-right client -> proxy -> VictoriaLogs overview, client load drilldowns, proxy/VictoriaLogs pipeline internals, and end-of-page resource health.",
+  "description": "Operational view for client -> proxy -> upstream flow. Uses route and operation scopes. Current metrics cover frontend/upstream RED, peer-cache health, query-range internals, and broad proxy work signals. Exact per-tier cache exchange volume and exact proxy translation latency still require new instrumentation.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -10,9 +10,9 @@
   "links": [],
   "panels": [
     {
-      "id": 3,
+      "id": 1,
       "type": "row",
-      "title": "Main Overview - Client -> Proxy -> VictoriaLogs",
+      "title": "Flow Overview - Client -> Proxy -> Upstream",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -22,9 +22,9 @@
       "collapsed": false
     },
     {
-      "id": 33,
+      "id": 2,
       "type": "stat",
-      "title": "Client: Requests/s",
+      "title": "Client Req/s",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -34,13 +34,134 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "req/s"
+          "expr": "sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m]))",
+          "legendFormat": "Client Req/s"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps"
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Client 5xx %",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(100 * sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])), 0.001)) or vector(0)",
+          "legendFormat": "Client 5xx %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Client p95",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])) )",
+          "legendFormat": "Client p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "showPercentChange": false,
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Proxy Cache Hit %",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(100 * sum(rate(loki_vl_proxy_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) / clamp_min(sum(rate(loki_vl_proxy_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) + sum(rate(loki_vl_proxy_cache_misses_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])), 0.001)) or vector(0)",
+          "legendFormat": "Proxy Cache Hit %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
         }
       },
       "options": {
@@ -63,39 +184,24 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Client: 5xx %",
+      "title": "Fleet Cache Hit %",
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 3,
+        "x": 12,
         "y": 1
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",status=~\"5..\"}[$__rate_interval])) / clamp_min(sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])), 0.001)",
-          "legendFormat": "5xx %"
+          "expr": "(100 * sum(rate(loki_vl_proxy_peer_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) / clamp_min(sum(rate(loki_vl_proxy_peer_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) + sum(rate(loki_vl_proxy_peer_cache_misses_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])), 0.001)) or vector(0)",
+          "legendFormat": "Fleet Cache Hit %"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
-              }
-            ]
-          }
+          "decimals": 1
         }
       },
       "options": {
@@ -116,41 +222,26 @@
       }
     },
     {
-      "id": 34,
+      "id": 7,
       "type": "stat",
-      "title": "Client: p95 Latency",
+      "title": "Upstream 5xx %",
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 6,
+        "x": 15,
         "y": 1
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum(rate(loki_vl_proxy_client_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "p95"
+          "expr": "(100 * sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\"}[5m])), 0.001)) or vector(0)",
+          "legendFormat": "Upstream 5xx %"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 3
-              }
-            ]
-          }
+          "unit": "percent",
+          "decimals": 2
         }
       },
       "options": {
@@ -173,164 +264,24 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Proxy: Cache Hit %",
+      "title": "Upstream p95",
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 9,
+        "x": 18,
         "y": 1
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum(rate(loki_vl_proxy_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) / clamp_min(sum(rate(loki_vl_proxy_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) + sum(rate(loki_vl_proxy_cache_misses_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])), 0.001)",
-          "legendFormat": "cache %"
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\"}[5m])) )",
+          "legendFormat": "Upstream p95"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 30
-              },
-              {
-                "color": "green",
-                "value": 60
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "showPercentChange": false,
-        "wideLayout": true
-      }
-    },
-    {
-      "id": 38,
-      "type": "stat",
-      "title": "Proxy: Window Cache Hit %",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 12,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "100 * sum(rate(loki_vl_proxy_window_cache_hit_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) / clamp_min(sum(rate(loki_vl_proxy_window_cache_hit_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) + sum(rate(loki_vl_proxy_window_cache_miss_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])), 0.001)",
-          "legendFormat": "window cache %"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 30
-              },
-              {
-                "color": "green",
-                "value": 60
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "showPercentChange": false,
-        "wideLayout": true
-      }
-    },
-    {
-      "id": 39,
-      "type": "stat",
-      "title": "Proxy: Circuit Breaker",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 15,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(loki_vl_proxy_circuit_breaker_state{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "state"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "Closed"
-                },
-                "1": {
-                  "text": "Open"
-                },
-                "2": {
-                  "text": "Half-open"
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0.5
-              },
-              {
-                "color": "red",
-                "value": 1.5
-              }
-            ]
-          }
+          "unit": "s",
+          "decimals": 3
         }
       },
       "options": {
@@ -353,62 +304,7 @@
     {
       "id": 9,
       "type": "stat",
-      "title": "VictoriaLogs: Backend p95",
-      "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 18,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.95, sum(rate(loki_vl_proxy_backend_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "backend p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 3
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "showPercentChange": false,
-        "wideLayout": true
-      }
-    },
-    {
-      "id": 44,
-      "type": "stat",
-      "title": "VictoriaLogs: Retry/Degrade Rate",
+      "title": "Circuit Breaker",
       "gridPos": {
         "h": 4,
         "w": 3,
@@ -418,29 +314,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_window_retry_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) + sum(rate(loki_vl_proxy_window_degraded_batch_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) + sum(rate(loki_vl_proxy_window_partial_response_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "events/s"
+          "expr": "max(loki_vl_proxy_circuit_breaker_state{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}) or vector(0)",
+          "legendFormat": "Circuit Breaker"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 0.1
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
+          "unit": "none",
+          "decimals": 0
         }
       },
       "options": {
@@ -461,9 +342,9 @@
       }
     },
     {
-      "id": 4,
+      "id": 10,
       "type": "timeseries",
-      "title": "Client: Request Rate by Endpoint",
+      "title": "Client Route Rate",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -473,23 +354,36 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (endpoint)",
-          "legendFormat": "{{endpoint}}"
+          "expr": "topk(12, sum by (route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])))",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
-      "id": 15,
+      "id": 11,
       "type": "timeseries",
-      "title": "Proxy: Translation / Coalescing",
+      "title": "Client Route Error %",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -499,33 +393,36 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_translations_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "translations"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_translation_errors_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "translation errors"
-        },
-        {
-          "refId": "C",
-          "expr": "sum(rate(loki_vl_proxy_coalesced_saved_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "coalesced saved"
+          "expr": "topk(12, 100 * sum by (route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\",status=~\"4..|5..\"}[5m])) / clamp_min(sum by (route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])), 0.001) )",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
-      "id": 43,
-      "type": "timeseries",
-      "title": "VictoriaLogs: Retry / Degraded / Partial",
+      "id": 12,
+      "type": "bargauge",
+      "title": "Client Route p95",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -535,33 +432,34 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_window_retry_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "retry"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_window_degraded_batch_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "degraded batch"
-        },
-        {
-          "refId": "C",
-          "expr": "sum(rate(loki_vl_proxy_window_partial_response_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "partial response"
+          "expr": "topk(12, histogram_quantile(0.95, sum by (route, le) (rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])) ) )",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "fillOpacity": 10
-          }
+          "unit": "s"
         }
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 16,
+        "minVizWidth": 8
       }
     },
     {
-      "id": 10,
+      "id": 13,
       "type": "row",
-      "title": "Client Edge - Request Quality & Shape",
+      "title": "Upstream Paths and Route Health",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -571,698 +469,1295 @@
       "collapsed": false
     },
     {
-      "id": 5,
+      "id": 14,
       "type": "timeseries",
-      "title": "Client: 4xx / 5xx Rate by Endpoint",
+      "title": "Upstream Route Rate",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 14
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",status=~\"4..|5..\"}[$__rate_interval])) by (endpoint, status)",
-          "legendFormat": "{{endpoint}} {{status}}"
+          "expr": "topk(12, sum by (system, route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\"}[5m])))",
+          "legendFormat": "{{system}} {{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
-      "id": 11,
+      "id": 15,
       "type": "timeseries",
-      "title": "Client: p50 Latency by Endpoint",
+      "title": "Upstream Route 5xx",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 14
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum(rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le, endpoint))",
-          "legendFormat": "p50 {{endpoint}}"
+          "expr": "topk(12, sum by (system, route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\",status=~\"5..\"}[5m])))",
+          "legendFormat": "{{system}} {{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
         }
-      }
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Client: p99 Latency by Endpoint",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 22
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.99, sum(rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le, endpoint))",
-          "legendFormat": "p99 {{endpoint}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
-      "id": 24,
-      "type": "timeseries",
-      "title": "Client: Error Reasons",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 22
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_client_errors_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (reason)",
-          "legendFormat": "{{reason}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "fillOpacity": 10
-          }
-        }
-      }
-    },
-    {
-      "id": 19,
+      "id": 16,
       "type": "bargauge",
-      "title": "Client: p95 Latency by Endpoint",
+      "title": "Upstream Route p95",
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 30
+        "w": 8,
+        "x": 16,
+        "y": 14
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum(rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le, endpoint))",
-          "legendFormat": "{{endpoint}}"
+          "expr": "topk(12, histogram_quantile(0.95, sum by (system, route, le) (rate(loki_vl_proxy_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\"}[5m])) ) )",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s"
         }
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 16,
+        "minVizWidth": 8
       }
     },
     {
-      "id": 20,
+      "id": 17,
       "type": "row",
-      "title": "Heavy Consumers - Client Load Drivers",
+      "title": "Proxy Processing and Translation Work",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 22
       },
       "collapsed": false
     },
     {
-      "id": 21,
-      "type": "timeseries",
-      "title": "Client: Request Rate by Client",
+      "id": 18,
+      "type": "bargauge",
+      "title": "Estimated Proxy Non-Upstream Time / Request",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 39
+        "y": 23
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, sum(rate(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (client))",
-          "legendFormat": "{{client}}"
+          "expr": "topk(12, clamp_min( ( sum by (route) (rate(loki_vl_proxy_request_duration_seconds_sum{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])) / clamp_min(sum by (route) (rate(loki_vl_proxy_request_duration_seconds_count{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])), 0.001) ) - ( sum by (route) (rate(loki_vl_proxy_request_duration_seconds_sum{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",system=~\"${upstream_system:regex}\",direction=\"upstream\"}[5m])) / clamp_min(sum by (route) (rate(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",direction=\"downstream\"}[5m])), 0.001) ), 0 ) * 1000 )",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "ms"
+        }
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 16,
+        "minVizWidth": 8
+      },
+      "description": "Approximate non-upstream wall time per request. Multi-backend routes can overstate or understate this value."
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Translation and Coalescing Signals",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(loki_vl_proxy_translations_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "translations/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(loki_vl_proxy_translation_errors_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "translation errors/s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(loki_vl_proxy_coalesced_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "coalesced responses/s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(loki_vl_proxy_coalesced_saved_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "backend requests saved/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Query-Range Recovery Signals",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(loki_vl_proxy_window_retry_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "retries/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(loki_vl_proxy_window_degraded_batch_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "degraded batches/s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(loki_vl_proxy_window_partial_response_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "partial responses/s"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(loki_vl_proxy_window_prefilter_error_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "prefilter errors/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Window Fetch vs Merge p95",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_vl_proxy_window_fetch_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) )",
+          "legendFormat": "window fetch p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_vl_proxy_window_merge_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) )",
+          "legendFormat": "window merge p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 22,
       "type": "timeseries",
-      "title": "Client: p95 Latency by Client",
+      "title": "Adaptive and Prefilter State",
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 39
+        "w": 12,
+        "x": 12,
+        "y": 31
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, histogram_quantile(0.95, sum(rate(loki_vl_proxy_client_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le, client)))",
-          "legendFormat": "{{client}}"
+          "expr": "100 * max(loki_vl_proxy_window_prefilter_hit_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "prefilter hit %"
+        },
+        {
+          "refId": "B",
+          "expr": "max(loki_vl_proxy_window_adaptive_latency_ewma_seconds{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "latency ewma (s)"
+        },
+        {
+          "refId": "C",
+          "expr": "100 * max(loki_vl_proxy_window_adaptive_error_ewma{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "error ewma %"
+        },
+        {
+          "refId": "D",
+          "expr": "max(loki_vl_proxy_window_adaptive_parallel_current{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "adaptive parallel"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
           "custom": {
             "fillOpacity": 10
           }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 23,
-      "type": "timeseries",
-      "title": "Client: Inflight by Client",
+      "type": "row",
+      "title": "Cache Efficiency and Fleet Cache",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "collapsed": false
+    },
+    {
+      "id": 24,
+      "type": "bargauge",
+      "title": "Cache Hit % by Route",
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 16,
-        "y": 39
+        "x": 0,
+        "y": 40
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, max(loki_vl_proxy_client_inflight_requests{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}) by (client))",
-          "legendFormat": "{{client}}"
+          "expr": "topk(12, 100 * sum by (route) (rate(loki_vl_proxy_cache_hits_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])) / clamp_min( sum by (route) (rate(loki_vl_proxy_cache_hits_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])) + sum by (route) (rate(loki_vl_proxy_cache_misses_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])), 0.001 ) )",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "custom": {
-            "fillOpacity": 10
-          }
+          "unit": "percent"
         }
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 16,
+        "minVizWidth": 8
       }
     },
     {
       "id": 25,
-      "type": "table",
-      "title": "Top Clients by Request Volume",
+      "type": "timeseries",
+      "title": "Cache Hits vs Misses by Route",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 47
+        "w": 8,
+        "x": 8,
+        "y": 40
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, sum(increase(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__range])) by (client))",
-          "legendFormat": "{{client}}",
-          "format": "table",
-          "instant": true
+          "expr": "topk(10, sum by (route) (rate(loki_vl_proxy_cache_hits_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])))",
+          "legendFormat": "hit {{route}}"
+        },
+        {
+          "refId": "B",
+          "expr": "topk(10, sum by (route) (rate(loki_vl_proxy_cache_misses_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])))",
+          "legendFormat": "miss {{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 26,
-      "type": "table",
-      "title": "Top Clients by Response Bytes",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 47
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "topk(10, sum(increase(loki_vl_proxy_client_response_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__range])) by (client))",
-          "legendFormat": "{{client}}",
-          "format": "table",
-          "instant": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes"
-        }
-      }
-    },
-    {
-      "id": 35,
-      "type": "row",
-      "title": "Proxy -> VictoriaLogs Query Pipeline",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 55
-      },
-      "collapsed": false
-    },
-    {
-      "id": 14,
       "type": "timeseries",
-      "title": "Proxy: Cache Hits vs Misses",
+      "title": "Fleet Cache Health",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 56
+        "w": 8,
+        "x": 16,
+        "y": 40
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "cache hit"
+          "expr": "sum(rate(loki_vl_proxy_peer_cache_hits_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "peer hits/s"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_cache_misses_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "cache miss"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "fillOpacity": 10
-          }
-        }
-      }
-    },
-    {
-      "id": 42,
-      "type": "timeseries",
-      "title": "Proxy: Prefilter Keep / Skip Rate",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_window_prefilter_kept_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "kept"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_window_prefilter_skipped_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "skipped"
+          "expr": "sum(rate(loki_vl_proxy_peer_cache_misses_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "peer misses/s"
         },
         {
           "refId": "C",
-          "expr": "sum(rate(loki_vl_proxy_window_prefilter_error_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "prefilter error"
+          "expr": "sum(rate(loki_vl_proxy_peer_cache_errors_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "peer errors/s"
+        },
+        {
+          "refId": "D",
+          "expr": "max(loki_vl_proxy_peer_cache_peers{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "remote peers"
+        },
+        {
+          "refId": "E",
+          "expr": "max(loki_vl_proxy_peer_cache_cluster_members{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "cluster members"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
           "custom": {
             "fillOpacity": 10
           }
         }
-      }
-    },
-    {
-      "id": 36,
-      "type": "timeseries",
-      "title": "VictoriaLogs: Window Fetch Latency",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 64
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum(rate(loki_vl_proxy_window_fetch_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "fetch p50"
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum(rate(loki_vl_proxy_window_fetch_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "fetch p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        }
-      }
-    },
-    {
-      "id": 37,
-      "type": "timeseries",
-      "title": "Proxy: Window Merge Latency",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 64
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum(rate(loki_vl_proxy_window_merge_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "merge p50"
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum(rate(loki_vl_proxy_window_merge_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval])) by (le))",
-          "legendFormat": "merge p95"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        }
-      }
-    },
-    {
-      "id": 40,
-      "type": "timeseries",
-      "title": "Adaptive EWMA",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 72
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(loki_vl_proxy_window_adaptive_latency_ewma_seconds{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "latency ewma"
-        },
-        {
-          "refId": "B",
-          "expr": "max(loki_vl_proxy_window_adaptive_error_ewma{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "error ewma"
-        },
-        {
-          "refId": "C",
-          "expr": "max(loki_vl_proxy_window_adaptive_parallel_current{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "parallel current"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 10
-          }
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 27,
-      "type": "row",
-      "title": "Operational Resources",
+      "type": "timeseries",
+      "title": "Window Cache and Prefilter Ratios",
       "gridPos": {
-        "h": 1,
-        "w": 24,
+        "h": 8,
+        "w": 12,
         "x": 0,
-        "y": 80
+        "y": 48
       },
-      "collapsed": false
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(loki_vl_proxy_window_cache_hit_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) / clamp_min( sum(rate(loki_vl_proxy_window_cache_hit_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])) + sum(rate(loki_vl_proxy_window_cache_miss_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])), 0.001 )",
+          "legendFormat": "window cache hit %"
+        },
+        {
+          "refId": "B",
+          "expr": "100 * max(loki_vl_proxy_window_prefilter_hit_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "prefilter hit %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
       "id": 28,
-      "type": "gauge",
-      "title": "Memory Usage %",
-      "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 0,
-        "y": 81
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "100 * max(loki_vl_proxy_process_memory_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "memory %"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "thresholds": {
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 70
-              },
-              {
-                "color": "red",
-                "value": 85
-              }
-            ]
-          }
-        }
-      }
-    },
-    {
-      "id": 17,
-      "type": "stat",
-      "title": "Process RSS",
-      "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 4,
-        "y": 81
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(loki_vl_proxy_process_resident_memory_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "rss"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "showPercentChange": false,
-        "wideLayout": true
-      }
-    },
-    {
-      "id": 18,
-      "type": "stat",
-      "title": "Open File Descriptors",
-      "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 8,
-        "y": 81
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(loki_vl_proxy_process_open_fds{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "fds"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto",
-        "textMode": "value_and_name",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "showPercentChange": false,
-        "wideLayout": true
-      }
-    },
-    {
-      "id": 29,
-      "type": "timeseries",
-      "title": "CPU Usage Ratio by Mode",
+      "type": "bargauge",
+      "title": "Top Routes by Cache Miss Rate",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 48
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}) by (mode)",
-          "legendFormat": "{{mode}}"
+          "expr": "topk(12, sum by (route) (rate(loki_vl_proxy_cache_misses_by_endpoint{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])))",
+          "legendFormat": "{{route}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "fillOpacity": 10
-          }
+          "unit": "reqps"
         }
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "minVizHeight": 16,
+        "minVizWidth": 8
       }
+    },
+    {
+      "id": 29,
+      "type": "row",
+      "title": "Client Regression and Bug Signals",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "collapsed": false
     },
     {
       "id": 30,
       "type": "timeseries",
-      "title": "PSI Pressure (60s Window)",
+      "title": "Client Error Reasons",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 57
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(loki_vl_proxy_process_pressure_cpu_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "cpu some"
-        },
-        {
-          "refId": "B",
-          "expr": "max(loki_vl_proxy_process_pressure_memory_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "memory some"
-        },
-        {
-          "refId": "C",
-          "expr": "max(loki_vl_proxy_process_pressure_io_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
-          "legendFormat": "io some"
+          "expr": "topk(12, sum by (reason) (rate(loki_vl_proxy_client_errors_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])))",
+          "legendFormat": "{{reason}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 31,
       "type": "timeseries",
-      "title": "Disk Throughput",
+      "title": "Top Clients by Request Rate",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 57
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_process_disk_read_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "read B/s"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_process_disk_written_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "write B/s"
+          "expr": "topk(10, sum by (client) (rate(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])))",
+          "legendFormat": "{{client}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "Bps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "reqps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     },
     {
       "id": 32,
       "type": "timeseries",
-      "title": "Network Throughput",
+      "title": "Top Clients by p95",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 57
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(loki_vl_proxy_process_network_receive_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "rx B/s"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_vl_proxy_process_network_transmit_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
-          "legendFormat": "tx B/s"
+          "expr": "topk(10, histogram_quantile(0.95, sum by (client, le) (rate(loki_vl_proxy_client_request_duration_seconds_bucket{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])) ) )",
+          "legendFormat": "{{client}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "Bps",
           "custom": {
             "fillOpacity": 10
-          }
+          },
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Client Inflight",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 65
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max(loki_vl_proxy_client_inflight_requests{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}))",
+          "legendFormat": "{{client}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Top Clients by Error %",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 65
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, 100 * sum by (client) (rate(loki_vl_proxy_client_status_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\",status=~\"4..|5..\"}[5m])) / clamp_min(sum by (client) (rate(loki_vl_proxy_client_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\",route=~\"${route:regex}\"}[5m])), 0.001) )",
+          "legendFormat": "{{client}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Top Clients by Response Bytes",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 65
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (client) (rate(loki_vl_proxy_client_response_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m])))",
+          "legendFormat": "{{client}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "Bps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "row",
+      "title": "Operational Resources",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "collapsed": false
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Memory Saturation",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * max(loki_vl_proxy_process_memory_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "node used %"
+        },
+        {
+          "refId": "B",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_memory_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "memory psi some %"
+        },
+        {
+          "refId": "C",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_memory_full_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "memory psi full %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Memory pressure view for the selected proxy scope. Usage is node memory consumption on the host namespace; PSI shows sustained reclaim and stall pressure."
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "CPU Saturation by Mode",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",mode=~\"user|system|iowait\"})",
+          "legendFormat": "total"
+        },
+        {
+          "refId": "B",
+          "expr": "100 * sum(loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",mode=\"user\"})",
+          "legendFormat": "user"
+        },
+        {
+          "refId": "C",
+          "expr": "100 * sum(loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",mode=\"system\"})",
+          "legendFormat": "system"
+        },
+        {
+          "refId": "D",
+          "expr": "100 * sum(loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",mode=\"iowait\"})",
+          "legendFormat": "iowait"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "CPU share consumed by the selected proxy scope. Uses the actual mode label exported by the process CPU ratio family."
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Disk IOPS Up / Down",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(loki_vl_proxy_process_disk_read_operations_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "read ops/s"
+        },
+        {
+          "refId": "B",
+          "expr": "-1 * sum(rate(loki_vl_proxy_process_disk_write_operations_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "write ops/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Process IO operation rate from /proc/self/io. Read is positive, write is negative for the same directional visual language as network."
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Network Up / Down",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(loki_vl_proxy_process_network_receive_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "downstream in"
+        },
+        {
+          "refId": "B",
+          "expr": "-1 * sum(rate(loki_vl_proxy_process_network_transmit_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "upstream out"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "Bps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Network throughput in a directional view. Receive stays above zero, transmit stays below zero."
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Memory Footprint and Headroom",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 82
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(loki_vl_proxy_process_resident_memory_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "proxy rss"
+        },
+        {
+          "refId": "B",
+          "expr": "min(loki_vl_proxy_process_memory_available_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "lowest available"
+        },
+        {
+          "refId": "C",
+          "expr": "min(loki_vl_proxy_process_memory_free_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "lowest free"
+        },
+        {
+          "refId": "D",
+          "expr": "max(loki_vl_proxy_process_memory_total_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"})",
+          "legendFormat": "node total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Process footprint against the tightest node memory headroom in the selected scope."
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Disk Throughput Up / Down",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 82
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(loki_vl_proxy_process_disk_read_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "read B/s"
+        },
+        {
+          "refId": "B",
+          "expr": "-1 * sum(rate(loki_vl_proxy_process_disk_written_bytes_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}[5m]))",
+          "legendFormat": "write B/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "Bps"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Disk byte throughput in the same directional shape as network and IOPS."
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "PSI Pressure (60s)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 82
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_cpu_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "cpu some %"
+        },
+        {
+          "refId": "B",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_memory_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "memory some %"
+        },
+        {
+          "refId": "C",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_memory_full_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "memory full %"
+        },
+        {
+          "refId": "D",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_io_some_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "io some %"
+        },
+        {
+          "refId": "E",
+          "expr": "100 * max(loki_vl_proxy_process_pressure_io_full_ratio{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",window=\"60s\"})",
+          "legendFormat": "io full %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Sustained stall pressure over the 60s PSI window."
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Open FDs by Pod",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max by (pod) (loki_vl_proxy_process_open_fds{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Resident Memory by Pod",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, max by (pod) (loki_vl_proxy_process_resident_memory_bytes{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}))",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10
+          },
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       }
     }
@@ -1377,6 +1872,54 @@
         "includeAll": true,
         "multi": true,
         "sort": 1
+      },
+      {
+        "name": "request_type",
+        "label": "Operation",
+        "type": "query",
+        "query": "label_values(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\"}, endpoint)",
+        "datasource": "$datasource",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "allValue": ".*",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "route",
+        "label": "Route",
+        "type": "query",
+        "query": "label_values(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",endpoint=~\"${request_type:regex}\"}, route)",
+        "datasource": "$datasource",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "allValue": ".*",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "upstream_system",
+        "label": "Upstream System",
+        "type": "query",
+        "query": "label_values(loki_vl_proxy_requests_total{job=~\"${job:regex}\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}\",service=~\"${service:regex}\",pod=~\"${pod:regex}\",direction=\"upstream\"}, system)",
+        "datasource": "$datasource",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "allValue": ".*",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1
       }
     ]
   },
@@ -1386,7 +1929,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Loki-VL-Proxy Operations",
+  "title": "Loki-VL-proxy Operations",
   "uid": "cll-loki-vl-proxy-operations",
-  "version": 1
+  "version": 3
 }

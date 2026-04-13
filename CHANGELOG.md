@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Observability
+
+- rebuild the packaged operations dashboard resource section into a consistent operator view, adding directional CPU/memory/disk/network panels plus per-pod FD and RSS visibility
+- add prefixed process disk operation metrics (`loki_vl_proxy_process_disk_read_operations_total`, `loki_vl_proxy_process_disk_write_operations_total`) for both Prometheus scrape and OTLP export
+
+### Tests
+
+- add a metric-name guard that fails CI when new unprefixed metric families are introduced outside the legacy compatibility allowlist
+
 ## [1.0.4] - 2026-04-13
 
 ### CI

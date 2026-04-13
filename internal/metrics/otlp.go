@@ -743,7 +743,7 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 		)
 		return metrics
 	}
-	readBytes, writeBytes := readDiskIO()
+	readBytes, writeBytes, readOps, writeOps := readDiskIO()
 	rxBytes, txBytes := readNetIO()
 	memTotal, memAvail, memFree := readMemInfo()
 	usageRatio := 0.0
@@ -770,6 +770,8 @@ func (p *OTLPPusher) systemMetrics(now int64) []map[string]interface{} {
 		p.sumMetric("loki_vl_proxy_process_disk_read_bytes_total", "Disk read bytes.", "By", p.counterDP("loki_vl_proxy_process_disk_read_bytes_total", readBytes, now)),
 		p.sumMetric("process_disk_written_bytes_total", "Disk written bytes.", "By", p.counterDP("process_disk_written_bytes_total", writeBytes, now)),
 		p.sumMetric("loki_vl_proxy_process_disk_written_bytes_total", "Disk written bytes.", "By", p.counterDP("loki_vl_proxy_process_disk_written_bytes_total", writeBytes, now)),
+		p.sumMetric("loki_vl_proxy_process_disk_read_operations_total", "Disk read operations.", "{operation}", p.counterDP("loki_vl_proxy_process_disk_read_operations_total", readOps, now)),
+		p.sumMetric("loki_vl_proxy_process_disk_write_operations_total", "Disk write operations.", "{operation}", p.counterDP("loki_vl_proxy_process_disk_write_operations_total", writeOps, now)),
 		p.sumMetric("process_network_receive_bytes_total", "Network receive bytes.", "By", p.counterDP("process_network_receive_bytes_total", rxBytes, now)),
 		p.sumMetric("loki_vl_proxy_process_network_receive_bytes_total", "Network receive bytes.", "By", p.counterDP("loki_vl_proxy_process_network_receive_bytes_total", rxBytes, now)),
 		p.sumMetric("process_network_transmit_bytes_total", "Network transmit bytes.", "By", p.counterDP("process_network_transmit_bytes_total", txBytes, now)),
