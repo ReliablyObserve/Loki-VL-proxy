@@ -629,6 +629,65 @@ func TestContract_Patterns_DisabledReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from drilldown-limits, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if resp["pattern_ingester_enabled"] != true {
+		t.Fatalf("expected pattern_ingester_enabled=true, got %v", resp["pattern_ingester_enabled"])
+	}
+	limits, ok := resp["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits object, got %T", resp["limits"])
+	}
+	if limits["pattern_persistence_enabled"] != true {
+		t.Fatalf("expected limits.pattern_persistence_enabled=true, got %v", limits["pattern_persistence_enabled"])
+	}
+}
+
+func TestContract_DrilldownLimits_PatternsDisabledAdvertised(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	disabled := false
+	p, err := New(Config{
+		BackendURL:      vlBackend.URL,
+		PatternsEnabled: &disabled,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from drilldown-limits, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if resp["pattern_ingester_enabled"] != false {
+		t.Fatalf("expected pattern_ingester_enabled=false, got %v", resp["pattern_ingester_enabled"])
+	}
+	limits, ok := resp["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits object, got %T", resp["limits"])
+	}
+	if limits["pattern_persistence_enabled"] != false {
+		t.Fatalf("expected limits.pattern_persistence_enabled=false, got %v", limits["pattern_persistence_enabled"])
+	}
+}
+
 // --- /loki/api/v1/tail ---
 
 func TestContract_Tail_RequiresQuery(t *testing.T) {

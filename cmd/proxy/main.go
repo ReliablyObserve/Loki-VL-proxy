@@ -112,6 +112,10 @@ type proxyRuntimeConfig struct {
 	labelValuesIndexPersistInterval    time.Duration
 	labelValuesIndexStartupStale       time.Duration
 	labelValuesIndexPeerWarmTimeout    time.Duration
+	patternsPersistPath                string
+	patternsPersistInterval            time.Duration
+	patternsStartupStale               time.Duration
+	patternsPeerWarmTimeout            time.Duration
 	peerSelf                           string
 	peerDiscovery                      string
 	peerDNS                            string
@@ -380,6 +384,10 @@ func run(
 	labelValuesIndexPersistInterval := fs.Duration("label-values-index-persist-interval", 30*time.Second, "How often to persist the in-memory label-values index snapshot to disk")
 	labelValuesIndexStartupStale := fs.Duration("label-values-index-startup-stale-threshold", 60*time.Second, "Treat on-disk label-values index snapshot older than this as stale and warm from peers before serving")
 	labelValuesIndexPeerWarmTimeout := fs.Duration("label-values-index-startup-peer-warm-timeout", 5*time.Second, "Maximum time to wait for startup label-values index warm from peers when disk snapshot is stale or missing")
+	patternsPersistPath := fs.String("patterns-persist-path", "", "Path to persisted patterns snapshot JSON file. Empty disables persistence.")
+	patternsPersistInterval := fs.Duration("patterns-persist-interval", 30*time.Second, "How often to persist in-memory patterns snapshots to disk")
+	patternsStartupStale := fs.Duration("patterns-startup-stale-threshold", 60*time.Second, "Treat on-disk patterns snapshot older than this as stale and warm from peers before serving")
+	patternsPeerWarmTimeout := fs.Duration("patterns-startup-peer-warm-timeout", 5*time.Second, "Maximum time to wait for startup patterns snapshot warm from peers")
 	allowGlobalTenant := fs.Bool("tenant.allow-global", false, `Allow X-Scope-OrgID "*" to bypass AccountID/ProjectID scoping and use the backend default tenant`)
 
 	// Peer cache (fleet distribution)
@@ -506,6 +514,10 @@ func run(
 			labelValuesIndexPersistInterval:    *labelValuesIndexPersistInterval,
 			labelValuesIndexStartupStale:       *labelValuesIndexStartupStale,
 			labelValuesIndexPeerWarmTimeout:    *labelValuesIndexPeerWarmTimeout,
+			patternsPersistPath:                *patternsPersistPath,
+			patternsPersistInterval:            *patternsPersistInterval,
+			patternsStartupStale:               *patternsStartupStale,
+			patternsPeerWarmTimeout:            *patternsPeerWarmTimeout,
 			peerSelf:                           *peerSelf,
 			peerDiscovery:                      *peerDiscovery,
 			peerDNS:                            *peerDNS,
@@ -1051,6 +1063,10 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		LabelValuesIndexPersistInterval:    cfg.labelValuesIndexPersistInterval,
 		LabelValuesIndexStartupStale:       cfg.labelValuesIndexStartupStale,
 		LabelValuesIndexPeerWarmTimeout:    cfg.labelValuesIndexPeerWarmTimeout,
+		PatternsPersistPath:                cfg.patternsPersistPath,
+		PatternsPersistInterval:            cfg.patternsPersistInterval,
+		PatternsStartupStale:               cfg.patternsStartupStale,
+		PatternsPeerWarmTimeout:            cfg.patternsPeerWarmTimeout,
 		PeerCache:                          peerCache,
 		PeerAuthToken:                      cfg.peerAuthToken,
 	}, nil
@@ -1168,6 +1184,23 @@ func logProxyStartup(logger *slog.Logger, proxyCfg proxy.Config, peerSelf, peerD
 			"estimated_ram_per_label_bytes", estimatedRAMPerLabelBytes,
 			"estimated_disk_per_label_bytes", estimatedDiskPerLabelBytes,
 		)
+	}
+	if strings.TrimSpace(proxyCfg.PatternsPersistPath) != "" {
+		logger.Info(
+			"patterns snapshot persistence enabled",
+			"persist_path", proxyCfg.PatternsPersistPath,
+			"persist_interval", proxyCfg.PatternsPersistInterval,
+			"startup_stale_threshold", proxyCfg.PatternsStartupStale,
+			"startup_peer_warm_timeout", proxyCfg.PatternsPeerWarmTimeout,
+		)
+	} else {
+		patternsEnabled := proxyCfg.PatternsEnabled == nil || *proxyCfg.PatternsEnabled
+		if patternsEnabled {
+			logger.Info(
+				"patterns snapshot persistence disabled",
+				"hint", "set -patterns-persist-path and use StatefulSet + PVC for restart-safe patterns cache",
+			)
+		}
 	}
 	if proxyCfg.DerivedFields != nil {
 		logger.Info("loaded derived fields", "count", len(proxyCfg.DerivedFields))
