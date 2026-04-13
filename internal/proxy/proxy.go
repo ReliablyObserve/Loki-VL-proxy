@@ -4074,7 +4074,9 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	patterns := extractLogPatterns(body, stepParam, patternLimit)
-	if resp.StatusCode >= http.StatusBadRequest {
+	// Some VictoriaLogs builds may return a query payload shape that is valid (HTTP 200)
+	// but not pattern-extractable here; fall back to query_range in that case too.
+	if resp.StatusCode >= http.StatusBadRequest || len(patterns) == 0 {
 		rangeParams := url.Values{}
 		rangeParams.Set("query", logsqlQuery)
 		if s := startParam; s != "" {

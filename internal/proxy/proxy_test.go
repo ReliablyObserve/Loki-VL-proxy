@@ -663,6 +663,38 @@ func TestContract_Patterns_FallsBackToQueryRangeWhenQueryUnavailable(t *testing.
 	}
 }
 
+func TestContract_Patterns_FallsBackToQueryRangeWhenQueryHasNoExtractablePatterns(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/query":
+			// Valid response body, but no extractable lines for pattern miner.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+		case "/select/logsql/query_range":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[{"stream":{"level":"info"},"values":[["1712311200000000000","GET /api/users 200 15ms"],["1712311201000000000","GET /api/users 200 22ms"]]}]}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=1&end=2", nil)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	data, _ := resp["data"].([]interface{})
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty patterns response from query_range fallback when query body has no extractable patterns, got %v", resp)
+	}
+}
+
 func TestContract_Patterns_DisabledReturnsNotFound(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -696,14 +728,17 @@ func TestContract_Patterns_EmptyResultDoesNotPoisonCache(t *testing.T) {
 	callCount := 0
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		if callCount == 1 {
-			// First probe is empty (no logs yet).
-			return
+		switch {
+		case callCount <= 2:
+			// First probe: query + fallback query_range are both empty.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+		default:
+			// Subsequent probe has data and should not be blocked by sticky empty cache.
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}` + "\n"))
+			_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 22ms","app":"web","level":"info"}` + "\n"))
 		}
-		// Subsequent probe has data and should not be blocked by sticky empty cache.
-		w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}` + "\n"))
-		w.Write([]byte(`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 22ms","app":"web","level":"info"}` + "\n"))
 	}))
 	defer vlBackend.Close()
 
@@ -729,7 +764,7 @@ func TestContract_Patterns_EmptyResultDoesNotPoisonCache(t *testing.T) {
 	if len(secondData) == 0 {
 		t.Fatalf("expected second patterns probe to return data (empty response must not be sticky), got %v", second)
 	}
-	if callCount < 2 {
+	if callCount < 3 {
 		t.Fatalf("expected backend to be queried again after empty probe; got callCount=%d", callCount)
 	}
 }
