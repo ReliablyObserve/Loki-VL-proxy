@@ -254,6 +254,9 @@ type Config struct {
 	// EmitStructuredMetadata enables Loki 3-tuple stream values [ts, line, metadata].
 	// Disabled by default for conservative datasource compatibility.
 	EmitStructuredMetadata bool
+	// PatternsEnabled controls /loki/api/v1/patterns availability.
+	// Nil defaults to true for backward compatibility.
+	PatternsEnabled *bool
 	// Query range windowing/cache options.
 	// When enabled, eligible log query_range requests are split into time windows,
 	// fetched with bounded parallelism, and merged in Loki-compatible direction order.
@@ -396,6 +399,7 @@ type Proxy struct {
 	derivedFields                         []DerivedField
 	streamResponse                        bool
 	emitStructuredMetadata                bool
+	patternsEnabled                       bool
 	labelTranslator                       *LabelTranslator
 	metadataFieldMode                     MetadataFieldMode
 	streamFieldsMap                       map[string]bool  // known _stream_fields for VL stream selector optimization
@@ -707,6 +711,10 @@ func New(cfg Config) (*Proxy, error) {
 
 	labelTranslator := NewLabelTranslator(cfg.LabelStyle, cfg.FieldMappings)
 	declaredLabelFields := buildDeclaredLabelFields(cfg.StreamFields, cfg.ExtraLabelFields, labelTranslator)
+	patternsEnabled := true
+	if cfg.PatternsEnabled != nil {
+		patternsEnabled = *cfg.PatternsEnabled
+	}
 
 	return &Proxy{
 		backend:       u,
@@ -737,6 +745,7 @@ func New(cfg Config) (*Proxy, error) {
 		derivedFields:                         cfg.DerivedFields,
 		streamResponse:                        cfg.StreamResponse,
 		emitStructuredMetadata:                cfg.EmitStructuredMetadata,
+		patternsEnabled:                       patternsEnabled,
 		labelTranslator:                       labelTranslator,
 		metadataFieldMode:                     metadataFieldMode,
 		streamFieldsMap:                       buildStreamFieldsMap(cfg.StreamFields),
@@ -3406,6 +3415,11 @@ func (p *Proxy) detectedLabelValuesForField(ctx context.Context, fieldName, quer
 // handlePatterns returns log patterns for Grafana Logs Drilldown.
 func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if !p.patternsEnabled {
+		p.writeError(w, http.StatusNotFound, "patterns endpoint is disabled")
+		p.metrics.RecordRequest("patterns", http.StatusNotFound, time.Since(start))
+		return
+	}
 	if p.handleMultiTenantFanout(w, r, "patterns", p.handlePatterns) {
 		return
 	}

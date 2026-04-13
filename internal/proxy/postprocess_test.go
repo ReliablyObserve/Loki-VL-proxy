@@ -309,7 +309,7 @@ func TestExtractLogPatternsRespectsLimit(t *testing.T) {
 func TestExtractLogPatterns_DefaultAndMaxLimitPaths(t *testing.T) {
 	lines := make([]string, 0, maxPatternResponseLimit+25)
 	for i := 0; i < maxPatternResponseLimit+25; i++ {
-		lines = append(lines, `{"_time":"2026-04-04T10:00:00Z","_msg":"route /item-`+strconv.Itoa(i)+` 200","level":"info"}`)
+		lines = append(lines, `{"_time":"2026-04-04T10:00:00Z","_msg":"tokA`+strconv.Itoa(i)+` tokB`+strconv.Itoa(i)+` tokC`+strconv.Itoa(i)+` tokD`+strconv.Itoa(i)+`","level":"info"}`)
 	}
 	vlBody := []byte(strings.Join(lines, "\n"))
 
@@ -346,6 +346,35 @@ func TestExtractLogPatterns_GroupsByBucketAndDetectedLevel(t *testing.T) {
 	}
 	if got := samples[0][1]; got != 2 {
 		t.Fatalf("expected warn bucket count 2, got %#v", got)
+	}
+}
+
+func TestExtractLogPatterns_DrainLikeTemplateMerging(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"level=info msg=request id=1 user=alice"}`,
+		`{"_time":"2026-04-04T10:00:02Z","_msg":"level=info msg=request id=2 user=bob"}`,
+		`{"_time":"2026-04-04T10:00:03Z","_msg":"level=info msg=request id=3 user=carol"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody, "1m", 10)
+	if len(patterns) != 1 {
+		t.Fatalf("expected one merged drain-like pattern, got %d", len(patterns))
+	}
+	got, _ := patterns[0]["pattern"].(string)
+	if got != "level=info msg=request id=<_> user=<_>" {
+		t.Fatalf("unexpected merged pattern: %q", got)
+	}
+}
+
+func TestExtractLogPatterns_SkipsTooShortMessagesLikeLokiDrain(t *testing.T) {
+	vlBody := []byte(strings.Join([]string{
+		`{"_time":"2026-04-04T10:00:01Z","_msg":"ok done"}`,
+		`{"_time":"2026-04-04T10:00:02Z","_msg":"still ok"}`,
+	}, "\n"))
+
+	patterns := extractLogPatterns(vlBody, "1m", 10)
+	if len(patterns) != 0 {
+		t.Fatalf("expected no patterns for messages below minimum token length, got %d", len(patterns))
 	}
 }
 

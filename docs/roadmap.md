@@ -34,7 +34,7 @@
 - [x] Per-endpoint cache/backend metrics, CB state gauge
 - [x] Fuzz testing (1.2M+ executions, no panics)
 - [x] Nested binary metric queries (`sum(rate(...)) / sum(rate(...))`)
-- [x] `/loki/api/v1/patterns` proxy-side drain-like pattern extraction
+- [x] `/loki/api/v1/patterns` proxy-side Loki-style Drain tokenizer/clustering extraction
 - [x] `direction` parameter (forward/backward sort)
 - [x] `quantile_over_time()` mapped to VL quantile
 - [x] `label_format` multi-rename (comma-separated)
