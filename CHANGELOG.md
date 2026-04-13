@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-13
+
 ### CI
 
 - make auto-release honor forward chart version overrides so published tags/images/charts can jump directly to `1.0.0` (and future explicit major/minor targets) instead of always patch-bumping from the latest tag
