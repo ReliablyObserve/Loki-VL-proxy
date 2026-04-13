@@ -355,6 +355,9 @@ func TestRun_DefaultEnablesStructuredMetadata(t *testing.T) {
 	if !captured.proxyCfg.emitStructuredMetadata {
 		t.Fatal("expected -emit-structured-metadata to default to true")
 	}
+	if !captured.proxyCfg.patternsEnabled {
+		t.Fatal("expected -patterns-enabled to default to true")
+	}
 }
 
 func TestBuildServerTLSConfig_RequiresCAWhenClientCertsRequired(t *testing.T) {
@@ -806,6 +809,7 @@ func TestBuildProxyConfig(t *testing.T) {
 		derivedFieldsJSON:               `[{"name":"traceID","matcherRegex":"trace_id=(\\w+)","url":"http://tempo/${__value.raw}"}]`,
 		streamResponse:                  true,
 		emitStructuredMetadata:          true,
+		patternsEnabled:                 false,
 		queryRangeWindowing:             true,
 		queryRangeSplitInterval:         30 * time.Minute,
 		queryRangeMaxParallel:           4,
@@ -880,6 +884,9 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if !got.EmitStructuredMetadata {
 		t.Fatalf("expected emit structured metadata to be enabled")
+	}
+	if got.PatternsEnabled == nil || *got.PatternsEnabled {
+		t.Fatalf("expected patterns endpoint to be disabled in built config")
 	}
 	if !got.QueryRangeWindowingEnabled {
 		t.Fatalf("expected query range windowing to be enabled")

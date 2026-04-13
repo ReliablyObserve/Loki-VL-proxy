@@ -17,12 +17,21 @@ import (
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 const maxPatternResponseLimit = 1000
+const (
+	patternVarPlaceholder = "<_>"
+	patternMinTokens      = 4
+	patternMaxTokens      = 80
+	patternSimThreshold   = 0.3
+	patternMaxLineLength  = 3000
+)
 
 type patternBucket struct {
-	pattern string
-	level   string
-	buckets map[int64]int
-	total   int
+	pattern     string
+	level       string
+	buckets     map[int64]int
+	total       int
+	tokens      []string
+	spacesAfter []int
 }
 
 // decolorizeStreams strips ANSI escape sequences from all log lines in streams.
@@ -166,9 +175,9 @@ func extractLineFormatTemplate(query string) string {
 	return ""
 }
 
-// extractLogPatterns implements a simplified drain-like pattern extraction.
-// Groups log lines by structural pattern and time bucket, returning the response
-// shape expected by Grafana Logs Drilldown's patterns resource.
+// extractLogPatterns implements Loki-style Drain-inspired pattern extraction.
+// It tokenizes lines with punctuation-aware splitting, clusters by similarity,
+// and returns Grafana Logs Drilldown compatible pattern buckets.
 func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]interface{} {
 	stepSeconds := int64(60)
 	if step != "" {
@@ -180,7 +189,7 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 	}
 
 	lines := strings.Split(string(vlBody), "\n")
-	patterns := make(map[string]*patternBucket)
+	miner := newPatternMiner()
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -203,8 +212,6 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 				continue
 			}
 		}
-
-		pattern := tokenizeToPattern(msg)
 		labels := buildEntryLabels(entry)
 		level := strings.TrimSpace(labels["detected_level"])
 		if level == "" {
@@ -214,18 +221,7 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 		if stepSeconds > 0 {
 			bucket = (bucket / stepSeconds) * stepSeconds
 		}
-		key := level + "\x00" + pattern
-		entryBucket := patterns[key]
-		if entryBucket == nil {
-			entryBucket = &patternBucket{
-				pattern: pattern,
-				level:   level,
-				buckets: map[int64]int{},
-			}
-			patterns[key] = entryBucket
-		}
-		entryBucket.buckets[bucket]++
-		entryBucket.total++
+		miner.Observe(level, msg, bucket)
 	}
 
 	// Sort by count descending
@@ -235,22 +231,21 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 	if limit > maxPatternResponseLimit {
 		limit = maxPatternResponseLimit
 	}
-	entryCap := len(patterns)
+	clusters := miner.AllClusters()
+	entryCap := len(clusters)
 	if entryCap > maxPatternResponseLimit {
 		entryCap = maxPatternResponseLimit
 	}
 	entries := make([]*patternBucket, 0, entryCap)
-	if len(patterns) <= limit {
-		for _, entry := range patterns {
-			entries = append(entries, entry)
-		}
+	if len(clusters) <= limit {
+		entries = append(entries, clusters...)
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].total > entries[j].total
 		})
 	} else {
 		h := &patternBucketHeap{}
 		heap.Init(h)
-		for _, entry := range patterns {
+		for _, entry := range clusters {
 			if h.Len() < limit {
 				heap.Push(h, entry)
 				continue
@@ -270,6 +265,7 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 
 	result := make([]map[string]interface{}, 0, len(entries))
 	for _, e := range entries {
+		e.pattern = miner.tokenizer.Join(e.tokens, e.spacesAfter)
 		sampleTimes := make([]int64, 0, len(e.buckets))
 		for bucket := range e.buckets {
 			sampleTimes = append(sampleTimes, bucket)
@@ -291,6 +287,222 @@ func extractLogPatterns(vlBody []byte, step string, limit int) []map[string]inte
 		result = append(result, item)
 	}
 	return result
+}
+
+type patternMiner struct {
+	tokenizer *patternLineTokenizer
+	// level -> tokenCount -> clusters
+	groups map[string]map[int][]*patternBucket
+}
+
+func newPatternMiner() *patternMiner {
+	return &patternMiner{
+		tokenizer: newPatternLineTokenizer(),
+		groups:    make(map[string]map[int][]*patternBucket),
+	}
+}
+
+func (m *patternMiner) Observe(level, line string, bucket int64) {
+	tokens, spacesAfter, ok := m.tokenizer.Tokenize(line)
+	if !ok {
+		return
+	}
+	tokenCount := len(tokens)
+
+	levelGroups := m.groups[level]
+	if levelGroups == nil {
+		levelGroups = make(map[int][]*patternBucket)
+		m.groups[level] = levelGroups
+	}
+	candidates := levelGroups[tokenCount]
+	cluster := bestPatternCluster(candidates, tokens)
+	if cluster == nil {
+		cluster = &patternBucket{
+			level:       level,
+			buckets:     make(map[int64]int),
+			tokens:      cloneTokens(tokens),
+			spacesAfter: cloneInts(spacesAfter),
+		}
+		levelGroups[tokenCount] = append(levelGroups[tokenCount], cluster)
+	} else {
+		cluster.tokens = mergePatternTemplate(cluster.tokens, tokens)
+	}
+	cluster.buckets[bucket]++
+	cluster.total++
+}
+
+func (m *patternMiner) AllClusters() []*patternBucket {
+	out := make([]*patternBucket, 0)
+	for _, byCount := range m.groups {
+		for _, clusters := range byCount {
+			out = append(out, clusters...)
+		}
+	}
+	return out
+}
+
+func bestPatternCluster(candidates []*patternBucket, tokens []string) *patternBucket {
+	var match *patternBucket
+	maxSim := -1.0
+	maxParamCount := -1
+
+	for _, cluster := range candidates {
+		curSim, paramCount := getPatternSimilarity(cluster.tokens, tokens)
+		if paramCount < 0 {
+			continue
+		}
+		if curSim > maxSim || (curSim == maxSim && paramCount > maxParamCount) {
+			maxSim = curSim
+			maxParamCount = paramCount
+			match = cluster
+		}
+	}
+	if maxSim >= patternSimThreshold {
+		return match
+	}
+	return nil
+}
+
+func getPatternSimilarity(templateTokens, tokens []string) (float64, int) {
+	if len(templateTokens) != len(tokens) || len(templateTokens) == 0 {
+		return 0, -1
+	}
+	simTokens := 0
+	paramCount := 0
+	for i := range templateTokens {
+		switch templateTokens[i] {
+		case patternVarPlaceholder:
+			paramCount++
+		case tokens[i]:
+			simTokens++
+		}
+	}
+	return float64(simTokens) / float64(len(templateTokens)), paramCount
+}
+
+func mergePatternTemplate(templateTokens, tokens []string) []string {
+	if len(templateTokens) != len(tokens) {
+		return templateTokens
+	}
+	for i := range templateTokens {
+		if templateTokens[i] != tokens[i] {
+			templateTokens[i] = patternVarPlaceholder
+		}
+	}
+	return templateTokens
+}
+
+type patternLineTokenizer struct {
+	includeDelimiters [128]rune
+	excludeDelimiters [128]rune
+}
+
+func newPatternLineTokenizer() *patternLineTokenizer {
+	var included [128]rune
+	var excluded [128]rune
+	included['='] = 1
+	excluded['_'] = 1
+	excluded['-'] = 1
+	excluded['.'] = 1
+	excluded[':'] = 1
+	excluded['/'] = 1
+	return &patternLineTokenizer{
+		includeDelimiters: included,
+		excludeDelimiters: excluded,
+	}
+}
+
+func (p *patternLineTokenizer) Tokenize(line string) ([]string, []int, bool) {
+	if len(line) == 0 || len(line) > patternMaxLineLength {
+		return nil, nil, false
+	}
+	tokens := make([]string, 0, 128)
+	spacesAfter := make([]int, 0, 64)
+
+	start := 0
+	for i, char := range line {
+		if len(tokens) >= 127 {
+			break
+		}
+		if unicode.IsLetter(char) || unicode.IsNumber(char) || (char < 128 && p.excludeDelimiters[char] != 0) {
+			continue
+		}
+		included := char < 128 && p.includeDelimiters[char] != 0
+		if char == ' ' || included || unicode.IsPunct(char) {
+			if i > start {
+				tokens = append(tokens, line[start:i])
+			}
+			if char == ' ' {
+				spacesAfter = append(spacesAfter, len(tokens)-1)
+			} else {
+				tokens = append(tokens, line[i:i+1])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(line) {
+		tokens = append(tokens, line[start:])
+	}
+
+	if len(tokens) < patternMinTokens || len(tokens) > patternMaxTokens {
+		return nil, nil, false
+	}
+	return tokens, spacesAfter, true
+}
+
+func (p *patternLineTokenizer) Join(tokens []string, spacesAfter []int) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	strBuilder := strings.Builder{}
+	spacesIdx := 0
+	for i, token := range tokens {
+		out := token
+		if token == patternVarPlaceholder {
+			out = patternVarPlaceholder
+		}
+		strBuilder.WriteString(out)
+		for spacesIdx < len(spacesAfter) && i == spacesAfter[spacesIdx] {
+			strBuilder.WriteByte(' ')
+			spacesIdx++
+		}
+	}
+	return deduplicatePlaceholders(strBuilder.String(), patternVarPlaceholder)
+}
+
+func deduplicatePlaceholders(line, placeholder string) string {
+	first := strings.Index(line, placeholder+placeholder)
+	if first == -1 {
+		return line
+	}
+	var b strings.Builder
+	b.Grow(len(line))
+	i := 0
+	for i < len(line) {
+		if strings.HasPrefix(line[i:], placeholder+placeholder) {
+			b.WriteString(placeholder)
+			i += len(placeholder)
+			for i < len(line) && strings.HasPrefix(line[i:], placeholder) {
+				i += len(placeholder)
+			}
+			continue
+		}
+		b.WriteByte(line[i])
+		i++
+	}
+	return b.String()
+}
+
+func cloneTokens(tokens []string) []string {
+	out := make([]string, len(tokens))
+	copy(out, tokens)
+	return out
+}
+
+func cloneInts(src []int) []int {
+	out := make([]int, len(src))
+	copy(out, src)
+	return out
 }
 
 type patternBucketHeap []*patternBucket

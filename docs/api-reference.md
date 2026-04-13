@@ -16,7 +16,7 @@
 | `GET /loki/api/v1/detected_fields` | Implemented | `/select/logsql/field_names` | 30s | 1 |
 | `GET /loki/api/v1/detected_field/{name}/values` | Implemented | `/select/logsql/field_values` | - | 1 |
 | `GET /loki/api/v1/detected_labels` | Implemented | `/select/logsql/field_names` | - | 1 |
-| `GET /loki/api/v1/patterns` | Implemented | `/select/logsql/query` + pattern extraction | - | 3 |
+| `GET /loki/api/v1/patterns` | Implemented (toggleable) | `/select/logsql/query` + Drain-like token clustering | - | 4 |
 | `GET /loki/api/v1/format_query` | Implemented | - (passthrough) | - | 1 |
 | `WS /loki/api/v1/tail` | Implemented | `/select/logsql/tail` (WebSocket->NDJSON) | - | 2 |
 
@@ -32,6 +32,7 @@ For Grafana Logs Drilldown and Explore compatibility:
 - Label APIs prefer VictoriaLogs stream metadata so parsed fields do not leak into Loki label pickers when the backend supports the stream-only endpoints.
 - `-extra-label-fields` extends label-facing APIs (`/labels`, `/label/{name}/values`) with explicit VL fields and improves custom dot/underscore alias resolution.
 - Optional indexed browse mode for label values (`-label-values-indexed-cache=true`) supports hotset-first responses and optional `offset`/`search` (`search` or `q`) on `GET /loki/api/v1/label/{name}/values`.
+- Patterns API can be explicitly gated via `-patterns-enabled` (default `true`) to match deployments that do not expose Drilldown pattern discovery.
 - Indexed label-values cache snapshots can be persisted to disk (`-label-values-index-persist-path`) and restored at startup.
 - On stale/missing disk snapshot, startup can warm from peer cache before serving (`-label-values-index-startup-stale-threshold`, `-label-values-index-startup-peer-warm-timeout`).
 - Peer cache payload fetches (`/_cache/get`) support gzip response compression for lower network latency/cost on large cache objects.

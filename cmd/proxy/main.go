@@ -65,6 +65,7 @@ type proxyRuntimeConfig struct {
 	derivedFieldsJSON                  string
 	streamResponse                     bool
 	emitStructuredMetadata             bool
+	patternsEnabled                    bool
 	queryRangeWindowing                bool
 	queryRangeSplitInterval            time.Duration
 	queryRangeMaxParallel              int
@@ -324,6 +325,7 @@ func run(
 	derivedFieldsJSON := fs.String("derived-fields", "", `JSON derived fields: [{"name":"traceID","matcherRegex":"trace_id=([a-f0-9]+)","url":"http://tempo/trace/${__value.raw}"}]`)
 	streamResponse := fs.Bool("stream-response", false, "Stream log responses via chunked transfer encoding")
 	emitStructuredMetadata := fs.Bool("emit-structured-metadata", true, "Include Loki 3-tuple stream values [timestamp, line, metadata] in query responses")
+	patternsEnabled := fs.Bool("patterns-enabled", true, "Enable /loki/api/v1/patterns endpoint (Grafana Logs Drilldown patterns)")
 	queryRangeWindowing := fs.Bool("query-range-windowing", true, "Enable query_range window splitting and window-level cache reuse for log queries")
 	queryRangeSplitInterval := fs.Duration("query-range-split-interval", time.Hour, "Time window size used for query_range split/merge (for example 15m, 1h, 24h)")
 	queryRangeMaxParallel := fs.Int("query-range-max-parallel", 2, "Maximum number of query_range windows fetched in parallel when adaptive parallelism is disabled")
@@ -457,6 +459,7 @@ func run(
 			derivedFieldsJSON:                  *derivedFieldsJSON,
 			streamResponse:                     *streamResponse,
 			emitStructuredMetadata:             *emitStructuredMetadata,
+			patternsEnabled:                    *patternsEnabled,
 			queryRangeWindowing:                *queryRangeWindowing,
 			queryRangeSplitInterval:            *queryRangeSplitInterval,
 			queryRangeMaxParallel:              *queryRangeMaxParallel,
@@ -909,6 +912,10 @@ func parseHeaderMapCSV(s string) map[string]string {
 	return headers
 }
 
+func boolPointer(v bool) *bool {
+	return &v
+}
+
 func buildOTLPConfig(cfg otlpRuntimeConfig) metrics.OTLPConfig {
 	return metrics.OTLPConfig{
 		Endpoint:              cfg.endpoint,
@@ -997,6 +1004,7 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		DerivedFields:                      derivedFields,
 		StreamResponse:                     cfg.streamResponse,
 		EmitStructuredMetadata:             cfg.emitStructuredMetadata,
+		PatternsEnabled:                    boolPointer(cfg.patternsEnabled),
 		QueryRangeWindowingEnabled:         cfg.queryRangeWindowing,
 		QueryRangeSplitInterval:            cfg.queryRangeSplitInterval,
 		QueryRangeMaxParallel:              cfg.queryRangeMaxParallel,
@@ -1139,6 +1147,9 @@ func logProxyStartup(logger *slog.Logger, proxyCfg proxy.Config, peerSelf, peerD
 	}
 	if proxyCfg.FieldMappings != nil {
 		logger.Info("loaded field mappings", "count", len(proxyCfg.FieldMappings))
+	}
+	if proxyCfg.PatternsEnabled != nil && !*proxyCfg.PatternsEnabled {
+		logger.Info("patterns endpoint disabled", "flag", "patterns-enabled")
 	}
 	if proxyCfg.LabelStyle == proxy.LabelStyleUnderscores {
 		logger.Info("label translation enabled", "label_style", "underscores", "metadata_field_mode", string(proxyCfg.MetadataFieldMode))

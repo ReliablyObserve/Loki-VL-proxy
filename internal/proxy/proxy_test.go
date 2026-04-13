@@ -600,6 +600,35 @@ func TestContract_Patterns_ResponseFormat(t *testing.T) {
 	}
 }
 
+func TestContract_Patterns_DisabledReturnsNotFound(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	disabled := false
+	p, err := New(Config{
+		BackendURL:      vlBackend.URL,
+		PatternsEnabled: &disabled,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/patterns?query=%7B%7D&start=1&end=2", nil)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when patterns endpoint is disabled, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if resp["errorType"] != "not_found" {
+		t.Fatalf("expected not_found errorType, got %v", resp["errorType"])
+	}
+}
+
 // --- /loki/api/v1/tail ---
 
 func TestContract_Tail_RequiresQuery(t *testing.T) {

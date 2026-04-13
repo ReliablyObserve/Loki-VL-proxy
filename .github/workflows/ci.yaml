@@ -203,6 +203,66 @@ jobs:
             awk -F'\t' '{printf "| `%s` | %s | %s | %s |\n", $1, $2, $3, $4}' bench-label-fields.tsv
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Run patterns scale benchmarks (regression guard)
+        run: |
+          go test ./internal/proxy/ -run "^$" -bench 'BenchmarkProxy_Patterns_Scale_' -benchmem -count=1 -benchtime=200ms \
+            | tee bench-patterns.txt
+
+          awk '
+            /^BenchmarkProxy_Patterns_Scale_.*ns\/op/ {
+              bench=$1
+              sub(/-[0-9]+$/, "", bench)
+              printf "%s\t%s\t%s\t%s\n", bench, $3, $5, $7
+            }
+          ' bench-patterns.txt > bench-patterns.tsv
+
+          expected=6
+          actual=$(wc -l < bench-patterns.tsv | tr -d " ")
+          if [ "$actual" -ne "$expected" ]; then
+            echo "FAIL: expected ${expected} parsed pattern benchmark rows, got ${actual}"
+            cat bench-patterns.tsv
+            exit 1
+          fi
+
+          awk -F'\t' '
+            BEGIN { fail=0 }
+            {
+              name=$1
+              ns=$2+0
+              scale=name
+              sub(/^.*\/lines_/, "", scale)
+              if (name ~ /CacheBypass/) {
+                bypass[scale]=ns
+              } else if (name ~ /CacheHit/) {
+                hit[scale]=ns
+              }
+            }
+            END {
+              for (s in bypass) {
+                if (!(s in hit)) {
+                  printf "FAIL: missing cache-hit benchmark for lines_%s\n", s
+                  fail=1
+                  continue
+                }
+                if (hit[s] >= bypass[s]) {
+                  printf "FAIL: cache hit should be faster than bypass for lines_%s (hit=%.2f ns/op bypass=%.2f ns/op)\n", s, hit[s], bypass[s]
+                  fail=1
+                }
+              }
+              exit fail
+            }
+          ' bench-patterns.tsv
+
+      - name: Publish patterns benchmark summary
+        run: |
+          {
+            echo "### Patterns Scale Benchmarks"
+            echo ""
+            echo "| Benchmark | ns/op | B/op | allocs/op |"
+            echo "|---|---:|---:|---:|"
+            awk -F'\t' '{printf "| `%s` | %s | %s | %s |\n", $1, $2, $3, $4}' bench-patterns.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run load tests
         run: |
           go test ./internal/proxy/ -run "TestLoad" -v -timeout=120s -count=1 \
@@ -216,6 +276,8 @@ jobs:
             bench-results.txt
             bench-label-fields.txt
             bench-label-fields.tsv
+            bench-patterns.txt
+            bench-patterns.tsv
             load-results.txt
 
       - name: Check for performance regressions
