@@ -137,6 +137,72 @@ jobs:
           go test ./internal/proxy/ -bench . -benchmem -run "^$" -count=3 -timeout=120s \
             | tee bench-results.txt
 
+      - name: Run label/field scale benchmarks (regression guard)
+        run: |
+          go test ./internal/proxy/ -run "^$" -bench 'BenchmarkProxy_Label(Keys|Values)_Scale_' -benchmem -count=1 -benchtime=200ms \
+            | tee bench-label-fields.txt
+
+          awk '
+            /^BenchmarkProxy_Label(Keys|Values)_Scale_.*ns\/op/ {
+              bench=$1
+              sub(/-[0-9]+$/, "", bench)
+              # go test benchmark line format:
+              # BenchmarkXxx-4  12345  999.9 ns/op  321 B/op  7 allocs/op
+              printf "%s\t%s\t%s\t%s\n", bench, $3, $5, $7
+            }
+          ' bench-label-fields.txt > bench-label-fields.tsv
+
+          expected=12
+          actual=$(wc -l < bench-label-fields.tsv | tr -d " ")
+          if [ "$actual" -ne "$expected" ]; then
+            echo "FAIL: expected ${expected} parsed benchmark rows, got ${actual}"
+            cat bench-label-fields.tsv
+            exit 1
+          fi
+
+          awk -F'\t' '
+            BEGIN { fail=0 }
+            {
+              name=$1
+              ns=$2+0
+              size=0
+              tmp=name
+              sub(/^.*_/, "", tmp)
+              if (tmp ~ /^[0-9]+$/) {
+                size=tmp+0
+              }
+
+              # Scale-aware catastrophic bounds:
+              # smaller sets should stay tighter, large sets get wider headroom.
+              limit=100000
+              if (size <= 10) {
+                limit=50000
+              } else if (size <= 100) {
+                limit=100000
+              } else if (size <= 1000) {
+                limit=250000
+              } else if (size > 1000) {
+                limit=600000
+              }
+
+              if (ns > limit) {
+                printf "FAIL: %s exceeded ns/op threshold %.0f (got %.2f)\n", name, limit, ns
+                fail=1
+              }
+            }
+            END { exit fail }
+          ' bench-label-fields.tsv
+
+      - name: Publish label/field benchmark summary
+        run: |
+          {
+            echo "### Label/Field Scale Benchmarks"
+            echo ""
+            echo "| Benchmark | ns/op | B/op | allocs/op |"
+            echo "|---|---:|---:|---:|"
+            awk -F'\t' '{printf "| `%s` | %s | %s | %s |\n", $1, $2, $3, $4}' bench-label-fields.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run load tests
         run: |
           go test ./internal/proxy/ -run "TestLoad" -v -timeout=120s -count=1 \
@@ -148,6 +214,8 @@ jobs:
           name: benchmarks
           path: |
             bench-results.txt
+            bench-label-fields.txt
+            bench-label-fields.tsv
             load-results.txt
 
       - name: Check for performance regressions
