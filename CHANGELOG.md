@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- drilldown: fix `service_name` label values intermittently returning empty by preserving detected-label summaries and using selector-only context for service discovery fallbacks
+- drilldown: treat non-2xx discovery responses as errors (instead of silent empty success) for fields/labels/value discovery paths to prevent false `no data`
+- proxy: stop caching transient empty fallback payloads for detected fields/labels endpoints, reducing sticky post-error empty states until manual refresh
+
 ## [1.0.0] - 2026-04-13
 
 ### CI
