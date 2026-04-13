@@ -769,6 +769,100 @@ func TestContract_Patterns_EmptyResultDoesNotPoisonCache(t *testing.T) {
 	}
 }
 
+func TestContract_PatternHelpers_ParseAndLimitPayload(t *testing.T) {
+	if got := parsePatternLimit(""); got != 50 {
+		t.Fatalf("expected default limit 50, got %d", got)
+	}
+	if got := parsePatternLimit("5000"); got != maxPatternResponseLimit {
+		t.Fatalf("expected maxPatternResponseLimit clamp, got %d", got)
+	}
+	if got := parsePatternLimit("7"); got != 7 {
+		t.Fatalf("expected explicit parsed limit 7, got %d", got)
+	}
+
+	payload, err := json.Marshal(patternsResponse{
+		Status: "success",
+		Data: []patternResultEntry{
+			{Pattern: "alpha <_>", Samples: [][]interface{}{{"1", "alpha 1"}}},
+			{Pattern: "beta <_>", Samples: [][]interface{}{{"2", "beta 2"}}},
+			{Pattern: "gamma <_>", Samples: [][]interface{}{{"3", "gamma 3"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	limited := limitPatternPayload(payload, 2)
+	var resp patternsResponse
+	mustUnmarshal(t, limited, &resp)
+	if len(resp.Data) != 2 {
+		t.Fatalf("expected 2 limited patterns, got %d", len(resp.Data))
+	}
+}
+
+func TestContract_RefreshVolumeCacheAsync_PopulatesCache(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"hits":[{"fields":{"service.name":"api"},"timestamps":["2026-01-01T00:00:00Z"],"values":[3]}]}`))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	cacheKey := "volume:test-refresh"
+	p.refreshVolumeCacheAsync("", cacheKey, `{app="api"}`, "", "", "")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if body, _, ok := p.cache.GetWithTTL(cacheKey); ok {
+			var resp map[string]interface{}
+			mustUnmarshal(t, body, &resp)
+			assertLokiSuccess(t, resp)
+			data := assertDataIsObject(t, resp)
+			if data["resultType"] != "vector" {
+				t.Fatalf("expected vector resultType, got %v", data["resultType"])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected background volume refresh to populate cache")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestContract_RefreshVolumeRangeCacheAsync_PopulatesCache(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"hits":[{"fields":{"service.name":"api"},"timestamps":["2026-01-01T00:00:00Z"],"values":[5]}]}`))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	cacheKey := "volume_range:test-refresh"
+	p.refreshVolumeRangeCacheAsync("", cacheKey, `{app="api"}`, "", "", "60", "")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if body, _, ok := p.cache.GetWithTTL(cacheKey); ok {
+			var resp map[string]interface{}
+			mustUnmarshal(t, body, &resp)
+			assertLokiSuccess(t, resp)
+			data := assertDataIsObject(t, resp)
+			if data["resultType"] != "matrix" {
+				t.Fatalf("expected matrix resultType, got %v", data["resultType"])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected background volume_range refresh to populate cache")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
