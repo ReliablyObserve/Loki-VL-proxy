@@ -526,7 +526,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-- add native VictoriaLogs offenders dashboard with tenant/client/cluster/env filtering for incident analysis independent of Loki-proxy query health
+- add native VictoriaLogs operations dashboard with tenant/client/cluster/env filtering for incident analysis independent of Loki-proxy query health
 - expand packaged PrometheusRule coverage with backend-latency and client bad-request burst alerts linked to dedicated runbooks
 
 ### Bug Fixes
@@ -559,7 +559,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - make chart `goMemLimitPercent` effective at runtime by computing and injecting `GOMEMLIMIT` from `resources.limits.memory` when `goMemLimit` is not explicitly set
 - expand the packaged PrometheusRule set with backend-latency and client-bad-request alerts, and point each alert to dedicated per-alert runbook files
-- add a native VictoriaLogs offenders dashboard focused on tenant/client/cluster/env filtering to keep operator visibility when Loki/proxy query paths are degraded
+- add a native VictoriaLogs operations dashboard focused on tenant/client/cluster/env filtering to keep operator visibility when Loki/proxy query paths are degraded
 
 ### Documentation
 
