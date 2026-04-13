@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - use OTel semantic end-user fields in request logs by emitting `enduser.name` for trusted user-header flows while keeping `enduser.id` as stable identity and `enduser.source` as provenance
 - stop duplicating OTel resource attributes (`service.*`, `deployment.environment.name`, `telemetry.sdk.*`) in per-line JSON log payloads to prevent downstream `message.*` field explosion
 
+### Documentation
+
+- add compose-backed Playwright screenshot workflow and publish updated local UI gallery assets for Explore and Logs Drilldown views
+
 ## [0.27.42] - 2026-04-13
 
 ### Performance
@@ -280,7 +284,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Observability
 
 - add adaptive query-range tuning gauges: current parallelism, latency EWMA, and error EWMA, exposed in both Prometheus and OTLP metrics
-- harden `Loki-VL-Proxy Metrics` dashboard selectors to tolerate headless/non-headless job+service labels and blank namespace URL vars so sand drilldowns no longer collapse to no-data
+- harden `Loki-VL-Proxy Metrics` dashboard selectors to tolerate headless/non-headless job+service labels and blank namespace URL vars so drilldown views no longer collapse to no-data
 - add a `Query-Range Windowing` dashboard section (window fetch/merge latency, window cache hit ratio, adaptive EWMA/parallelism)
 - update packaged dashboards, alerts, and runbook queries to consume `process_*` system metric families
 
@@ -348,7 +352,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - restore Grafana-safe tuple defaults when `-emit-structured-metadata=true`: Explore/Drilldown requests now stay on canonical `[timestamp, line]` unless explicitly opted into `structured_metadata=true` (or `X-Loki-Response-Encoding-Flags: structured-metadata`), preventing `ReadArray` decode regressions
-- harden Grafana sand metrics dashboard templating with universal regex-safe variables (`job`, `cluster`, `env`, `namespace`, `service`, `pod`) and default service scoping to reduce duplicated/noisy series
+- harden Grafana metrics dashboard templating with universal regex-safe variables (`job`, `cluster`, `env`, `namespace`, `service`, `pod`) and default service scoping to reduce duplicated/noisy series
 
 ### Tests
 

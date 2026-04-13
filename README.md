@@ -53,6 +53,39 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 
 Related docs: [Compatibility Matrix](docs/compatibility-matrix.md), [Observability](docs/observability.md), [Testing](docs/testing.md)
 
+## UI Gallery (Compose + Playwright)
+
+These screenshots are generated from the local compose stack (`test/e2e-compat`) with seeded test data and a short time window (`now-5m`).
+
+<a href="docs/images/ui/explore-main.png">
+  <img src="docs/images/ui/explore-main.png" alt="Grafana Explore main view" width="240" />
+</a>
+<a href="docs/images/ui/explore-details.png">
+  <img src="docs/images/ui/explore-details.png" alt="Grafana Explore details view" width="240" />
+</a>
+<a href="docs/images/ui/drilldown-main.png">
+  <img src="docs/images/ui/drilldown-main.png" alt="Grafana Logs Drilldown main view" width="240" />
+</a>
+<a href="docs/images/ui/explore-tail-multitenant.png">
+  <img src="docs/images/ui/explore-tail-multitenant.png" alt="Grafana Explore multi-tenant view" width="240" />
+</a>
+
+Re-generate locally:
+
+```bash
+cd test/e2e-compat
+docker compose up -d --build
+../../scripts/ci/wait_e2e_stack.sh 180
+
+cd ../..
+go test -v -tags=e2e -run '^TestSetup_IngestLogs$' ./test/e2e-compat/
+
+cd test/e2e-ui
+npm ci
+npx playwright install chromium
+npm run capture:screenshots
+```
+
 ## High-Level Flow
 
 ```mermaid
