@@ -56,7 +56,7 @@ Default logs are emitted as JSON and already use OTel-friendly top-level keys:
   "loki.query": "{service_name=\"api\"} |= \"error\"",
   "client.address": "10.0.0.12:51884",
   "enduser.id": "grafana-user@example.com",
-  "loki.client.source": "grafana_user",
+  "enduser.source": "grafana_user",
   "cache.result": "miss",
   "upstream.calls": 1,
   "upstream.status_code": 200,
@@ -93,6 +93,7 @@ The proxy writes structured logs for:
 | `client.address` | remote address |
 | `enduser.id` | stable trusted user/client identity when available |
 | `enduser.name` | display/login user name from trusted user headers when available |
+| `enduser.source` | trusted header source for end-user attribution (`grafana_user`, `forwarded_user`, etc.) |
 | `auth.*` | datasource/auth principal context (separate from `enduser.id`) |
 | `cache.result` | compatibility cache result (`hit`, `miss`, `bypass`) |
 | `upstream.*` | backend call count, status, and latency |
