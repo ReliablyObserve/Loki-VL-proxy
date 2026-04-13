@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -112,6 +114,203 @@ func TestHandleDetectedLabels_BackendErrorReturnsEmptySuccess(t *testing.T) {
 	}
 	if resp.Status != "success" || len(resp.Data) != 0 || len(resp.DetectedLabels) != 0 || resp.Limit != 17 {
 		t.Fatalf("expected empty detected_labels success response, got %#v", resp)
+	}
+}
+
+func TestHandleDetectedLabels_DoesNotCacheTransientErrorFallback(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	var streamCalls atomic.Int32
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, `{"error":"transient backend failure"}`, http.StatusBadGateway)
+			return
+		}
+		switch r.URL.Path {
+		case "/select/logsql/streams":
+			streamCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"values":[{"value":"{service.name=\"api\",level=\"info\"}","hits":1}]}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	reqPath := `/loki/api/v1/detected_labels?query={service_name="api"}&start=1&end=2&limit=25`
+
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	p.handleDetectedLabels(w1, r1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call expected 200, got %d body=%s", w1.Code, w1.Body.String())
+	}
+
+	fail.Store(false)
+
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	p.handleDetectedLabels(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call expected 200, got %d body=%s", w2.Code, w2.Body.String())
+	}
+
+	var resp struct {
+		DetectedLabels []struct {
+			Label string `json:"label"`
+		} `json:"detectedLabels"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.DetectedLabels) == 0 {
+		t.Fatalf("expected detected labels after backend recovery, got empty: %s (stream_calls=%d)", w2.Body.String(), streamCalls.Load())
+	}
+	foundService := false
+	for _, item := range resp.DetectedLabels {
+		if item.Label == "service_name" {
+			foundService = true
+			break
+		}
+	}
+	if !foundService {
+		t.Fatalf("expected service_name detected label after recovery, got %s", w2.Body.String())
+	}
+}
+
+func TestHandleDetectedFields_DoesNotCacheTransientErrorFallback(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, `{"error":"transient backend failure"}`, http.StatusBadGateway)
+			return
+		}
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"values":[{"value":"service.name","hits":1},{"value":"trace_id","hits":1}]}`)
+		case "/select/logsql/query":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			fmt.Fprintln(w, `{"_time":"2024-01-15T10:30:00Z","_msg":"ok","service.name":"api","trace_id":"abc123"}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	reqPath := `/loki/api/v1/detected_fields?query={service_name="api"}&start=1&end=2&limit=25`
+
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	p.handleDetectedFields(w1, r1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call expected 200, got %d body=%s", w1.Code, w1.Body.String())
+	}
+
+	fail.Store(false)
+
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, reqPath, nil)
+	p.handleDetectedFields(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call expected 200, got %d body=%s", w2.Code, w2.Body.String())
+	}
+
+	var resp struct {
+		Fields []struct {
+			Label string `json:"label"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Fields) == 0 {
+		t.Fatalf("expected detected fields after backend recovery, got empty: %s", w2.Body.String())
+	}
+}
+
+func TestLabelValuesServiceName_StripsFieldStagesForDrilldownQueries(t *testing.T) {
+	var receivedQuery string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/streams":
+			receivedQuery = r.URL.Query().Get("query")
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(receivedQuery, "source_message_bytes") || strings.Contains(receivedQuery, "unpack_json") || strings.Contains(receivedQuery, "logfmt") {
+				fmt.Fprintln(w, `{"values":[]}`)
+				return
+			}
+			fmt.Fprintln(w, `{"values":[{"value":"{service=\"grafana\"}","hits":1}]}`)
+		case "/select/logsql/query":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			fmt.Fprintln(w, `{"_time":"2024-01-15T10:30:00Z","_msg":"ok","_stream":"{service=\"grafana\"}"}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodGet,
+		`/loki/api/v1/label/service_name/values?query=%7Bdeployment_environment%3D%22dev%22%7D+%7C+json+%7C+source_message_bytes%3D%2289%22&start=1&end=2`,
+		nil,
+	)
+	p.handleLabelValues(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(receivedQuery, "source_message_bytes") || strings.Contains(receivedQuery, "unpack_json") || strings.Contains(receivedQuery, "logfmt") {
+		t.Fatalf("service_name lookup should strip field-detection stages, got query %q", receivedQuery)
+	}
+
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data) == 0 || resp.Data[0] != "grafana" {
+		t.Fatalf("expected derived service_name value, got %#v (query=%q)", resp.Data, receivedQuery)
+	}
+}
+
+func TestDetectedLabelValuesForServiceName_SurviveDetectedLabelsCache(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/streams":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"values":[{"value":"{service.name=\"api\",level=\"info\"}","hits":1}]}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	ctx := context.Background()
+	query := `{service_name="api"}`
+	start := "1"
+	end := "2"
+	limit := 25
+
+	labels, _, err := p.detectLabels(ctx, query, start, end, limit)
+	if err != nil {
+		t.Fatalf("detectLabels returned error: %v", err)
+	}
+	if len(labels) == 0 {
+		t.Fatalf("detectLabels returned no labels")
+	}
+
+	values := p.detectedLabelValuesForField(ctx, "service_name", query, start, end, limit)
+	if len(values) != 1 || values[0] != "api" {
+		t.Fatalf("expected cached service_name values to contain api, got %v", values)
 	}
 }
 
