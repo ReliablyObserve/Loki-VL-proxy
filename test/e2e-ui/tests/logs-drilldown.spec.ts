@@ -72,9 +72,9 @@ async function openServiceDrilldown(
   await waitForDrilldownDetails(page);
 }
 
-function nsRangeLastTwoHours() {
+function nsRangeLastDay() {
   const end = Date.now() * 1_000_000;
-  const start = (Date.now() - 2 * 60 * 60 * 1000) * 1_000_000;
+  const start = (Date.now() - 24 * 60 * 60 * 1000) * 1_000_000;
   return { start, end };
 }
 
@@ -89,7 +89,7 @@ async function waitForAutodetectedPatterns(
   let lastPatternsPayload: unknown = null;
   let lastSeedPayload: unknown = null;
   let lastQuery = "";
-  const { start, end } = nsRangeLastTwoHours();
+  const { start, end } = nsRangeLastDay();
   const fallbackQueries = [...queries];
   const serviceKeys = [
     "service_name",
