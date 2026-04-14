@@ -905,7 +905,7 @@ func TestContract_Patterns_WindowedSamplingCoversWholeRange(t *testing.T) {
 		}
 		ts := time.Unix(startSec, 0).UTC().Format(time.RFC3339)
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"_time":"%s","_msg":"finished_unary_call code=OK method=Fetch","level":"info"}`+"\n", ts)))
+		_, _ = fmt.Fprintf(w, `{"_time":"%s","_msg":"finished_unary_call code=OK method=Fetch","level":"info"}`+"\n", ts)
 	}))
 	defer vlBackend.Close()
 

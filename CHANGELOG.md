@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- patterns: improve long-range `/loki/api/v1/patterns` extraction by windowing `query_range` sampling and merging samples across windows, so Drilldown pattern charts keep full-range visibility
+
 ## [1.0.14] - 2026-04-14
 
 ### Bug Fixes
