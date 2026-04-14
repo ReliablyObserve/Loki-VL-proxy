@@ -33,7 +33,10 @@
         "policy": "v1_3x_to_v1_5x_transition",
         "description": "Support VictoriaLogs releases across v1.3x.x through v1.5x.x during migration windows. The current family is v1.5x.x, but we intentionally retain older bands to avoid backend upgrade lockstep.",
         "current_family": "v1.5x.x",
-        "previous_family": "v1.4x.x"
+        "previous_family": "v1.4x.x",
+        "additional_families": [
+          "v1.3x.x"
+        ]
       },
       "matrix_versions": [
         "v1.30.0",
