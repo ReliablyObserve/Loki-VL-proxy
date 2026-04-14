@@ -40,6 +40,12 @@ import (
 // Capped at 64KB before returning to prevent pool bloat from large responses.
 const maxPooledBufSize = 64 * 1024
 
+const (
+	patternDedupSourceMemory = "mem"
+	patternDedupSourceDisk   = "disk"
+	patternDedupSourcePeer   = "peer"
+)
+
 var jsonBufPool = sync.Pool{
 	New: func() interface{} {
 		return bytes.NewBuffer(make([]byte, 0, 4096))
@@ -2105,6 +2111,15 @@ func (p *Proxy) recordPatternSnapshotEntry(cacheKey string, payload []byte, now 
 	copied := append([]byte(nil), payload...)
 	p.patternsSnapshotMu.Lock()
 	if existing, ok := p.patternsSnapshotEntries[cacheKey]; ok {
+		if bytes.Equal(existing.Value, copied) {
+			if existing.UpdatedAtUnixNano < now.UnixNano() {
+				existing.UpdatedAtUnixNano = now.UnixNano()
+				p.patternsSnapshotEntries[cacheKey] = existing
+			}
+			p.updatePatternSnapshotMetricsLocked()
+			p.patternsSnapshotMu.Unlock()
+			return
+		}
 		p.patternsSnapshotPatternCount -= int64(existing.PatternCount)
 		p.patternsSnapshotPayloadBytes -= int64(len(existing.Value))
 	}
@@ -2115,9 +2130,13 @@ func (p *Proxy) recordPatternSnapshotEntry(cacheKey string, payload []byte, now 
 	}
 	p.patternsSnapshotPatternCount += int64(patternCount)
 	p.patternsSnapshotPayloadBytes += int64(len(copied))
+	droppedEntries, _ := p.compactPatternSnapshotEntriesLocked()
 	p.updatePatternSnapshotMetricsLocked()
 	p.patternsSnapshotMu.Unlock()
 	p.patternsPersistDirty.Store(true)
+	if droppedEntries > 0 {
+		p.recordPatternSnapshotDedup(patternDedupSourceMemory, "update", droppedEntries)
+	}
 }
 
 func patternCountFromPayload(payload []byte) int {
@@ -2184,7 +2203,7 @@ func (p *Proxy) buildPatternsSnapshot(now time.Time) patternsSnapshot {
 	}
 }
 
-func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) (int, int) {
+func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot, source string) (int, int) {
 	if p.cache == nil {
 		return 0, 0
 	}
@@ -2194,7 +2213,6 @@ func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) (int, int) {
 	appliedPatterns := 0
 
 	p.patternsSnapshotMu.Lock()
-	defer p.patternsSnapshotMu.Unlock()
 
 	for key, incoming := range snapshot.EntriesByKey {
 		if strings.TrimSpace(key) == "" || len(incoming.Value) == 0 {
@@ -2226,12 +2244,179 @@ func (p *Proxy) applyPatternsSnapshot(snapshot patternsSnapshot) (int, int) {
 		appliedEntries++
 		appliedPatterns += incomingPatternCount
 	}
+	droppedEntries, _ := p.compactPatternSnapshotEntriesLocked()
 	p.updatePatternSnapshotMetricsLocked()
+	p.patternsSnapshotMu.Unlock()
 
-	if appliedEntries > 0 {
+	if appliedEntries > 0 || droppedEntries > 0 {
 		p.patternsPersistDirty.Store(true)
 	}
+	if droppedEntries > 0 {
+		p.recordPatternSnapshotDedup(source, "merge", droppedEntries)
+	}
 	return appliedEntries, appliedPatterns
+}
+
+func patternSnapshotIdentityFromCacheKey(cacheKey string) string {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return ""
+	}
+	parts := strings.SplitN(cacheKey, ":", 3)
+	if len(parts) != 3 || parts[0] != "patterns" {
+		return ""
+	}
+	orgID := strings.TrimSpace(parts[1])
+	if orgID == "" {
+		return ""
+	}
+	params, err := url.ParseQuery(parts[2])
+	if err != nil {
+		return ""
+	}
+	query := patternScopeQuery(params.Get("query"))
+	if strings.TrimSpace(query) == "" {
+		return ""
+	}
+	return orgID + "\x00" + query
+}
+
+func betterPatternSnapshotEntry(current, incoming patternSnapshotEntry, currentKey, incomingKey string) bool {
+	if incoming.UpdatedAtUnixNano != current.UpdatedAtUnixNano {
+		return incoming.UpdatedAtUnixNano > current.UpdatedAtUnixNano
+	}
+	if incoming.PatternCount != current.PatternCount {
+		return incoming.PatternCount > current.PatternCount
+	}
+	if len(incoming.Value) != len(current.Value) {
+		return len(incoming.Value) > len(current.Value)
+	}
+	// Deterministic tie-breaker.
+	return incomingKey > currentKey
+}
+
+func (p *Proxy) compactPatternSnapshotEntriesLocked() (int, int) {
+	if p == nil || len(p.patternsSnapshotEntries) <= 1 {
+		return 0, 0
+	}
+
+	keysByIdentity := make(map[string][]string, len(p.patternsSnapshotEntries))
+	for key := range p.patternsSnapshotEntries {
+		identity := patternSnapshotIdentityFromCacheKey(key)
+		if identity == "" {
+			continue
+		}
+		keysByIdentity[identity] = append(keysByIdentity[identity], key)
+	}
+
+	dropped := make(map[string]struct{})
+	for _, keys := range keysByIdentity {
+		if len(keys) <= 1 {
+			continue
+		}
+		keepKeys := make([]string, 0, len(keys))
+		for _, key := range keys {
+			entry := p.patternsSnapshotEntries[key]
+			matched := -1
+			for i, keepKey := range keepKeys {
+				keepEntry := p.patternsSnapshotEntries[keepKey]
+				if bytes.Equal(keepEntry.Value, entry.Value) {
+					matched = i
+					break
+				}
+			}
+			if matched == -1 {
+				keepKeys = append(keepKeys, key)
+				continue
+			}
+			existingKey := keepKeys[matched]
+			existingEntry := p.patternsSnapshotEntries[existingKey]
+			if betterPatternSnapshotEntry(existingEntry, entry, existingKey, key) {
+				keepKeys[matched] = key
+				dropped[existingKey] = struct{}{}
+			} else {
+				dropped[key] = struct{}{}
+			}
+		}
+	}
+
+	if len(dropped) == 0 {
+		return 0, 0
+	}
+
+	beforePatterns := p.patternsSnapshotPatternCount
+	droppedEntries := 0
+	for key := range dropped {
+		if _, ok := p.patternsSnapshotEntries[key]; !ok {
+			continue
+		}
+		delete(p.patternsSnapshotEntries, key)
+		droppedEntries++
+		if p.cache != nil {
+			p.cache.Invalidate(key)
+		}
+	}
+	p.recomputePatternSnapshotStatsLocked()
+	droppedPatterns := int(beforePatterns - p.patternsSnapshotPatternCount)
+	if droppedPatterns < 0 {
+		droppedPatterns = 0
+	}
+	return droppedEntries, droppedPatterns
+}
+
+func (p *Proxy) compactPatternsSnapshot(source, reason string) (int, int) {
+	p.patternsSnapshotMu.Lock()
+	droppedEntries, droppedPatterns := p.compactPatternSnapshotEntriesLocked()
+	p.updatePatternSnapshotMetricsLocked()
+	p.patternsSnapshotMu.Unlock()
+	if droppedEntries > 0 {
+		p.patternsPersistDirty.Store(true)
+		p.recordPatternSnapshotDedup(source, reason, droppedEntries)
+	}
+	return droppedEntries, droppedPatterns
+}
+
+func (p *Proxy) recordPatternSnapshotDedup(source, reason string, droppedEntries int) {
+	if droppedEntries <= 0 {
+		return
+	}
+	source = strings.ToLower(strings.TrimSpace(source))
+	switch source {
+	case patternDedupSourceDisk, patternDedupSourcePeer:
+	default:
+		source = patternDedupSourceMemory
+	}
+	if p.metrics != nil {
+		p.metrics.RecordPatternsDeduplicated(source, droppedEntries)
+	}
+	p.log.Info(
+		"patterns snapshot deduplicated",
+		"component", "proxy",
+		"source", source,
+		"reason", reason,
+		"duplicates_removed", droppedEntries,
+	)
+}
+
+func (p *Proxy) recomputePatternSnapshotStatsLocked() {
+	var patterns int64
+	var payloadBytes int64
+	for key, entry := range p.patternsSnapshotEntries {
+		if strings.TrimSpace(key) == "" || len(entry.Value) == 0 {
+			delete(p.patternsSnapshotEntries, key)
+			continue
+		}
+		patternCount := entry.PatternCount
+		if patternCount <= 0 {
+			patternCount = patternCountFromPayload(entry.Value)
+			entry.PatternCount = patternCount
+			p.patternsSnapshotEntries[key] = entry
+		}
+		patterns += int64(patternCount)
+		payloadBytes += int64(len(entry.Value))
+	}
+	p.patternsSnapshotPatternCount = patterns
+	p.patternsSnapshotPayloadBytes = payloadBytes
 }
 
 func (p *Proxy) persistPatternsNow(reason string) error {
@@ -2313,7 +2498,7 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 		return false, 0, fmt.Errorf("invalid patterns snapshot timestamp: %d", snapshot.SavedAtUnixNano)
 	}
 
-	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(snapshot)
+	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(snapshot, patternDedupSourceDisk)
 	p.metrics.RecordPatternsRestoredFromDisk(appliedPatterns, appliedEntries)
 	p.metrics.SetPatternsPersistedDiskBytes(int64(len(data)))
 	if p.cache != nil {
@@ -2459,7 +2644,7 @@ func (p *Proxy) restorePatternsFromPeers(minSavedAt int64) (bool, int64, error) 
 		}
 	}
 
-	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(merged)
+	appliedEntries, appliedPatterns := p.applyPatternsSnapshot(merged, patternDedupSourcePeer)
 	if appliedEntries == 0 || mergedSavedAt <= minSavedAt {
 		return false, mergedSavedAt, nil
 	}
@@ -2545,6 +2730,7 @@ func (p *Proxy) startPatternsPersistenceLoop() {
 		for {
 			select {
 			case <-ticker.C:
+				p.compactPatternsSnapshot(patternDedupSourceMemory, "periodic")
 				if err := p.persistPatternsNow("periodic"); err != nil {
 					p.log.Warn("periodic patterns snapshot persistence failed", "error", err)
 				}

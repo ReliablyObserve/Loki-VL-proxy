@@ -51,6 +51,9 @@ type Metrics struct {
 	patternsRestoredFromPeersTotal   atomic.Int64
 	patternsRestoredDiskEntriesTotal atomic.Int64
 	patternsRestoredPeerEntriesTotal atomic.Int64
+	patternsDeduplicatedMemTotal     atomic.Int64
+	patternsDeduplicatedDiskTotal    atomic.Int64
+	patternsDeduplicatedPeerTotal    atomic.Int64
 	patternsInMemory                 atomic.Int64
 	patternsCacheKeys                atomic.Int64
 	patternsInMemoryBytes            atomic.Int64
@@ -776,6 +779,19 @@ func (m *Metrics) RecordPatternsRestoredFromPeers(patternCount, entryCount int) 
 		m.patternsRestoredPeerEntriesTotal.Add(int64(entryCount))
 	}
 }
+func (m *Metrics) RecordPatternsDeduplicated(source string, duplicateEntries int) {
+	if duplicateEntries <= 0 {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "disk":
+		m.patternsDeduplicatedDiskTotal.Add(int64(duplicateEntries))
+	case "peer":
+		m.patternsDeduplicatedPeerTotal.Add(int64(duplicateEntries))
+	default:
+		m.patternsDeduplicatedMemTotal.Add(int64(duplicateEntries))
+	}
+}
 func (m *Metrics) SetPatternsInMemory(patternCount, keyCount int, bytes int64) {
 	if patternCount < 0 {
 		patternCount = 0
@@ -1082,6 +1098,12 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 	sb.WriteString("# HELP loki_vl_proxy_patterns_restored_peer_entries_total Snapshot cache keys restored from peers.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_patterns_restored_peer_entries_total counter\n")
 	fmt.Fprintf(&sb, "loki_vl_proxy_patterns_restored_peer_entries_total %d\n", m.patternsRestoredPeerEntriesTotal.Load())
+
+	sb.WriteString("# HELP loki_vl_proxy_patterns_deduplicated_total Duplicate pattern snapshot entries removed by source.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_patterns_deduplicated_total counter\n")
+	fmt.Fprintf(&sb, "loki_vl_proxy_patterns_deduplicated_total{source=%q} %d\n", "mem", m.patternsDeduplicatedMemTotal.Load())
+	fmt.Fprintf(&sb, "loki_vl_proxy_patterns_deduplicated_total{source=%q} %d\n", "disk", m.patternsDeduplicatedDiskTotal.Load())
+	fmt.Fprintf(&sb, "loki_vl_proxy_patterns_deduplicated_total{source=%q} %d\n", "peer", m.patternsDeduplicatedPeerTotal.Load())
 
 	sb.WriteString("# HELP loki_vl_proxy_patterns_in_memory Current number of patterns held in in-memory snapshot state.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_patterns_in_memory gauge\n")

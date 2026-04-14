@@ -277,6 +277,130 @@ func TestPatternsRestoreFromDisk_EmptyFileIsNoop(t *testing.T) {
 	}
 }
 
+func TestPatternSnapshotDedup_Update_RemovesExactDuplicatePayload(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := newPatternPersistenceProxy(t, backend.URL, filepath.Join(t.TempDir(), "patterns.snapshot.json"), true)
+	t.Cleanup(func() {
+		_ = p.Shutdown(context.Background())
+	})
+
+	query := `{service_name="api"}`
+	keyOld := p.patternsAutodetectCacheKey("org-a", query, "1", "2", "1m")
+	keyNew := p.patternsAutodetectCacheKey("org-a", query, "3", "4", "1m")
+	payload := mustMarshalJSON(t, patternsResponse{
+		Status: "success",
+		Data: []patternResultEntry{
+			{Pattern: "request <_> completed", Samples: [][]interface{}{{"1710000000000000000", 2}}},
+		},
+	})
+
+	p.recordPatternSnapshotEntry(keyOld, payload, time.Unix(1710000000, 0).UTC())
+	p.cache.SetWithTTL(keyOld, payload, patternsCacheRetention)
+
+	p.recordPatternSnapshotEntry(keyNew, payload, time.Unix(1710000001, 0).UTC())
+
+	p.patternsSnapshotMu.RLock()
+	defer p.patternsSnapshotMu.RUnlock()
+	if len(p.patternsSnapshotEntries) != 1 {
+		t.Fatalf("expected one deduplicated snapshot entry, got %d", len(p.patternsSnapshotEntries))
+	}
+	if _, ok := p.patternsSnapshotEntries[keyNew]; !ok {
+		t.Fatalf("expected newer cache key %q to be retained after deduplication", keyNew)
+	}
+	if _, ok := p.patternsSnapshotEntries[keyOld]; ok {
+		t.Fatalf("expected older duplicate cache key %q to be removed", keyOld)
+	}
+	if _, _, hit := p.cache.GetWithTTL(keyOld); hit {
+		t.Fatalf("expected dropped cache key %q to be invalidated", keyOld)
+	}
+}
+
+func TestPatternSnapshotDedup_Update_PreservesDistinctPayloads(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := newPatternPersistenceProxy(t, backend.URL, filepath.Join(t.TempDir(), "patterns.snapshot.json"), true)
+	t.Cleanup(func() {
+		_ = p.Shutdown(context.Background())
+	})
+
+	query := `{service_name="api"}`
+	keyA := p.patternsAutodetectCacheKey("org-a", query, "1", "2", "1m")
+	keyB := p.patternsAutodetectCacheKey("org-a", query, "3", "4", "1m")
+	payloadA := mustMarshalJSON(t, patternsResponse{
+		Status: "success",
+		Data: []patternResultEntry{
+			{Pattern: "request <_> completed", Samples: [][]interface{}{{"1710000000000000000", 2}}},
+		},
+	})
+	payloadB := mustMarshalJSON(t, patternsResponse{
+		Status: "success",
+		Data: []patternResultEntry{
+			{Pattern: "request <_> failed", Samples: [][]interface{}{{"1710000005000000000", 1}}},
+		},
+	})
+
+	p.recordPatternSnapshotEntry(keyA, payloadA, time.Unix(1710000000, 0).UTC())
+	p.recordPatternSnapshotEntry(keyB, payloadB, time.Unix(1710000001, 0).UTC())
+
+	p.patternsSnapshotMu.RLock()
+	defer p.patternsSnapshotMu.RUnlock()
+	if len(p.patternsSnapshotEntries) != 2 {
+		t.Fatalf("expected distinct payloads to remain separate, got %d entries", len(p.patternsSnapshotEntries))
+	}
+}
+
+func TestPatternSnapshotDedup_PeerMerge_RemovesExactDuplicates(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p := newPatternPersistenceProxy(t, backend.URL, filepath.Join(t.TempDir(), "patterns.snapshot.json"), true)
+	t.Cleanup(func() {
+		_ = p.Shutdown(context.Background())
+	})
+
+	query := `{service_name="api"}`
+	keyA := p.patternsAutodetectCacheKey("org-a", query, "1", "2", "1m")
+	keyB := p.patternsAutodetectCacheKey("org-a", query, "3", "4", "1m")
+	payload := mustMarshalJSON(t, patternsResponse{
+		Status: "success",
+		Data: []patternResultEntry{
+			{Pattern: "request <_> completed", Samples: [][]interface{}{{"1710000000000000000", 2}}},
+		},
+	})
+
+	snapshot := patternsSnapshot{
+		Version:         1,
+		SavedAtUnixNano: time.Now().UTC().UnixNano(),
+		EntriesByKey: map[string]patternSnapshotEntry{
+			keyA: {Value: payload, UpdatedAtUnixNano: time.Unix(1710000000, 0).UTC().UnixNano(), PatternCount: 1},
+			keyB: {Value: payload, UpdatedAtUnixNano: time.Unix(1710000001, 0).UTC().UnixNano(), PatternCount: 1},
+		},
+	}
+
+	p.applyPatternsSnapshot(snapshot, patternDedupSourcePeer)
+
+	p.patternsSnapshotMu.RLock()
+	defer p.patternsSnapshotMu.RUnlock()
+	if len(p.patternsSnapshotEntries) != 1 {
+		t.Fatalf("expected peer merge dedup to keep one entry, got %d", len(p.patternsSnapshotEntries))
+	}
+	if _, ok := p.patternsSnapshotEntries[keyB]; !ok {
+		t.Fatalf("expected newer peer key %q to be retained", keyB)
+	}
+	if _, _, hit := p.cache.GetWithTTL(keyA); hit {
+		t.Fatalf("expected duplicate peer key %q to be invalidated from cache", keyA)
+	}
+}
+
 func newPatternPersistenceProxy(t *testing.T, backendURL, persistPath string, autodetect bool) *Proxy {
 	t.Helper()
 	enabled := true
