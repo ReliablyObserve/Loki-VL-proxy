@@ -5,6 +5,7 @@ package e2e_compat
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -1047,5 +1048,36 @@ func TestDrilldown_RuntimeFamilyContracts(t *testing.T) {
 
 	default:
 		t.Fatalf("unsupported grafana runtime family for Drilldown contracts: %s", version)
+	}
+}
+
+func TestDrilldown_TenantLimitsEndpointContract(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, proxyURL+"/config/tenant/v1/limits", nil)
+	if err != nil {
+		t.Fatalf("failed to create tenant limits request: %v", err)
+	}
+	req.Header.Set("X-Scope-OrgID", "team-a")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tenant limits request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected tenant limits status 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/plain") {
+		t.Fatalf("expected tenant limits content type text/plain, got %q", resp.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read tenant limits response body: %v", err)
+	}
+	payload := string(body)
+	for _, required := range []string{"retention_period:", "query_timeout:", "volume_enabled:"} {
+		if !strings.Contains(payload, required) {
+			t.Fatalf("tenant limits response missing %q: %s", required, payload)
+		}
 	}
 }

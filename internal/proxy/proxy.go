@@ -350,6 +350,16 @@ type Config struct {
 	MetricsMaxTenants        int
 	MetricsMaxClients        int
 	MetricsTrustProxyHeaders bool
+
+	// Tenant limits runtime exposure.
+	// TenantLimitsAllowPublish controls which fields are exposed by
+	// /config/tenant/v1/limits and /loki/api/v1/drilldown-limits.
+	// If empty, default Loki-compatible allowlist is used.
+	TenantLimitsAllowPublish []string
+	// TenantDefaultLimits applies global published limits overrides.
+	TenantDefaultLimits map[string]any
+	// TenantLimits applies per-tenant published limits overrides keyed by X-Scope-OrgID.
+	TenantLimits map[string]map[string]any
 }
 
 // DerivedField extracts a value from log lines and creates a link (e.g., to a trace backend).
@@ -436,6 +446,9 @@ type Proxy struct {
 	tailAllowedOrigins                    map[string]struct{}
 	tailMode                              TailMode
 	metricsTrustProxyHeaders              bool
+	tenantLimitsAllowPublish              []string
+	tenantDefaultLimits                   map[string]any
+	tenantLimits                          map[string]map[string]any
 	translationCache                      *cache.Cache
 	queryRangeWindowing                   bool
 	queryRangeSplitInterval               time.Duration
@@ -495,6 +508,27 @@ type Proxy struct {
 	labelValuesIndex                      map[string]*labelValuesIndexState
 }
 
+var defaultTenantLimitsAllowPublish = []string{
+	"discover_log_levels",
+	"discover_service_name",
+	"log_level_fields",
+	"max_entries_limit_per_query",
+	"max_line_size_truncate",
+	"max_query_bytes_read",
+	"max_query_length",
+	"max_query_lookback",
+	"max_query_range",
+	"max_query_series",
+	"metric_aggregation_enabled",
+	"otlp_config",
+	"pattern_persistence_enabled",
+	"query_timeout",
+	"retention_period",
+	"retention_stream",
+	"volume_enabled",
+	"volume_max_series",
+}
+
 type labelValueIndexEntry struct {
 	SeenCount uint32 `json:"seen_count"`
 	LastSeen  int64  `json:"last_seen_unix_nano"`
@@ -534,6 +568,55 @@ type syntheticTailSeen struct {
 	seen  map[string]struct{}
 	order []string
 	limit int
+}
+
+func cloneStringAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneTenantLimitsMap(in map[string]map[string]any) map[string]map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]any, len(in))
+	for tenant, limits := range in {
+		out[tenant] = cloneStringAnyMap(limits)
+	}
+	return out
+}
+
+func mergeStringAnyMap(dst, src map[string]any) {
+	for k, v := range src {
+		dst[k] = v
+	}
+}
+
+func filterPublishedLimits(limits map[string]any, allowlist []string) map[string]any {
+	if len(allowlist) == 0 {
+		return limits
+	}
+	allow := make(map[string]struct{}, len(allowlist))
+	for _, key := range allowlist {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		allow[key] = struct{}{}
+	}
+	filtered := make(map[string]any, len(allow))
+	for key, value := range limits {
+		if _, ok := allow[key]; ok {
+			filtered[key] = value
+		}
+	}
+	return filtered
 }
 
 func New(cfg Config) (*Proxy, error) {
@@ -783,6 +866,12 @@ func New(cfg Config) (*Proxy, error) {
 	if cfg.PatternsEnabled != nil {
 		patternsEnabled = *cfg.PatternsEnabled
 	}
+	tenantLimitsAllowPublish := append([]string(nil), cfg.TenantLimitsAllowPublish...)
+	if len(tenantLimitsAllowPublish) == 0 {
+		tenantLimitsAllowPublish = append([]string(nil), defaultTenantLimitsAllowPublish...)
+	}
+	tenantDefaultLimits := cloneStringAnyMap(cfg.TenantDefaultLimits)
+	tenantLimits := cloneTenantLimitsMap(cfg.TenantLimits)
 
 	return &Proxy{
 		backend:       u,
@@ -828,6 +917,9 @@ func New(cfg Config) (*Proxy, error) {
 		tailAllowedOrigins:                    tailAllowedOrigins,
 		tailMode:                              tailMode,
 		metricsTrustProxyHeaders:              cfg.MetricsTrustProxyHeaders,
+		tenantLimitsAllowPublish:              tenantLimitsAllowPublish,
+		tenantDefaultLimits:                   tenantDefaultLimits,
+		tenantLimits:                          tenantLimits,
 		translationCache:                      cache.New(5*time.Minute, 5000),
 		queryRangeWindowing:                   cfg.QueryRangeWindowingEnabled && cfg.QueryRangeSplitInterval > 0,
 		queryRangeSplitInterval:               cfg.QueryRangeSplitInterval,
@@ -1394,6 +1486,7 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/loki/api/v1/format_query", rl("format_query", "/loki/api/v1/format_query", p.handleFormatQuery))
 	mux.Handle("/loki/api/v1/detected_labels", rl("detected_labels", "/loki/api/v1/detected_labels", p.handleDetectedLabels))
 	mux.Handle("/loki/api/v1/drilldown-limits", rlNoTenant("drilldown_limits", "/loki/api/v1/drilldown-limits", p.handleDrilldownLimits))
+	mux.Handle("/config/tenant/v1/limits", rlNoTenant("tenant_limits", "/config/tenant/v1/limits", p.handleTenantLimitsConfig))
 
 	// Write endpoints — blocked (this is a read-only proxy)
 	mux.HandleFunc("/loki/api/v1/push", p.handleWriteBlocked)
@@ -4482,38 +4575,10 @@ func (p *Proxy) handleFormatQuery(w http.ResponseWriter, r *http.Request) {
 // handleDrilldownLimits returns Grafana Logs Drilldown limits metadata.
 // Grafana uses this as a lightweight capability/bootstrap probe.
 func (p *Proxy) handleDrilldownLimits(w http.ResponseWriter, r *http.Request) {
-	patternPersistenceEnabled := p.patternsEnabled && strings.TrimSpace(p.patternsPersistPath) != ""
 	patternIngesterEnabled := p.patternsEnabled && p.patternsAutodetectFromQueries
+	limits := p.publishedTenantLimits(r)
 	p.writeJSON(w, map[string]interface{}{
-		"limits": map[string]interface{}{
-			"discover_log_levels":         true,
-			"discover_service_name":       []string{"service", "app", "application", "app_name", "name", "app_kubernetes_io_name", "container", "container_name", "k8s_container_name", "component", "workload", "job", "k8s_job_name"},
-			"log_level_fields":            []string{"level", "LEVEL", "Level", "log.level", "severity", "SEVERITY", "Severity", "SeverityText", "lvl", "LVL", "Lvl", "severity_text", "Severity_Text", "SEVERITY_TEXT"},
-			"max_entries_limit_per_query": maxLimitValue,
-			"max_line_size_truncate":      false,
-			"max_query_bytes_read":        "0B",
-			"max_query_length":            "30d1h",
-			"max_query_lookback":          "0s",
-			"max_query_range":             "0s",
-			"max_query_series":            500,
-			"metric_aggregation_enabled":  false,
-			"otlp_config": map[string]interface{}{
-				"resource_attributes": map[string]interface{}{
-					"attributes_config": []map[string]interface{}{
-						{
-							"action":     "index_label",
-							"attributes": []string{"service.name", "service.namespace", "service.instance.id", "deployment.environment", "deployment.environment.name", "cloud.region", "cloud.availability_zone", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "k8s.container.name", "container.name", "k8s.replicaset.name", "k8s.deployment.name", "k8s.statefulset.name", "k8s.daemonset.name", "k8s.cronjob.name", "k8s.job.name"},
-						},
-					},
-				},
-			},
-			"pattern_persistence_enabled": patternPersistenceEnabled,
-			"query_timeout":               "1m",
-			"retention_period":            "0s",
-			"retention_stream":            []interface{}{},
-			"volume_enabled":              true,
-			"volume_max_series":           1000,
-		},
+		"limits":                   limits,
 		"pattern_ingester_enabled": patternIngesterEnabled,
 		"version":                  "unknown",
 		"maxDetectedFields":        1000,
@@ -4521,6 +4586,80 @@ func (p *Proxy) handleDrilldownLimits(w http.ResponseWriter, r *http.Request) {
 		"maxLabelValues":           1000,
 		"maxLines":                 p.maxLines,
 	})
+}
+
+func (p *Proxy) publishedTenantLimits(r *http.Request) map[string]any {
+	orgID := strings.TrimSpace(r.Header.Get("X-Scope-OrgID"))
+	if strings.Contains(orgID, "|") {
+		orgID = ""
+	}
+	return p.publishedTenantLimitsForOrgID(orgID)
+}
+
+func (p *Proxy) publishedTenantLimitsForOrgID(orgID string) map[string]any {
+	patternPersistenceEnabled := p.patternsEnabled && strings.TrimSpace(p.patternsPersistPath) != ""
+	limits := map[string]any{
+		"discover_log_levels":         true,
+		"discover_service_name":       []string{"service", "app", "application", "app_name", "name", "app_kubernetes_io_name", "container", "container_name", "k8s_container_name", "component", "workload", "job", "k8s_job_name"},
+		"log_level_fields":            []string{"level", "LEVEL", "Level", "log.level", "severity", "SEVERITY", "Severity", "SeverityText", "lvl", "LVL", "Lvl", "severity_text", "Severity_Text", "SEVERITY_TEXT"},
+		"max_entries_limit_per_query": maxLimitValue,
+		"max_line_size_truncate":      false,
+		"max_query_bytes_read":        "0B",
+		"max_query_length":            "30d1h",
+		"max_query_lookback":          "0s",
+		"max_query_range":             "0s",
+		"max_query_series":            500,
+		"metric_aggregation_enabled":  false,
+		"otlp_config": map[string]any{
+			"resource_attributes": map[string]any{
+				"attributes_config": []map[string]any{
+					{
+						"action":     "index_label",
+						"attributes": []string{"service.name", "service.namespace", "service.instance.id", "deployment.environment", "deployment.environment.name", "cloud.region", "cloud.availability_zone", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "k8s.container.name", "container.name", "k8s.replicaset.name", "k8s.deployment.name", "k8s.statefulset.name", "k8s.daemonset.name", "k8s.cronjob.name", "k8s.job.name"},
+					},
+				},
+			},
+		},
+		"pattern_persistence_enabled": patternPersistenceEnabled,
+		"query_timeout":               p.client.Timeout.String(),
+		"retention_period":            "0s",
+		"retention_stream":            []any{},
+		"volume_enabled":              true,
+		"volume_max_series":           1000,
+	}
+	if p.client.Timeout <= 0 {
+		limits["query_timeout"] = "0s"
+	}
+
+	p.configMu.RLock()
+	allowlist := append([]string(nil), p.tenantLimitsAllowPublish...)
+	defaultOverrides := cloneStringAnyMap(p.tenantDefaultLimits)
+	tenantOverrides := cloneStringAnyMap(p.tenantLimits[orgID])
+	p.configMu.RUnlock()
+
+	if len(defaultOverrides) > 0 {
+		mergeStringAnyMap(limits, defaultOverrides)
+	}
+	if len(tenantOverrides) > 0 {
+		mergeStringAnyMap(limits, tenantOverrides)
+	}
+	return filterPublishedLimits(limits, allowlist)
+}
+
+func (p *Proxy) handleTenantLimitsConfig(w http.ResponseWriter, r *http.Request) {
+	orgID := strings.TrimSpace(r.Header.Get("X-Scope-OrgID"))
+	if strings.Contains(orgID, "|") {
+		http.Error(w, "multi-tenant X-Scope-OrgID is not supported on this endpoint", http.StatusBadRequest)
+		return
+	}
+	limits := p.publishedTenantLimitsForOrgID(orgID)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	data, err := yaml.Marshal(limits)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write(data)
 }
 
 // handleDetectedLabels returns stream-level labels (similar to detected_fields but for stream labels).

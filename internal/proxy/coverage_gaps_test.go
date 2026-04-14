@@ -69,6 +69,27 @@ func TestAdminStubs_Config(t *testing.T) {
 	}
 }
 
+func TestAdminStubs_TenantLimitsConfig(t *testing.T) {
+	p := newGapTestProxy(t, "http://unused")
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/config/tenant/v1/limits", nil)
+	mux.ServeHTTP(w, r)
+
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("tenant limits endpoint: expected text/plain content type, got %q", w.Header().Get("Content-Type"))
+	}
+	var resp map[string]interface{}
+	if err := yaml.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("tenant limits endpoint: expected valid YAML, got %v", err)
+	}
+	if resp["retention_period"] == nil || resp["query_timeout"] == nil {
+		t.Fatalf("tenant limits endpoint: expected Loki-compatible limits payload, got %v", resp)
+	}
+}
+
 func TestAdminStubs_FormatQuery(t *testing.T) {
 	p := newGapTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
