@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/cache"
 	"github.com/gorilla/websocket"
+	"gopkg.in/yaml.v3"
 )
 
 // =============================================================================
@@ -898,7 +900,7 @@ func TestContract_RefreshVolumeRangeCacheAsync_PopulatesCache(t *testing.T) {
 	}
 }
 
-func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
+func TestContract_DrilldownLimits_DefaultPatternFlagsAdvertised(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
@@ -909,15 +911,52 @@ func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
 	}
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if resp["pattern_ingester_enabled"] != false {
+		t.Fatalf("expected pattern_ingester_enabled=false by default, got %v", resp["pattern_ingester_enabled"])
+	}
+	limits, ok := resp["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits object, got %T", resp["limits"])
+	}
+	if limits["pattern_persistence_enabled"] != false {
+		t.Fatalf("expected limits.pattern_persistence_enabled=false by default, got %v", limits["pattern_persistence_enabled"])
+	}
+}
+
+func TestContract_DrilldownLimits_PatternFlagsReflectRuntime(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	persistPath := filepath.Join(t.TempDir(), "patterns.snapshot.json")
+	p, err := New(Config{
+		BackendURL:                    vlBackend.URL,
+		PatternsAutodetectFromQueries: true,
+		PatternsPersistPath:           persistPath,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from drilldown-limits, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
 	if resp["pattern_ingester_enabled"] != true {
-		t.Fatalf("expected pattern_ingester_enabled=true, got %v", resp["pattern_ingester_enabled"])
+		t.Fatalf("expected pattern_ingester_enabled=true when autodetect is enabled, got %v", resp["pattern_ingester_enabled"])
 	}
 	limits, ok := resp["limits"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected limits object, got %T", resp["limits"])
 	}
 	if limits["pattern_persistence_enabled"] != true {
-		t.Fatalf("expected limits.pattern_persistence_enabled=true, got %v", limits["pattern_persistence_enabled"])
+		t.Fatalf("expected limits.pattern_persistence_enabled=true when persistence path configured, got %v", limits["pattern_persistence_enabled"])
 	}
 }
 
@@ -954,6 +993,178 @@ func TestContract_DrilldownLimits_PatternsDisabledAdvertised(t *testing.T) {
 	}
 	if limits["pattern_persistence_enabled"] != false {
 		t.Fatalf("expected limits.pattern_persistence_enabled=false, got %v", limits["pattern_persistence_enabled"])
+	}
+}
+
+func TestContract_DrilldownLimits_ExposesRequiredLimitsContract(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from drilldown-limits, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+
+	requiredTopLevel := []string{
+		"limits",
+		"pattern_ingester_enabled",
+		"version",
+		"maxDetectedFields",
+		"maxDetectedValues",
+		"maxLabelValues",
+		"maxLines",
+	}
+	for _, key := range requiredTopLevel {
+		if _, ok := resp[key]; !ok {
+			t.Fatalf("drilldown-limits missing top-level key %q: %v", key, resp)
+		}
+	}
+	if _, ok := resp["pattern_ingester_enabled"].(bool); !ok {
+		t.Fatalf("expected boolean pattern_ingester_enabled, got %T", resp["pattern_ingester_enabled"])
+	}
+
+	limits, ok := resp["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits object, got %T", resp["limits"])
+	}
+
+	requiredLimitKeys := []string{
+		"discover_log_levels",
+		"discover_service_name",
+		"log_level_fields",
+		"max_entries_limit_per_query",
+		"max_line_size_truncate",
+		"max_query_bytes_read",
+		"max_query_length",
+		"max_query_lookback",
+		"max_query_range",
+		"max_query_series",
+		"metric_aggregation_enabled",
+		"otlp_config",
+		"pattern_persistence_enabled",
+		"query_timeout",
+		"retention_period",
+		"retention_stream",
+		"volume_enabled",
+		"volume_max_series",
+	}
+	for _, key := range requiredLimitKeys {
+		if _, ok := limits[key]; !ok {
+			t.Fatalf("drilldown-limits missing limits.%s in contract: %v", key, limits)
+		}
+	}
+	if _, ok := limits["discover_service_name"].([]interface{}); !ok {
+		t.Fatalf("expected limits.discover_service_name to be an array, got %T", limits["discover_service_name"])
+	}
+	if _, ok := limits["log_level_fields"].([]interface{}); !ok {
+		t.Fatalf("expected limits.log_level_fields to be an array, got %T", limits["log_level_fields"])
+	}
+	if _, ok := limits["retention_stream"].([]interface{}); !ok {
+		t.Fatalf("expected limits.retention_stream to be an array, got %T", limits["retention_stream"])
+	}
+}
+
+func TestContract_DrilldownLimits_UsesRuntimeTenantOverrides(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	p, err := New(Config{
+		BackendURL: vlBackend.URL,
+		TenantDefaultLimits: map[string]any{
+			"max_query_series": 321.0,
+			"query_timeout":    "9m",
+		},
+		TenantLimits: map[string]map[string]any{
+			"team-a": {
+				"max_query_series": 111.0,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	// Default tenant falls back to global overrides.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	limits := resp["limits"].(map[string]interface{})
+	if limits["query_timeout"] != "9m" {
+		t.Fatalf("expected default query_timeout override, got %v", limits["query_timeout"])
+	}
+	if limits["max_query_series"] != 321.0 {
+		t.Fatalf("expected default max_query_series override, got %v", limits["max_query_series"])
+	}
+
+	// Tenant-specific override wins over global override.
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	r.Header.Set("X-Scope-OrgID", "team-a")
+	p.handleDrilldownLimits(w, r)
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	limits = resp["limits"].(map[string]interface{})
+	if limits["max_query_series"] != 111.0 {
+		t.Fatalf("expected tenant max_query_series override, got %v", limits["max_query_series"])
+	}
+}
+
+func TestContract_TenantLimitsConfig_UsesTenantSpecificValues(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	p, err := New(Config{
+		BackendURL: vlBackend.URL,
+		TenantDefaultLimits: map[string]any{
+			"query_timeout": "7m",
+		},
+		TenantLimits: map[string]map[string]any{
+			"team-a": {
+				"query_timeout": "11m",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/config/tenant/v1/limits", nil)
+	r.Header.Set("X-Scope-OrgID", "team-a")
+	p.handleTenantLimitsConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from tenant limits endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("expected text/plain from tenant limits endpoint, got %q", w.Header().Get("Content-Type"))
+	}
+	var limits map[string]interface{}
+	if err := yaml.Unmarshal(w.Body.Bytes(), &limits); err != nil {
+		t.Fatalf("expected YAML tenant limits response, got %v", err)
+	}
+	if limits["query_timeout"] != "11m" {
+		t.Fatalf("expected tenant override query_timeout=11m, got %v", limits["query_timeout"])
+	}
+}
+
+func TestContract_TenantLimitsConfig_RejectsMultiTenantHeader(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/config/tenant/v1/limits", nil)
+	r.Header.Set("X-Scope-OrgID", "team-a|team-b")
+	p.handleTenantLimitsConfig(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for multi-tenant header, got %d", w.Code)
 	}
 }
 

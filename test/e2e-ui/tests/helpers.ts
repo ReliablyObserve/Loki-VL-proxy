@@ -7,6 +7,7 @@ export const PROXY_MULTI_DS = "Loki (via VL proxy multi-tenant)";
 export const PROXY_TAIL_DS = "Loki (via VL proxy live tail)";
 export const PROXY_TAIL_INGRESS_DS = "Loki (via ingress tail)";
 export const PROXY_TAIL_NATIVE_DS = "Loki (via VL proxy live tail native)";
+export const PROXY_PATTERNS_AUTODETECT_DS = "Loki (via VL proxy patterns autodetect)";
 export const LOKI_DS = "Loki (direct)";
 
 /**

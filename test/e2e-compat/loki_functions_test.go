@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,8 @@ import (
 )
 
 var patternDataOnce sync.Once
+
+const patternsAutodetectProxyURL = "http://localhost:3110"
 
 // TestLokiFunctions_Decolorize verifies | decolorize strips ANSI codes.
 func TestLokiFunctions_Decolorize(t *testing.T) {
@@ -421,6 +424,79 @@ func TestLokiFunctions_PatternsFilteredLevelsRemainNonEmpty(t *testing.T) {
 	if len(data) == 0 {
 		t.Fatalf("expected non-empty patterns for filtered info logs, got %v", resp)
 	}
+}
+
+func TestLokiFunctions_PatternsAutodetectFromQueryRange(t *testing.T) {
+	ingestPatternData(t)
+	waitForReady(t, patternsAutodetectProxyURL+"/ready", 30*time.Second)
+
+	metricBefore := readPromMetric(t, patternsAutodetectProxyURL+"/metrics", "loki_vl_proxy_patterns_detected_total")
+
+	queryRangeParams := url.Values{
+		"query":     {`{app="pattern-test", level="info"}`},
+		"start":     {time.Now().Add(-1 * time.Hour).Format(time.RFC3339Nano)},
+		"end":       {time.Now().Add(time.Hour).Format(time.RFC3339Nano)},
+		"direction": {"backward"},
+		"limit":     {"200"},
+		"step":      {"60"},
+	}
+	resp := getJSON(t, patternsAutodetectProxyURL+"/loki/api/v1/query_range?"+queryRangeParams.Encode())
+	if resp["status"] != "success" {
+		t.Fatalf("expected query_range success on autodetect proxy, got %v", resp)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	var metricAfter float64
+	for {
+		metricAfter = readPromMetric(t, patternsAutodetectProxyURL+"/metrics", "loki_vl_proxy_patterns_detected_total")
+		if metricAfter > metricBefore {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected patterns_detected_total to increase after query_range (before=%v after=%v)", metricBefore, metricAfter)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	patternParams := url.Values{
+		"query": {`{app="pattern-test", level="info"}`},
+		"start": {queryRangeParams.Get("start")},
+		"end":   {queryRangeParams.Get("end")},
+		"step":  {"60s"},
+		"limit": {"20"},
+	}
+	patternResp := getJSON(t, patternsAutodetectProxyURL+"/loki/api/v1/patterns?"+patternParams.Encode())
+	data, _ := patternResp["data"].([]interface{})
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty patterns after autodetection query_range run, got %v", patternResp)
+	}
+}
+
+func readPromMetric(t *testing.T, metricsURL, metricName string) float64 {
+	t.Helper()
+	resp, err := http.Get(metricsURL)
+	if err != nil {
+		t.Fatalf("metrics request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("metrics read failed: %v", err)
+	}
+	lines := strings.Split(string(body), "\n")
+	prefix := metricName + " "
+	for _, line := range lines {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		v, err := strconv.ParseFloat(raw, 64)
+		if err == nil {
+			return v
+		}
+	}
+	t.Fatalf("metric %q not found in %s", metricName, metricsURL)
+	return 0
 }
 
 func ingestPatternData(t *testing.T) {

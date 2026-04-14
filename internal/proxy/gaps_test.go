@@ -352,6 +352,7 @@ func TestCoverage_AllRoutesRegistered(t *testing.T) {
 		"/loki/api/v1/detected_fields",
 		"/loki/api/v1/detected_field/level/values",
 		"/loki/api/v1/drilldown-limits",
+		"/config/tenant/v1/limits",
 		"/loki/api/v1/patterns",
 		"/loki/api/v1/tail",
 		"/loki/api/v1/status/buildinfo",

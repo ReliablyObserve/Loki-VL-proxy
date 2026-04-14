@@ -23,6 +23,7 @@ func TestGrafanaDatasourceCatalogAndHealth(t *testing.T) {
 		{name: "Loki (via VL proxy)", kind: "loki"},
 		{name: "Loki (via VL proxy multi-tenant)", kind: "loki"},
 		{name: "Loki (via VL proxy native metadata)", kind: "loki"},
+		{name: "Loki (via VL proxy patterns autodetect)", kind: "loki"},
 		{name: "Loki (via VL proxy live tail)", kind: "loki"},
 		{name: "Loki (via ingress tail)", kind: "loki"},
 		{name: "Loki (via VL proxy live tail native)", kind: "loki"},

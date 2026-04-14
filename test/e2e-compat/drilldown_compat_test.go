@@ -5,6 +5,7 @@ package e2e_compat
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +14,76 @@ import (
 )
 
 const grafanaURL = "http://localhost:3002"
+
+var requiredDrilldownLimitKeys = []string{
+	"discover_log_levels",
+	"discover_service_name",
+	"log_level_fields",
+	"max_entries_limit_per_query",
+	"max_line_size_truncate",
+	"max_query_bytes_read",
+	"max_query_length",
+	"max_query_lookback",
+	"max_query_range",
+	"max_query_series",
+	"metric_aggregation_enabled",
+	"otlp_config",
+	"pattern_persistence_enabled",
+	"query_timeout",
+	"retention_period",
+	"retention_stream",
+	"volume_enabled",
+	"volume_max_series",
+}
+
+func assertDrilldownLimitsContract(t *testing.T, resp map[string]interface{}) map[string]interface{} {
+	t.Helper()
+
+	limits := extractMap(resp, "limits")
+	if limits == nil {
+		t.Fatalf("expected Loki-style limits object, got %v", resp)
+	}
+
+	requiredTopLevel := []string{
+		"pattern_ingester_enabled",
+		"version",
+		"maxDetectedFields",
+		"maxDetectedValues",
+		"maxLabelValues",
+		"maxLines",
+	}
+	for _, key := range requiredTopLevel {
+		if _, ok := resp[key]; !ok {
+			t.Fatalf("drilldown-limits missing top-level key %q: %v", key, resp)
+		}
+	}
+	if _, ok := resp["pattern_ingester_enabled"].(bool); !ok {
+		t.Fatalf("expected boolean pattern_ingester_enabled in drilldown-limits: %v", resp)
+	}
+	if _, ok := resp["version"].(string); !ok {
+		t.Fatalf("expected string version in drilldown-limits: %v", resp)
+	}
+
+	for _, key := range requiredDrilldownLimitKeys {
+		if _, ok := limits[key]; !ok {
+			t.Fatalf("drilldown-limits missing limits.%s: %v", key, resp)
+		}
+	}
+	if _, ok := limits["discover_service_name"].([]interface{}); !ok {
+		t.Fatalf("expected limits.discover_service_name array, got %T", limits["discover_service_name"])
+	}
+	if _, ok := limits["log_level_fields"].([]interface{}); !ok {
+		t.Fatalf("expected limits.log_level_fields array, got %T", limits["log_level_fields"])
+	}
+	if _, ok := limits["retention_stream"].([]interface{}); !ok {
+		t.Fatalf("expected limits.retention_stream array, got %T", limits["retention_stream"])
+	}
+	if _, ok := limits["pattern_persistence_enabled"].(bool); !ok {
+		t.Fatalf("expected boolean limits.pattern_persistence_enabled in drilldown-limits: %v", resp)
+	}
+
+	return limits
+}
 
 func grafanaDatasourceUID(t *testing.T, name string) string {
 	t.Helper()
@@ -140,6 +211,7 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 	start := now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	end := now.Format(time.RFC3339Nano)
 	dsUID := grafanaDatasourceUID(t, "Loki (via VL proxy)")
+	autodetectUID := grafanaDatasourceUID(t, "Loki (via VL proxy patterns autodetect)")
 	multiUID := grafanaDatasourceUID(t, "Loki (via VL proxy multi-tenant)")
 
 	t.Run("service_buckets", func(t *testing.T) {
@@ -180,21 +252,27 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 
 	t.Run("drilldown_limits_shape", func(t *testing.T) {
 		resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+dsUID+"/resources/drilldown-limits")
-		limits := extractMap(resp, "limits")
-		if limits == nil {
-			t.Fatalf("expected Loki-style limits object, got %v", resp)
+		limits := assertDrilldownLimitsContract(t, resp)
+		patternIngesterEnabled := resp["pattern_ingester_enabled"].(bool)
+		if patternIngesterEnabled {
+			t.Fatalf("expected pattern_ingester_enabled=false for default proxy datasource: %v", resp)
 		}
-		if limits["retention_period"] == nil {
-			t.Fatalf("expected retention_period in drilldown-limits: %v", resp)
+		patternPersistenceEnabled := limits["pattern_persistence_enabled"].(bool)
+		if patternPersistenceEnabled {
+			t.Fatalf("expected limits.pattern_persistence_enabled=false for default proxy datasource: %v", resp)
 		}
-		if limits["discover_service_name"] == nil || limits["log_level_fields"] == nil {
-			t.Fatalf("expected Drilldown config arrays in drilldown-limits: %v", resp)
+	})
+
+	t.Run("drilldown_limits_pattern_flags_for_autodetect_datasource", func(t *testing.T) {
+		resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+autodetectUID+"/resources/drilldown-limits")
+		limits := assertDrilldownLimitsContract(t, resp)
+		patternIngesterEnabled := resp["pattern_ingester_enabled"].(bool)
+		if !patternIngesterEnabled {
+			t.Fatalf("expected pattern_ingester_enabled=true for autodetect datasource: %v", resp)
 		}
-		if _, ok := resp["pattern_ingester_enabled"]; !ok {
-			t.Fatalf("expected pattern_ingester_enabled in drilldown-limits: %v", resp)
-		}
-		if _, ok := resp["version"]; !ok {
-			t.Fatalf("expected version in drilldown-limits: %v", resp)
+		patternPersistenceEnabled := limits["pattern_persistence_enabled"].(bool)
+		if !patternPersistenceEnabled {
+			t.Fatalf("expected limits.pattern_persistence_enabled=true for autodetect datasource: %v", resp)
 		}
 	})
 
@@ -602,6 +680,39 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		}
 	})
 
+	t.Run("patterns_resource_from_autodetection_after_query_range", func(t *testing.T) {
+		seedQuery := url.Values{}
+		seedQuery.Set("query", `{app="pattern-test"}`)
+		seedQuery.Set("start", start)
+		seedQuery.Set("end", end)
+		seedQuery.Set("limit", "200")
+		seedQuery.Set("direction", "backward")
+
+		seedResp := getJSON(t, grafanaURL+"/api/datasources/proxy/uid/"+autodetectUID+"/loki/api/v1/query_range?"+seedQuery.Encode())
+		if seedResp == nil || seedResp["status"] != "success" {
+			t.Fatalf("expected successful query_range seed on autodetect datasource, got %v", seedResp)
+		}
+
+		params := url.Values{}
+		params.Set("query", `{app="pattern-test"}`)
+		params.Set("start", start)
+		params.Set("end", end)
+		params.Set("step", "60s")
+
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+autodetectUID+"/resources/patterns?"+params.Encode())
+			data, ok := resp["data"].([]interface{})
+			if ok && len(data) > 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected non-empty autodetected patterns via Grafana resource, got %v", resp)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+
 	t.Run("unknown_detected_field_keeps_empty_success_shape", func(t *testing.T) {
 		params := url.Values{}
 		params.Set("query", `{service_name="api-gateway"}`)
@@ -937,5 +1048,36 @@ func TestDrilldown_RuntimeFamilyContracts(t *testing.T) {
 
 	default:
 		t.Fatalf("unsupported grafana runtime family for Drilldown contracts: %s", version)
+	}
+}
+
+func TestDrilldown_TenantLimitsEndpointContract(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, proxyURL+"/config/tenant/v1/limits", nil)
+	if err != nil {
+		t.Fatalf("failed to create tenant limits request: %v", err)
+	}
+	req.Header.Set("X-Scope-OrgID", "team-a")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tenant limits request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected tenant limits status 200, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/plain") {
+		t.Fatalf("expected tenant limits content type text/plain, got %q", resp.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read tenant limits response body: %v", err)
+	}
+	payload := string(body)
+	for _, required := range []string{"retention_period:", "query_timeout:", "volume_enabled:"} {
+		if !strings.Contains(payload, required) {
+			t.Fatalf("tenant limits response missing %q: %s", required, payload)
+		}
 	}
 }

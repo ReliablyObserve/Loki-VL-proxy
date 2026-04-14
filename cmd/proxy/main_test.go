@@ -630,21 +630,24 @@ func TestApplyEnvOverrides(t *testing.T) {
 		metadataFieldMode: "hybrid",
 	}
 	env := map[string]string{
-		"LISTEN_ADDR":              ":9999",
-		"VL_BACKEND_URL":           "http://other",
-		"RULER_BACKEND_URL":        "http://ruler-env",
-		"ALERTS_BACKEND_URL":       "http://alerts-env",
-		"TENANT_MAP":               `{"team":{"account_id":"1","project_id":"0"}}`,
-		"OTLP_ENDPOINT":            "http://otel",
-		"OTLP_COMPRESSION":         "gzip",
-		"LABEL_STYLE":              "underscores",
-		"FIELD_MAPPING":            `[{"vl_field":"service.name","loki_label":"service_name"}]`,
-		"METADATA_FIELD_MODE":      "native",
-		"EXTRA_LABEL_FIELDS":       "host.id,custom.pipeline.processing",
-		"OTEL_SERVICE_NAME":        "custom-proxy",
-		"OTEL_SERVICE_NAMESPACE":   "platform",
-		"OTEL_SERVICE_INSTANCE_ID": "proxy-1",
-		"DEPLOYMENT_ENVIRONMENT":   "prod",
+		"LISTEN_ADDR":                 ":9999",
+		"VL_BACKEND_URL":              "http://other",
+		"RULER_BACKEND_URL":           "http://ruler-env",
+		"ALERTS_BACKEND_URL":          "http://alerts-env",
+		"TENANT_MAP":                  `{"team":{"account_id":"1","project_id":"0"}}`,
+		"TENANT_LIMITS_ALLOW_PUBLISH": "query_timeout,max_query_series",
+		"TENANT_DEFAULT_LIMITS":       `{"query_timeout":"5m"}`,
+		"TENANT_LIMITS":               `{"team":{"max_query_series":777}}`,
+		"OTLP_ENDPOINT":               "http://otel",
+		"OTLP_COMPRESSION":            "gzip",
+		"LABEL_STYLE":                 "underscores",
+		"FIELD_MAPPING":               `[{"vl_field":"service.name","loki_label":"service_name"}]`,
+		"METADATA_FIELD_MODE":         "native",
+		"EXTRA_LABEL_FIELDS":          "host.id,custom.pipeline.processing",
+		"OTEL_SERVICE_NAME":           "custom-proxy",
+		"OTEL_SERVICE_NAMESPACE":      "platform",
+		"OTEL_SERVICE_INSTANCE_ID":    "proxy-1",
+		"DEPLOYMENT_ENVIRONMENT":      "prod",
 	}
 	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
 	if got.listenAddr != ":9999" || got.backendURL != "http://other" || got.otlpEndpoint != "http://otel" {
@@ -655,6 +658,9 @@ func TestApplyEnvOverrides(t *testing.T) {
 	}
 	if got.tenantMapJSON == "" || got.fieldMappingJSON == "" {
 		t.Fatalf("expected JSON env overrides, got %+v", got)
+	}
+	if got.tenantLimitsAllow == "" || got.tenantDefaultJSON == "" || got.tenantLimitsJSON == "" {
+		t.Fatalf("expected tenant limits env overrides, got %+v", got)
 	}
 	if got.otlpCompression != "gzip" || got.labelStyle != "underscores" || got.metadataFieldMode != "native" {
 		t.Fatalf("unexpected style/compression override result: %+v", got)
@@ -670,6 +676,9 @@ func TestApplyEnvOverrides(t *testing.T) {
 func TestApplyEnvOverrides_PreservesExplicitFlags(t *testing.T) {
 	cfg := envConfig{
 		tenantMapJSON:     `{}`,
+		tenantLimitsAllow: "query_timeout",
+		tenantDefaultJSON: `{"query_timeout":"1m"}`,
+		tenantLimitsJSON:  `{"team-a":{"query_timeout":"2m"}}`,
 		otlpEndpoint:      "http://flag",
 		otlpCompression:   "zstd",
 		labelStyle:        "underscores",
@@ -678,13 +687,16 @@ func TestApplyEnvOverrides_PreservesExplicitFlags(t *testing.T) {
 		extraLabelFields:  "service.name",
 	}
 	env := map[string]string{
-		"TENANT_MAP":          `{"ignored":{}}`,
-		"OTLP_ENDPOINT":       "http://env",
-		"OTLP_COMPRESSION":    "gzip",
-		"LABEL_STYLE":         "passthrough",
-		"FIELD_MAPPING":       `[{"ignored":true}]`,
-		"METADATA_FIELD_MODE": "native",
-		"EXTRA_LABEL_FIELDS":  "host.id",
+		"TENANT_MAP":                  `{"ignored":{}}`,
+		"TENANT_LIMITS_ALLOW_PUBLISH": "max_query_series",
+		"TENANT_DEFAULT_LIMITS":       `{"query_timeout":"9m"}`,
+		"TENANT_LIMITS":               `{"ignored":{"query_timeout":"10m"}}`,
+		"OTLP_ENDPOINT":               "http://env",
+		"OTLP_COMPRESSION":            "gzip",
+		"LABEL_STYLE":                 "passthrough",
+		"FIELD_MAPPING":               `[{"ignored":true}]`,
+		"METADATA_FIELD_MODE":         "native",
+		"EXTRA_LABEL_FIELDS":          "host.id",
 	}
 	got := applyEnvOverrides(cfg, func(key string) string { return env[key] })
 	if got != cfg {
@@ -763,6 +775,32 @@ func TestParseTenantMapJSON(t *testing.T) {
 	}
 }
 
+func TestParseTenantDefaultLimitsJSON(t *testing.T) {
+	got, err := parseTenantDefaultLimitsJSON(`{"query_timeout":"2m","max_query_series":500}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["query_timeout"] != "2m" || got["max_query_series"] != float64(500) {
+		t.Fatalf("unexpected tenant default limits: %+v", got)
+	}
+	if _, err := parseTenantDefaultLimitsJSON("{"); err == nil {
+		t.Fatal("expected invalid tenant default limits JSON error")
+	}
+}
+
+func TestParseTenantLimitsJSON(t *testing.T) {
+	got, err := parseTenantLimitsJSON(`{"team-a":{"query_timeout":"3m"}}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["team-a"]["query_timeout"] != "3m" {
+		t.Fatalf("unexpected tenant limits: %+v", got)
+	}
+	if _, err := parseTenantLimitsJSON("{"); err == nil {
+		t.Fatal("expected invalid tenant limits JSON error")
+	}
+}
+
 func TestParseFieldMappingsJSON(t *testing.T) {
 	got, err := parseFieldMappingsJSON(`[{"vl_field":"service.name","loki_label":"service_name"}]`)
 	if err != nil {
@@ -814,6 +852,9 @@ func TestBuildProxyConfig(t *testing.T) {
 		cache:                           nil,
 		logLevel:                        "debug",
 		tenantMapJSON:                   `{"team-a":{"account_id":"1","project_id":"2"}}`,
+		tenantLimitsAllowPublish:        "query_timeout,max_query_series",
+		tenantDefaultLimitsJSON:         `{"query_timeout":"7m","max_query_series":321}`,
+		tenantLimitsJSON:                `{"team-a":{"max_query_series":111}}`,
 		maxLines:                        123,
 		backendTimeout:                  5 * time.Second,
 		backendBasicAuth:                "user:pass",
@@ -886,6 +927,15 @@ func TestBuildProxyConfig(t *testing.T) {
 	}
 	if len(got.TenantMap) != 1 || got.TenantMap["team-a"].AccountID != "1" {
 		t.Fatalf("unexpected tenant map: %+v", got.TenantMap)
+	}
+	if len(got.TenantLimitsAllowPublish) != 2 || got.TenantLimitsAllowPublish[0] != "query_timeout" {
+		t.Fatalf("unexpected tenant limits allow publish: %+v", got.TenantLimitsAllowPublish)
+	}
+	if got.TenantDefaultLimits["query_timeout"] != "7m" || got.TenantDefaultLimits["max_query_series"] != float64(321) {
+		t.Fatalf("unexpected tenant default limits: %+v", got.TenantDefaultLimits)
+	}
+	if got.TenantLimits["team-a"]["max_query_series"] != float64(111) {
+		t.Fatalf("unexpected tenant limits overrides: %+v", got.TenantLimits)
 	}
 	if len(got.ForwardHeaders) != 2 || got.ForwardHeaders[0] != "X-Scope-OrgID" || got.ForwardHeaders[1] != "Authorization" {
 		t.Fatalf("unexpected forward headers: %+v", got.ForwardHeaders)
@@ -1028,6 +1078,8 @@ func TestBuildProxyConfig_DefaultsAlertsBackendToRuler(t *testing.T) {
 func TestBuildProxyConfig_InvalidInputs(t *testing.T) {
 	cases := []proxyRuntimeConfig{
 		{tenantMapJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
+		{tenantDefaultLimitsJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
+		{tenantLimitsJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
 		{fieldMappingJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
 		{derivedFieldsJSON: "{", labelStyle: "passthrough", metadataFieldMode: "hybrid"},
 		{labelStyle: "bad", metadataFieldMode: "hybrid"},

@@ -34,6 +34,9 @@ type envConfig struct {
 	alertsBackendURL  string
 	procRoot          string
 	tenantMapJSON     string
+	tenantLimitsAllow string
+	tenantDefaultJSON string
+	tenantLimitsJSON  string
 	otlpEndpoint      string
 	otlpCompression   string
 	otlpHeaders       string
@@ -55,6 +58,9 @@ type proxyRuntimeConfig struct {
 	compatCache                        *cache.Cache
 	logLevel                           string
 	tenantMapJSON                      string
+	tenantLimitsAllowPublish           string
+	tenantDefaultLimitsJSON            string
+	tenantLimitsJSON                   string
 	maxLines                           int
 	backendTimeout                     time.Duration
 	backendBasicAuth                   string
@@ -289,6 +295,9 @@ func run(
 	diskCacheMaxBytes := fs.Int64("disk-cache-max-bytes", 0, "Maximum on-disk L2 cache size in bytes (0 = unlimited)")
 	// Tenant mapping
 	tenantMapJSON := fs.String("tenant-map", "", `JSON tenant mapping: {"org-name":{"account_id":"1","project_id":"0"}}`)
+	tenantLimitsAllowPublish := fs.String("tenant-limits-allow-publish", "", "Comma-separated limit fields published on /config/tenant/v1/limits and /loki/api/v1/drilldown-limits")
+	tenantDefaultLimitsJSON := fs.String("tenant-default-limits", "", `JSON map of default published limits overrides (for example {"query_timeout":"2m","max_query_series":1000})`)
+	tenantLimitsJSON := fs.String("tenant-limits", "", `JSON map of per-tenant published limits overrides keyed by X-Scope-OrgID`)
 
 	// OTLP telemetry flags
 	otlpEndpoint := fs.String("otlp-endpoint", "", "OTLP HTTP endpoint (e.g., http://otel-collector:4318/v1/metrics)")
@@ -410,6 +419,9 @@ func run(
 		alertsBackendURL:  *alertsBackendURL,
 		procRoot:          *procRoot,
 		tenantMapJSON:     *tenantMapJSON,
+		tenantLimitsAllow: *tenantLimitsAllowPublish,
+		tenantDefaultJSON: *tenantDefaultLimitsJSON,
+		tenantLimitsJSON:  *tenantLimitsJSON,
 		otlpEndpoint:      *otlpEndpoint,
 		otlpCompression:   *otlpCompression,
 		otlpHeaders:       *otlpHeaders,
@@ -459,6 +471,9 @@ func run(
 			alertsBackendURL:                   envCfg.alertsBackendURL,
 			logLevel:                           *logLevel,
 			tenantMapJSON:                      envCfg.tenantMapJSON,
+			tenantLimitsAllowPublish:           envCfg.tenantLimitsAllow,
+			tenantDefaultLimitsJSON:            envCfg.tenantDefaultJSON,
+			tenantLimitsJSON:                   envCfg.tenantLimitsJSON,
 			maxLines:                           *maxLines,
 			backendTimeout:                     *backendTimeout,
 			backendBasicAuth:                   *backendBasicAuth,
@@ -815,6 +830,15 @@ func applyEnvOverrides(cfg envConfig, getenv func(string) string) envConfig {
 	if v := getenv("TENANT_MAP"); v != "" && cfg.tenantMapJSON == "" {
 		cfg.tenantMapJSON = v
 	}
+	if v := getenv("TENANT_LIMITS_ALLOW_PUBLISH"); v != "" && cfg.tenantLimitsAllow == "" {
+		cfg.tenantLimitsAllow = v
+	}
+	if v := getenv("TENANT_DEFAULT_LIMITS"); v != "" && cfg.tenantDefaultJSON == "" {
+		cfg.tenantDefaultJSON = v
+	}
+	if v := getenv("TENANT_LIMITS"); v != "" && cfg.tenantLimitsJSON == "" {
+		cfg.tenantLimitsJSON = v
+	}
 	if v := getenv("OTLP_ENDPOINT"); v != "" && cfg.otlpEndpoint == "" {
 		cfg.otlpEndpoint = v
 	}
@@ -860,6 +884,28 @@ func parseTenantMapJSON(raw string) (map[string]proxy.TenantMapping, error) {
 		return nil, err
 	}
 	return tenantMap, nil
+}
+
+func parseTenantDefaultLimitsJSON(raw string) (map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var limits map[string]any
+	if err := json.Unmarshal([]byte(raw), &limits); err != nil {
+		return nil, err
+	}
+	return limits, nil
+}
+
+func parseTenantLimitsJSON(raw string) (map[string]map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var limits map[string]map[string]any
+	if err := json.Unmarshal([]byte(raw), &limits); err != nil {
+		return nil, err
+	}
+	return limits, nil
 }
 
 func parseFieldMappingsJSON(raw string) ([]proxy.FieldMapping, error) {
@@ -970,6 +1016,14 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 	if err != nil {
 		return proxy.Config{}, fmt.Errorf("parse tenant map: %w", err)
 	}
+	tenantDefaultLimits, err := parseTenantDefaultLimitsJSON(cfg.tenantDefaultLimitsJSON)
+	if err != nil {
+		return proxy.Config{}, fmt.Errorf("parse default tenant limits: %w", err)
+	}
+	tenantLimits, err := parseTenantLimitsJSON(cfg.tenantLimitsJSON)
+	if err != nil {
+		return proxy.Config{}, fmt.Errorf("parse tenant limits: %w", err)
+	}
 	fieldMappings, err := parseFieldMappingsJSON(cfg.fieldMappingJSON)
 	if err != nil {
 		return proxy.Config{}, fmt.Errorf("parse field mappings: %w", err)
@@ -1010,6 +1064,9 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		CompatCache:                        cfg.compatCache,
 		LogLevel:                           cfg.logLevel,
 		TenantMap:                          tenantMap,
+		TenantLimitsAllowPublish:           parseCSV(cfg.tenantLimitsAllowPublish),
+		TenantDefaultLimits:                tenantDefaultLimits,
+		TenantLimits:                       tenantLimits,
 		MaxLines:                           cfg.maxLines,
 		BackendTimeout:                     cfg.backendTimeout,
 		BackendBasicAuth:                   cfg.backendBasicAuth,
@@ -1167,6 +1224,14 @@ func logProxyStartup(logger *slog.Logger, proxyCfg proxy.Config, peerSelf, peerD
 	}
 	if proxyCfg.FieldMappings != nil {
 		logger.Info("loaded field mappings", "count", len(proxyCfg.FieldMappings))
+	}
+	if len(proxyCfg.TenantLimitsAllowPublish) > 0 || len(proxyCfg.TenantDefaultLimits) > 0 || len(proxyCfg.TenantLimits) > 0 {
+		logger.Info(
+			"loaded published tenant limits config",
+			"allowlist_fields", len(proxyCfg.TenantLimitsAllowPublish),
+			"default_overrides", len(proxyCfg.TenantDefaultLimits),
+			"tenant_overrides", len(proxyCfg.TenantLimits),
+		)
 	}
 	if proxyCfg.PatternsEnabled != nil && !*proxyCfg.PatternsEnabled {
 		logger.Info("patterns endpoint disabled", "flag", "patterns-enabled")

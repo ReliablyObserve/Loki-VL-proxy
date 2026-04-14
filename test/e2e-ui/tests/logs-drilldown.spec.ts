@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import {
   PROXY_DS,
   PROXY_MULTI_DS,
+  PROXY_PATTERNS_AUTODETECT_DS,
   installGrafanaGuards,
   openLogsDrilldown,
   resolveDatasourceUid,
@@ -69,6 +70,73 @@ async function openServiceDrilldown(
   const uid = await resolveDatasourceUid(page, datasource);
   await page.goto(buildServiceDrilldownUrl(uid, serviceName, view));
   await waitForDrilldownDetails(page);
+}
+
+function nsRangeLastTwoHours() {
+  const end = Date.now() * 1_000_000;
+  const start = (Date.now() - 2 * 60 * 60 * 1000) * 1_000_000;
+  return { start, end };
+}
+
+async function waitForAutodetectedPatterns(
+  page: Page,
+  datasource: string,
+  query: string,
+  timeoutMs = 30_000
+) {
+  const uid = await resolveDatasourceUid(page, datasource);
+  const deadline = Date.now() + timeoutMs;
+  let lastPatternsPayload: unknown = null;
+  let lastSeedPayload: unknown = null;
+  const { start, end } = nsRangeLastTwoHours();
+
+  while (Date.now() < deadline) {
+    const seedParams = new URLSearchParams();
+    seedParams.set("query", query);
+    seedParams.set("start", String(start));
+    seedParams.set("end", String(end));
+    seedParams.set("limit", "200");
+    seedParams.set("direction", "backward");
+    const seedResponse = await page.request.get(
+      `/api/datasources/proxy/uid/${uid}/loki/api/v1/query_range?${seedParams.toString()}`
+    );
+    try {
+      lastSeedPayload = await seedResponse.json();
+    } catch {
+      lastSeedPayload = null;
+    }
+
+    const patternsParams = new URLSearchParams();
+    patternsParams.set("query", query);
+    patternsParams.set("start", String(start));
+    patternsParams.set("end", String(end));
+    patternsParams.set("step", "60s");
+    const patternsResponse = await page.request.get(
+      `/api/datasources/uid/${uid}/resources/patterns?${patternsParams.toString()}`
+    );
+    try {
+      lastPatternsPayload = await patternsResponse.json();
+    } catch {
+      lastPatternsPayload = null;
+    }
+
+    if (
+      seedResponse.ok() &&
+      (lastSeedPayload as { status?: string } | null)?.status === "success" &&
+      Array.isArray((lastPatternsPayload as { data?: unknown[] } | null)?.data) &&
+      ((lastPatternsPayload as { data?: unknown[] }).data?.length ?? 0) > 0
+    ) {
+      return;
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  throw new Error(
+    `timed out waiting for autodetected patterns (seed=${JSON.stringify(
+      lastSeedPayload
+    )}, patterns=${JSON.stringify(lastPatternsPayload)})`
+  );
 }
 
 async function collectDrilldownResponses(page) {
@@ -192,6 +260,31 @@ test.describe("Grafana Logs Drilldown", () => {
     await waitForDrilldownDetails(page);
     await expectFilterApplied(page, "Filter by labels", "service_name", "api-gateway");
     await expect(page.getByText("No logs found")).toHaveCount(0);
+    await guards.assertClean();
+  });
+
+  test("patterns are visible in drilldown for autodetected datasource @drilldown-core", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page);
+    await waitForAutodetectedPatterns(
+      page,
+      PROXY_PATTERNS_AUTODETECT_DS,
+      `{app="pattern-test"}`
+    );
+
+    await openServiceDrilldown(page, PROXY_PATTERNS_AUTODETECT_DS, "pattern-test", "logs");
+
+    const patternsTab = page.getByRole("tab", { name: /^Patterns/i }).first();
+    await expect(patternsTab).toBeVisible({ timeout: 10_000 });
+    await patternsTab.click();
+
+    await expect
+      .poll(async () => (await patternsTab.textContent())?.trim() ?? "", { timeout: 30_000 })
+      .toMatch(/^Patterns[1-9]\d*$/);
+
+    await expect(page.getByText("No patterns match these filters.")).toHaveCount(0);
+
     await guards.assertClean();
   });
 });
