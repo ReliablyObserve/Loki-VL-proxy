@@ -4331,10 +4331,11 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	r = withOrgID(r)
 	orgID := r.Header.Get("X-Scope-OrgID")
 	query := patternScopeQuery(r.FormValue("query"))
-	startParam := r.FormValue("start")
-	endParam := r.FormValue("end")
+	startParam := strings.TrimSpace(firstNonEmpty(r.FormValue("start"), r.FormValue("from")))
+	endParam := strings.TrimSpace(firstNonEmpty(r.FormValue("end"), r.FormValue("to")))
 	stepParam := r.FormValue("step")
 	patternLimit := parsePatternLimit(r.FormValue("limit"))
+	sourceLimit := parsePatternSourceLineLimit(r.FormValue("line_limit"), startParam, endParam, stepParam)
 	cacheKey := p.patternsAutodetectCacheKey(orgID, query, startParam, endParam, stepParam)
 	if cacheKey == "" {
 		cacheKey = "patterns:" + orgID + ":" + r.URL.RawQuery
@@ -4367,7 +4368,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	if e := endParam; e != "" {
 		params.Set("end", formatVLTimestamp(e))
 	}
-	params.Set("limit", "1000")
+	params.Set("limit", strconv.Itoa(sourceLimit))
 
 	fetchPatterns := func(endpoint string) ([]map[string]interface{}, bool) {
 		resp, err := p.vlPost(r.Context(), endpoint, params)
@@ -4469,6 +4470,54 @@ func parsePatternLimit(raw string) int {
 		return maxPatternResponseLimit
 	}
 	return patternLimit
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parsePatternSourceLineLimit(raw, startParam, endParam, stepParam string) int {
+	const (
+		defaultPatternSourceLimit = 10_000
+		minPatternSourceLimit     = 2_000
+		maxPatternSourceLimit     = 50_000
+		bucketSampleMultiplier    = 20
+	)
+
+	if raw = strings.TrimSpace(raw); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			if parsed > maxPatternSourceLimit {
+				return maxPatternSourceLimit
+			}
+			return parsed
+		}
+	}
+
+	startUnix, okStart := parsePatternUnixSeconds(startParam)
+	endUnix, okEnd := parsePatternUnixSeconds(endParam)
+	if !okStart || !okEnd || endUnix <= startUnix {
+		return defaultPatternSourceLimit
+	}
+
+	stepSeconds := parsePatternStepSeconds(stepParam)
+	if stepSeconds <= 0 {
+		stepSeconds = 60
+	}
+
+	buckets := int(((endUnix - startUnix) / stepSeconds) + 1)
+	estimate := buckets * bucketSampleMultiplier
+	if estimate < minPatternSourceLimit {
+		return minPatternSourceLimit
+	}
+	if estimate > maxPatternSourceLimit {
+		return maxPatternSourceLimit
+	}
+	return estimate
 }
 
 func limitPatternPayload(payload []byte, limit int) []byte {
