@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-04-14
+
 ### Features
 
 - runtime compatibility: add Loki-compatible `/config/tenant/v1/limits` endpoint to expose published tenant limits for datasource/runtime probing
