@@ -6,8 +6,11 @@
 package e2e_compat
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/klauspost/compress/zstd"
 )
 
 const tailIdleWindow = 2 * time.Second
@@ -1246,6 +1250,112 @@ func TestFeature_NoGzipWithoutAccept(t *testing.T) {
 		score.pass("no_gzip", "no gzip without Accept-Encoding")
 	} else {
 		score.fail("no_gzip", "should not gzip without Accept-Encoding")
+	}
+
+	score.report(t)
+}
+
+func TestFeature_ZstdCompression(t *testing.T) {
+	score := &CompatScore{}
+
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	req, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/labels", nil)
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+	resp, err := client.Do(req)
+	if err != nil {
+		score.fail("zstd", "request failed: "+err.Error())
+		score.report(t)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.Header.Get("Content-Encoding") == "zstd" {
+		score.pass("zstd", "response is zstd-compressed")
+	} else {
+		score.fail("zstd", fmt.Sprintf("expected zstd, got Content-Encoding: %q", resp.Header.Get("Content-Encoding")))
+		score.report(t)
+		return
+	}
+
+	zr, err := zstd.NewReader(resp.Body)
+	if err != nil {
+		score.fail("zstd", "failed to create zstd reader: "+err.Error())
+		score.report(t)
+		return
+	}
+	defer zr.Close()
+	body, err := io.ReadAll(zr)
+	if err != nil {
+		score.fail("zstd", "failed to decode zstd body: "+err.Error())
+		score.report(t)
+		return
+	}
+	if strings.Contains(string(body), `"status":"success"`) {
+		score.pass("zstd", "decoded zstd body matches Loki response shape")
+	} else {
+		score.fail("zstd", "decoded zstd body missing expected Loki payload")
+	}
+	if resp.Header.Get("Vary") == "Accept-Encoding" {
+		score.pass("zstd", "Vary: Accept-Encoding header present")
+	}
+
+	score.report(t)
+}
+
+func TestFeature_GzipAndZstdBodiesMatch(t *testing.T) {
+	score := &CompatScore{}
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+
+	gzipReq, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/labels", nil)
+	gzipReq.Header.Set("Accept-Encoding", "gzip")
+	gzipResp, err := client.Do(gzipReq)
+	if err != nil {
+		score.fail("compression_parity", "gzip request failed: "+err.Error())
+		score.report(t)
+		return
+	}
+	defer gzipResp.Body.Close()
+	gzr, err := gzip.NewReader(gzipResp.Body)
+	if err != nil {
+		score.fail("compression_parity", "gzip decoder failed: "+err.Error())
+		score.report(t)
+		return
+	}
+	gzipBody, err := io.ReadAll(gzr)
+	gzr.Close()
+	if err != nil {
+		score.fail("compression_parity", "gzip body read failed: "+err.Error())
+		score.report(t)
+		return
+	}
+
+	zstdReq, _ := http.NewRequest("GET", proxyURL+"/loki/api/v1/labels", nil)
+	zstdReq.Header.Set("Accept-Encoding", "zstd")
+	zstdResp, err := client.Do(zstdReq)
+	if err != nil {
+		score.fail("compression_parity", "zstd request failed: "+err.Error())
+		score.report(t)
+		return
+	}
+	defer zstdResp.Body.Close()
+	zr, err := zstd.NewReader(zstdResp.Body)
+	if err != nil {
+		score.fail("compression_parity", "zstd decoder failed: "+err.Error())
+		score.report(t)
+		return
+	}
+	zstdBody, err := io.ReadAll(zr)
+	zr.Close()
+	if err != nil {
+		score.fail("compression_parity", "zstd body read failed: "+err.Error())
+		score.report(t)
+		return
+	}
+
+	if bytes.Equal(gzipBody, zstdBody) {
+		score.pass("compression_parity", "gzip and zstd responses decode to the same payload")
+	} else {
+		score.fail("compression_parity", "gzip and zstd decoded payloads differ")
 	}
 
 	score.report(t)

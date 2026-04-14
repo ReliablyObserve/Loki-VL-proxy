@@ -36,7 +36,7 @@ Project site: `https://reliablyobserve.github.io/Loki-VL-proxy/`
 - **Production guardrails**: Tenant isolation, bounded fanout, circuit breaking, rate limits, and safe caching.
 - **Fast repeat reads**: Tiered cache with optional disk and fleet peer reuse.
 
-Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/compatibility-matrix.md), [Patterns](docs/patterns.md), [Operations](docs/operations.md)
+Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/compatibility-matrix.md), [Patterns](docs/patterns.md), [Operations](docs/operations.md), [Known Issues](docs/KNOWN_ISSUES.md)
 
 ## Key Features
 
@@ -56,11 +56,13 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 - Query-range windowing with historical window reuse.
 - Adaptive bounded parallel fanout for long time ranges.
 - Tiered caching: compatibility-edge, memory, disk, and optional peer cache.
+- Compression-aware read path: `zstd`/`gzip` client responses, compressed peer-cache hops, and negotiated upstream compression with safe decode.
 - Request coalescing and protective limits to reduce backend pressure.
 
 ### Operations
 
 - Route-aware upstream/downstream metrics and semconv-aligned structured logs for client, proxy, and VictoriaLogs visibility.
+- Better read-path control: per-route visibility, user-pattern attribution from trusted Grafana headers, and separate northbound/southbound auth boundaries.
 - Packaged operator dashboard covering `Client -> Proxy -> VictoriaLogs`, query-range resilience, cache behavior, and operational resources.
 - Helm-ready deployment model for production clusters.
 - Compatibility CI tracks for Loki, Logs Drilldown, and VictoriaLogs.
@@ -207,7 +209,7 @@ docker build -t loki-vl-proxy .
 docker run -p 3100:3100 loki-vl-proxy -backend=http://victorialogs:9428
 
 # Compose (includes Grafana)
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Helm

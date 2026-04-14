@@ -37,7 +37,7 @@ The only write-path exception is `/loki/api/v1/delete`, gated by strict safeguar
 
 - max request body/header limits
 - request timeout boundaries
-- rate limiting and global concurrency guards
+- built-in rate limiting and global concurrency guards
 - request coalescing + circuit breaker to reduce backend cascade risk
 
 ### 5) Transport Security
@@ -45,6 +45,7 @@ The only write-path exception is `/loki/api/v1/delete`, gated by strict safeguar
 - frontend TLS and optional mTLS support
 - backend TLS controls for VictoriaLogs/OTLP exporters
 - controlled forwarding of auth headers/cookies to backend
+- optional peer-cache shared-token protection via `-peer-auth-token`
 
 ## Admin and Debug Endpoints
 
@@ -53,7 +54,7 @@ The following are disabled by default and should stay restricted:
 - `/debug/queries`
 - `/debug/pprof/*`
 
-Enable only for controlled troubleshooting windows.
+Enable only for controlled troubleshooting windows, and protect them with `-server.admin-auth-token` when exposed outside a single-user environment.
 
 ## Recommended Production Baseline
 
@@ -61,6 +62,8 @@ Enable only for controlled troubleshooting windows.
 - strict `/tail` origin allowlist
 - conservative request-size and timeout limits
 - `ServiceMonitor` + alerting on `5xx`, circuit breaker open state, and backend latency
+- `-server.admin-auth-token` for debug/admin surfaces
+- `-peer-auth-token` when peer cache crosses network trust boundaries
 - avoid exposing debug/admin endpoints publicly
 
 ## Related Docs

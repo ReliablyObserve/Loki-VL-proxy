@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- add `zstd`-capable read-path compression support for client responses and peer-cache transfers, plus negotiated upstream `zstd`/`gzip` decoding for backend responses when the upstream provides compressed payloads
+
 ## [1.0.19] - 2026-04-14
 
 ### Bug Fixes
@@ -20,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - add a Docusaurus-based GitHub Pages site with SEO landing pages for VictoriaLogs, Grafana Loki datasource usage, Explore, Drilldown, LogQL semantics, comparison, and migration flows
 - polish the docs-site dark/light theme, switch navbar branding to the SVG logo, and refresh known differences / known issues pages against the current codebase
+- align the repo docs with the current runtime flags and behavior, expand the source-backed comparison matrix, and add cost-model pages that use Loki's published throughput sizing plus VictoriaLogs compression caveats
 
 ### CI
 

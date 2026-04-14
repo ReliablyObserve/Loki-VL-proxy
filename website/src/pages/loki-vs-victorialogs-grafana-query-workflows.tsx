@@ -13,40 +13,49 @@ const comparisonRows = [
       'Native Loki datasource on the client side, Loki-VL-proxy in the middle, VictoriaLogs in the backend.',
   },
   {
-    area: 'Compatibility layer',
-    loki: 'Mostly implicit because backend and API are the same product family.',
+    area: 'Indexing and search model',
+    loki:
+      'Loki docs: labels index the stream, while the content of each log line is not indexed.',
     victorialogs:
-      'Explicit read-side compatibility layer that translates, shapes, and observes the Loki-facing path.',
+      'VictoriaLogs docs: all log fields are indexed and full-text search runs across all fields; the proxy preserves Loki read workflows on top.',
   },
   {
-    area: 'Field semantics',
+    area: 'High-cardinality posture',
+    loki:
+      'Loki docs: labels should stay low-cardinality and high cardinality reduces performance and cost-effectiveness.',
+    victorialogs:
+      'VictoriaLogs docs: high-cardinality values such as `trace_id`, `user_id`, and `ip` work fine as fields as long as they are not promoted to stream fields.',
+  },
+  {
+    area: 'Deployment and control surface',
+    loki:
+      'Loki can run single-binary, but the scalable architecture is explicitly multi-component and query-frontend based.',
+    victorialogs:
+      'VictoriaLogs docs position the backend as a single zero-config executable; the proxy adds one small observable compatibility layer in front.',
+  },
+  {
+    area: 'Field semantics at the Grafana edge',
     loki: 'Loki-native labels and field expectations.',
     victorialogs:
       'Configurable label and metadata translation so dotted OTel fields can coexist with Loki-safe label surfaces.',
   },
   {
-    area: 'Operational visibility',
-    loki: 'Observe the backend directly.',
-    victorialogs:
-      'Observe both the proxy and the backend, with per-route latency, errors, and cache behavior split out.',
-  },
-  {
     area: 'Caching levers on the read path',
-    loki: 'Backend-specific cache model and operational knobs.',
+    loki: 'Backend-specific cache model and operational knobs inside Loki itself.',
     victorialogs:
       'Tier0 response cache plus L1/L2/L3 cache reuse, long-range query window cache, and optional peer fleet reuse.',
-  },
-  {
-    area: 'Migration control',
-    loki: 'No translation layer to tune.',
-    victorialogs:
-      'Progressive rollout is possible because Grafana can be cut over through a controlled proxy layer first.',
   },
   {
     area: 'Patterns and Drilldown compatibility',
     loki: 'Native Loki or Grafana app behavior.',
     victorialogs:
       'Handled as explicit contracts and compatibility tracks, including the Loki-compatible patterns endpoint.',
+  },
+  {
+    area: 'Migration control',
+    loki: 'No translation layer to tune or phase in.',
+    victorialogs:
+      'Progressive rollout is possible because Grafana can be cut over through a controlled proxy layer first.',
   },
   {
     area: 'Proxy-only latency visibility',
@@ -157,21 +166,21 @@ export default function LokiVsVictoriaLogsGrafanaQueryWorkflows(): ReactNode {
       <section className={styles.section}>
         <div className={styles.columns}>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>What published project data actually shows</h2>
+            <h2 className={styles.cardTitle}>What the official docs actually say</h2>
             <ul className={styles.list}>
-              <li>`query_range` warm hits at `0.64-0.67 us` versus `4.58 ms` cold delayed-path requests.</li>
-              <li>`detected_field_values` warm hits at `0.71 us` versus `2.76 ms` without Tier0.</li>
-              <li>Peer-cache warm shadow-copy hits at `52 ns` after the first owner fetch.</li>
-              <li>Long-range prefiltering cut backend query calls by about `81.6%` in the published benchmark.</li>
+              <li>Loki docs: the content of each log line is not indexed, only labels index streams.</li>
+              <li>Loki docs: high-cardinality labels reduce performance and cost-effectiveness.</li>
+              <li>VictoriaLogs docs: all fields are indexed, full-text search runs across all fields, and high-cardinality values work as ordinary fields.</li>
+              <li>VictoriaLogs docs: the backend is a single zero-config executable and publishes up to `30x` less RAM and up to `15x` less disk than Loki or Elasticsearch.</li>
             </ul>
           </div>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>What this page is not claiming</h2>
+            <h2 className={styles.cardTitle}>What published measurements actually show</h2>
             <ul className={styles.list}>
-              <li>This is not a blanket total-cost comparison of every Loki deployment against every VictoriaLogs deployment.</li>
-              <li>This is not an ingest benchmark.</li>
-              <li>This is a read-path and Grafana-workflow comparison grounded in the project docs and published benchmarks.</li>
-              <li>The right conclusion depends on how much repeated read work and migration control matter in your environment.</li>
+              <li>TrueFoundry reported `≈40%` less storage and materially lower CPU and RAM than Loki on its `500 GB / 7 day` test.</li>
+              <li>Project benchmarks show `query_range` warm hits at `0.64-0.67 us` versus `4.58 ms` cold delayed-path requests.</li>
+              <li>Project benchmarks show peer-cache warm shadow-copy hits at `52 ns` after the first owner fetch.</li>
+              <li>Project benchmarks show long-range prefiltering cut backend query calls by about `81.6%` on the published benchmark shape.</li>
             </ul>
           </div>
         </div>
@@ -206,6 +215,7 @@ export default function LokiVsVictoriaLogsGrafanaQueryWorkflows(): ReactNode {
             Follow-up docs
           </Heading>
           <div className={styles.inlineLinks}>
+            <Link to="/victorialogs-vs-loki-cost-and-performance/">Cost and performance comparison</Link>
             <Link to="/cache-tiers-and-fleet-cache-for-victorialogs/">Cache and cost-control guide</Link>
             <Link to="/monitor-loki-vl-proxy/">Monitoring guide</Link>
             <Link to="/docs/compatibility-matrix/">Compatibility Matrix</Link>

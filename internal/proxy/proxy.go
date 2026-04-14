@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -32,6 +33,7 @@ import (
 	mw "github.com/ReliablyObserve/Loki-VL-proxy/internal/middleware"
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/translator"
 	"github.com/gorilla/websocket"
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
@@ -248,15 +250,16 @@ type Config struct {
 	AllowGlobalTenant bool
 
 	// Grafana datasource compatibility
-	MaxLines         int               // default max lines per query (0=1000)
-	ForwardHeaders   []string          // HTTP headers to forward from client to VL backend
-	ForwardCookies   []string          // Cookie names to forward from client to VL backend
-	BackendHeaders   map[string]string // static headers to add to all VL requests
-	BackendBasicAuth string            // "user:password" for VL backend basic auth
-	BackendTimeout   time.Duration     // bounded timeout for non-streaming backend requests
-	BackendTLSSkip   bool              // skip TLS verification for VL backend
-	DerivedFields    []DerivedField    // derived fields for trace/link extraction
-	StreamResponse   bool              // stream responses via chunked transfer (default: false)
+	MaxLines           int               // default max lines per query (0=1000)
+	ForwardHeaders     []string          // HTTP headers to forward from client to VL backend
+	ForwardCookies     []string          // Cookie names to forward from client to VL backend
+	BackendHeaders     map[string]string // static headers to add to all VL requests
+	BackendBasicAuth   string            // "user:password" for VL backend basic auth
+	BackendCompression string            // upstream HTTP compression preference: auto, gzip, zstd, none
+	BackendTimeout     time.Duration     // bounded timeout for non-streaming backend requests
+	BackendTLSSkip     bool              // skip TLS verification for VL backend
+	DerivedFields      []DerivedField    // derived fields for trace/link extraction
+	StreamResponse     bool              // stream responses via chunked transfer (default: false)
 	// EmitStructuredMetadata enables Loki 3-tuple stream values [ts, line, metadata].
 	// Disabled by default for conservative datasource compatibility.
 	EmitStructuredMetadata bool
@@ -431,6 +434,7 @@ type Proxy struct {
 	forwardHeaders                        []string          // headers to copy from client request to VL
 	forwardCookies                        map[string]bool   // cookie names to copy from client request to VL
 	backendHeaders                        map[string]string // static headers on all VL requests
+	backendCompression                    string
 	derivedFields                         []DerivedField
 	streamResponse                        bool
 	emitStructuredMetadata                bool
@@ -904,6 +908,7 @@ func New(cfg Config) (*Proxy, error) {
 		forwardHeaders:                        cfg.ForwardHeaders,
 		forwardCookies:                        forwardCookies,
 		backendHeaders:                        backendHeaders,
+		backendCompression:                    normalizeBackendCompression(cfg.BackendCompression),
 		derivedFields:                         cfg.DerivedFields,
 		streamResponse:                        cfg.StreamResponse,
 		emitStructuredMetadata:                cfg.EmitStructuredMetadata,
@@ -5549,6 +5554,10 @@ func (p *Proxy) openNativeTailStream(parent context.Context, logsqlQuery string)
 	if err != nil {
 		return nil, false, err.Error()
 	}
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		_ = resp.Body.Close()
+		return nil, false, fmt.Sprintf("backend tail decode error: %v", err)
+	}
 	if resp.StatusCode == http.StatusOK {
 		return resp, true, ""
 	}
@@ -5895,6 +5904,12 @@ func (p *Proxy) alertingBackendGetWithParams(r *http.Request, backend *url.URL, 
 		p.recordUpstreamObservation(r.Context(), "loki", http.MethodGet, path, u.Hostname(), serverPort, mappedStatus, duration, err)
 		return nil, err
 	}
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		_ = resp.Body.Close()
+		recordUpstreamCall(r.Context(), http.StatusBadGateway, duration, true)
+		p.recordUpstreamObservation(r.Context(), "loki", http.MethodGet, path, u.Hostname(), serverPort, http.StatusBadGateway, duration, err)
+		return nil, fmt.Errorf("decode backend response: %w", err)
+	}
 	recordUpstreamCall(r.Context(), resp.StatusCode, duration, false)
 	p.recordUpstreamObservation(r.Context(), "loki", http.MethodGet, path, u.Hostname(), serverPort, resp.StatusCode, duration, nil)
 	return resp, nil
@@ -6175,6 +6190,12 @@ func (p *Proxy) vlGet(ctx context.Context, path string, params url.Values) (*htt
 		}
 		return nil, err
 	}
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		_ = resp.Body.Close()
+		recordUpstreamCall(ctx, http.StatusBadGateway, duration, true)
+		p.recordUpstreamObservation(ctx, "vl", http.MethodGet, path, u.Hostname(), serverPort, http.StatusBadGateway, duration, err)
+		return nil, fmt.Errorf("decode backend response: %w", err)
+	}
 	recordUpstreamCall(ctx, resp.StatusCode, duration, false)
 	p.recordUpstreamObservation(ctx, "vl", http.MethodGet, path, u.Hostname(), serverPort, resp.StatusCode, duration, nil)
 	// Any completed HTTP response proves backend reachability; keep breaker for transport failures only.
@@ -6210,6 +6231,12 @@ func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*ht
 			p.breaker.RecordFailure()
 		}
 		return nil, err
+	}
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		_ = resp.Body.Close()
+		recordUpstreamCall(ctx, http.StatusBadGateway, duration, true)
+		p.recordUpstreamObservation(ctx, "vl", http.MethodPost, path, u.Hostname(), serverPort, http.StatusBadGateway, duration, err)
+		return nil, fmt.Errorf("decode backend response: %w", err)
 	}
 	recordUpstreamCall(ctx, resp.StatusCode, duration, false)
 	p.recordUpstreamObservation(ctx, "vl", http.MethodPost, path, u.Hostname(), serverPort, resp.StatusCode, duration, nil)
@@ -8829,6 +8856,18 @@ func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 	for k, v := range p.backendHeaders {
 		vlReq.Header.Set(k, v)
 	}
+	if vlReq.Header.Get("Accept-Encoding") == "" {
+		switch p.backendCompression {
+		case "none":
+			vlReq.Header.Set("Accept-Encoding", "identity")
+		case "gzip":
+			vlReq.Header.Set("Accept-Encoding", "gzip")
+		case "zstd":
+			vlReq.Header.Set("Accept-Encoding", "zstd")
+		default:
+			vlReq.Header.Set("Accept-Encoding", "zstd, gzip")
+		}
+	}
 	if origReq, ok := vlReq.Context().Value(origRequestKey).(*http.Request); ok && origReq != nil {
 		clientID, clientSource := metrics.ResolveClientContext(origReq, p.metricsTrustProxyHeaders)
 		vlReq.Header.Set("X-Loki-VL-Client-ID", clientID)
@@ -8863,6 +8902,74 @@ func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 			}
 		}
 	}
+}
+
+func normalizeBackendCompression(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return "auto"
+	case "none", "gzip", "zstd":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "auto"
+	}
+}
+
+func decodeCompressedHTTPResponse(resp *http.Response) error {
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return err
+		}
+		resp.Body = &readCloserChain{Reader: zr, closers: []io.Closer{zr, resp.Body}}
+	case "zstd":
+		zr, err := zstd.NewReader(resp.Body)
+		if err != nil {
+			return err
+		}
+		resp.Body = &readCloserChain{
+			Reader: zr,
+			closers: []io.Closer{
+				closerFunc(func() error {
+					zr.Close()
+					return nil
+				}),
+				resp.Body,
+			},
+		}
+	default:
+		return nil
+	}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Uncompressed = true
+	return nil
+}
+
+type readCloserChain struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (r *readCloserChain) Close() error {
+	var firstErr error
+	for _, closer := range r.closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error {
+	return f()
 }
 
 // statusCapture wraps ResponseWriter to capture the status code and bytes written.

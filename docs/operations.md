@@ -12,6 +12,12 @@
 
 The proxy is stateless (except optional disk cache). Scale horizontally without coordination.
 
+Current implementation note:
+
+- per-client rate limiting, global concurrent-query protection, and the backend circuit breaker are built in with fixed defaults today
+- the current CLI does not expose direct tuning flags for those controls
+- use Grafana refresh policy, ingress shaping, HPA, and cache tuning as the primary operator levers
+
 ### Helm Deployment
 
 ```bash
@@ -184,26 +190,20 @@ Default TTLs are conservative. Adjust for your query patterns:
 
 The proxy uses singleflight to coalesce identical concurrent queries. N identical requests → 1 backend request.
 
-### Rate Limiting
+### Built-In Traffic Guards
 
-Default: 50 req/s per client IP, burst 100. Adjust:
+The current code uses these built-in defaults:
 
-```yaml
-# In Helm values
-extraArgs:
-  rate-per-second: "100"
-  rate-burst: "200"
-```
+- per-client rate limit: `50 req/s`
+- per-client burst: `100`
+- global concurrent backend queries: `100`
+- circuit breaker: open after `5` failures, remain open for `10s`
 
-### Circuit Breaker
+These values are not exposed as CLI or Helm flags today. If they are too strict or too loose for your workload, mitigate at the surrounding layers:
 
-Opens after 5 consecutive backend failures, stays open for 10 seconds:
-
-```yaml
-extraArgs:
-  cb-fail-threshold: "10"     # more tolerant
-  cb-open-duration: "30s"     # longer backoff
-```
+- reduce Grafana auto-refresh and retry pressure
+- add ingress or service-mesh shaping in front of the proxy
+- scale out replicas and raise cache effectiveness before pushing more uncached load through the same pods
 
 ---
 
@@ -257,6 +257,8 @@ For exact proxy-only overhead on translated paths, use structured request logs w
 4. Verify label-style matches your VL ingestion format
 5. Check `/loki/api/v1/labels` for available labels
 
+If `/ready` stays non-`ok` immediately after a restart, also check whether patterns or indexed label-values startup warm is configured. Those persistence restores can intentionally hold readiness at `503` until warm-up completes.
+
 ### Label Names Don't Match
 
 | Symptom | Cause | Fix |
@@ -274,10 +276,10 @@ For exact proxy-only overhead on translated paths, use structured request logs w
 
 ### High Latency
 
-- Enable `-response-gzip` (default: on)
+- Prefer `-response-compression=auto` for client-facing responses (`zstd`, then `gzip`, then identity)
 - Increase cache TTLs
 - Check VL backend latency via metrics
-- Enable singleflight (on by default) to coalesce identical queries
+- Rely on built-in singleflight coalescing for identical concurrent reads
 
 ### Circuit Breaker Tripping
 

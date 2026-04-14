@@ -12,9 +12,9 @@ go test ./internal/proxy -run '^TestTupleContract_' -count=1
 # With race detector
 go test -race ./...
 
-# E2E compatibility tests (requires docker-compose)
+# E2E compatibility tests (requires Docker Compose)
 cd test/e2e-compat
-docker-compose up -d --build
+docker compose up -d --build
 ../../scripts/ci/wait_e2e_stack.sh 180
 go test -v -tags=e2e -timeout=180s ./test/e2e-compat/
 
