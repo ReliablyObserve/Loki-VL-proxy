@@ -93,34 +93,37 @@ function uniqueQueries(queries: string[]) {
   return result;
 }
 
-async function seedPatternsStream(page: Page, uid: string) {
-  const nowNs = BigInt(Date.now()) * 1_000_000n;
-  const payload = {
-    streams: [
-      {
-        stream: {
-          app: "pattern-test",
-          service_name: "pattern-test",
-          level: "info",
-          cluster: "e2e",
-        },
-        values: [
-          [
-            (nowNs - 2_000_000_000n).toString(),
-            'time="2026-04-14T11:00:00Z" level=info msg="finished unary call with code OK" grpc.code=OK grpc.method=GetThing grpc.service=DemoService grpc.start_time="2026-04-14T11:00:00Z" grpc.time_ms=7 span.kind=server system=grpc',
-          ],
-          [
-            nowNs.toString(),
-            'time="2026-04-14T11:00:01Z" level=info msg="finished unary call with code OK" grpc.code=OK grpc.method=ListThings grpc.service=DemoService grpc.start_time="2026-04-14T11:00:01Z" grpc.time_ms=9 span.kind=server system=grpc',
-          ],
-        ],
-      },
-    ],
-  };
+async function seedPatternsStream(page: Page) {
+  const now = new Date();
+  const lines = [
+    JSON.stringify({
+      _time: new Date(now.getTime() - 2000).toISOString(),
+      _msg: 'time="2026-04-14T11:00:00Z" level=info msg="finished unary call with code OK" grpc.code=OK grpc.method=GetThing grpc.service=DemoService grpc.start_time="2026-04-14T11:00:00Z" grpc.time_ms=7 span.kind=server system=grpc',
+      app: "pattern-test",
+      service_name: "pattern-test",
+      level: "info",
+      cluster: "e2e",
+    }),
+    JSON.stringify({
+      _time: now.toISOString(),
+      _msg: 'time="2026-04-14T11:00:01Z" level=info msg="finished unary call with code OK" grpc.code=OK grpc.method=ListThings grpc.service=DemoService grpc.start_time="2026-04-14T11:00:01Z" grpc.time_ms=9 span.kind=server system=grpc',
+      app: "pattern-test",
+      service_name: "pattern-test",
+      level: "info",
+      cluster: "e2e",
+    }),
+  ].join("\n");
 
-  await page.request.post(`/api/datasources/proxy/uid/${uid}/loki/api/v1/push`, {
-    data: payload,
-  });
+  // e2e-ui shards don't run ingest tests, so seed VictoriaLogs directly.
+  await page.request.post(
+    "http://127.0.0.1:9428/insert/jsonline?_stream_fields=app,service_name,level,cluster",
+    {
+      data: lines,
+      headers: {
+        "Content-Type": "application/stream+json",
+      },
+    }
+  );
 }
 
 async function discoverLabelValueQueries(
@@ -174,7 +177,7 @@ async function waitForAutodetectedPatterns(
   let lastSeedPayload: unknown = null;
   let lastQuery = "";
   const { start, end } = nsRangeLastDay();
-  await seedPatternsStream(page, uid);
+  await seedPatternsStream(page);
   const discoveredQueries = await discoverLabelValueQueries(page, uid, start, end);
   const fallbackQueries = uniqueQueries([
     '{app="pattern-test"}',
