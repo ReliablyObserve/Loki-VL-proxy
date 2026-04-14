@@ -37,6 +37,8 @@ Related docs: [Architecture](docs/architecture.md), [Compatibility Matrix](docs/
 - Strict tuple contracts: default 2-tuple, explicit 3-tuple only via `categorize-labels`.
 - Grafana Logs Drilldown patterns support through `/loki/api/v1/patterns`, with explicit `-patterns-enabled` control when deployments need it disabled.
 - Loki-compatible patterns endpoint with optional restart-safe persistence.
+- Automatic pattern autodetection from successful `query`/`query_range` responses (`-patterns-autodetect-from-queries`) to keep Drilldown patterns warm behind the scenes.
+- Custom pattern overlays via runtime flags or Helm ConfigMap/file wiring (`-patterns-custom`, `-patterns-custom-file`, `patternsCustom.*`).
 - Multi-tenant read fanout with tenant isolation guardrails.
 - Rules and alerts read compatibility from `vmalert`.
 
@@ -225,6 +227,16 @@ helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-v
   --set extraArgs.label-values-indexed-cache=true \
   --set extraArgs.label-values-hot-limit=200 \
   --set extraArgs.label-values-index-max-entries=200000
+```
+
+For static custom Drilldown patterns (always prepended), configure inline values or a file-backed ConfigMap:
+
+```bash
+helm upgrade --install loki-vl-proxy oci://ghcr.io/reliablyobserve/charts/loki-vl-proxy \
+  --version <release> \
+  --set extraArgs.backend=http://victorialogs:9428 \
+  --set-json 'patternsCustom.inline=["time=\"<_>\" level=info msg=\"finished unary call\"","grpc.code=<_> grpc.method=<_>"]' \
+  --set patternsCustom.file.enabled=true
 ```
 
 For deployment recipes (StatefulSet + persistence, peer-cache fleet setup, OTLP push wiring) and image source selection (GHCR vs Docker Hub vs custom registry), see:
