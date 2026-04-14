@@ -773,7 +773,7 @@ func TestContract_Patterns_PrefersQueryRangeForSelectedRange(t *testing.T) {
 }
 
 func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
-	var receivedStart, receivedEnd string
+	var receivedStart, receivedEnd, receivedStep string
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/select/logsql/query_range" {
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
@@ -783,6 +783,7 @@ func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
 		}
 		receivedStart = r.FormValue("start")
 		receivedEnd = r.FormValue("end")
+		receivedStep = r.FormValue("step")
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}` + "\n"))
 	}))
@@ -802,6 +803,9 @@ func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
 	}
 	if receivedStart != "1712311200" || receivedEnd != "1712311800" {
 		t.Fatalf("expected from/to to be forwarded as start/end, got start=%q end=%q", receivedStart, receivedEnd)
+	}
+	if receivedStep != "1m" {
+		t.Fatalf("expected step to be forwarded to query_range, got %q", receivedStep)
 	}
 }
 
@@ -834,6 +838,38 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 	}
 	if receivedLimit != "50000" {
 		t.Fatalf("expected adaptive source limit capped at 50000 for long range, got %q", receivedLimit)
+	}
+}
+
+func TestContract_Patterns_DerivesStepWhenMissing(t *testing.T) {
+	var receivedStep string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/query_range" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		receivedStep = r.FormValue("step")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}` + "\n"))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		"GET",
+		"/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=1712311200&end=1712916000",
+		nil,
+	)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.TrimSpace(receivedStep) == "" {
+		t.Fatalf("expected derived step to be forwarded when request step is missing")
 	}
 }
 
