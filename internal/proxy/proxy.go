@@ -4965,15 +4965,27 @@ func fillPatternSamplesAcrossRequestedRange(entries []patternResultEntry, startP
 	if stepSeconds <= 0 {
 		return entries
 	}
-	startBucket := (startUnix / stepSeconds) * stepSeconds
-	endBucket := (endUnix / stepSeconds) * stepSeconds
+	effectiveStepSeconds := stepSeconds
+	startBucket := (startUnix / effectiveStepSeconds) * effectiveStepSeconds
+	endBucket := (endUnix / effectiveStepSeconds) * effectiveStepSeconds
 	if endBucket < startBucket {
 		return entries
 	}
 	const maxPatternRangePoints = 11000
-	points := int(((endBucket - startBucket) / stepSeconds) + 1)
-	if points <= 0 || points > maxPatternRangePoints {
+	points := int(((endBucket - startBucket) / effectiveStepSeconds) + 1)
+	if points <= 0 {
 		return entries
+	}
+	// For very long ranges with tiny steps (for example 1s over days), adaptively
+	// coarsen bucket resolution instead of returning sparse short-tail samples.
+	for points > maxPatternRangePoints {
+		effectiveStepSeconds *= 2
+		startBucket = (startUnix / effectiveStepSeconds) * effectiveStepSeconds
+		endBucket = (endUnix / effectiveStepSeconds) * effectiveStepSeconds
+		if endBucket < startBucket {
+			return entries
+		}
+		points = int(((endBucket - startBucket) / effectiveStepSeconds) + 1)
 	}
 	for i := range entries {
 		sampleMap := make(map[int64]int, len(entries[i].Samples))
@@ -4986,10 +4998,11 @@ func fillPatternSamplesAcrossRequestedRange(entries []patternResultEntry, startP
 			if !okTS || !okCount {
 				continue
 			}
+			ts = (ts / effectiveStepSeconds) * effectiveStepSeconds
 			sampleMap[ts] += count
 		}
 		filled := make([][]interface{}, 0, points)
-		for ts := startBucket; ts <= endBucket; ts += stepSeconds {
+		for ts := startBucket; ts <= endBucket; ts += effectiveStepSeconds {
 			filled = append(filled, []interface{}{ts, sampleMap[ts]})
 		}
 		entries[i].Samples = filled

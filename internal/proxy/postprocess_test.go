@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecolorizeStreams(t *testing.T) {
@@ -428,6 +429,26 @@ func TestParsePatternUnixSeconds(t *testing.T) {
 				t.Fatalf("expected %d, got %d", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestParsePatternUnixSeconds_RelativeNow(t *testing.T) {
+	now := time.Now().UTC()
+	gotNow, ok := parsePatternUnixSeconds("now")
+	if !ok {
+		t.Fatal("expected now to be parsed")
+	}
+	if delta := gotNow - now.Unix(); delta < -5 || delta > 5 {
+		t.Fatalf("expected now delta within +/-5s, got %d", delta)
+	}
+
+	gotPast, ok := parsePatternUnixSeconds("now-1h")
+	if !ok {
+		t.Fatal("expected now-1h to be parsed")
+	}
+	delta := gotNow - gotPast
+	if delta < 3595 || delta > 3605 {
+		t.Fatalf("expected now-1h delta close to 3600s, got %d", delta)
 	}
 }
 

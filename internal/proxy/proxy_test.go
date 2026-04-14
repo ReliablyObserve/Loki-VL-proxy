@@ -1097,6 +1097,70 @@ func TestContract_Patterns_FillsSamplesAcrossRequestedRange(t *testing.T) {
 	}
 }
 
+func TestContract_Patterns_FillsSamplesAcrossRelativeNowRange(t *testing.T) {
+	now := time.Now().UTC()
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = fmt.Fprintf(
+			w,
+			`{"_time":"%s","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}`+"\n",
+			now.Format(time.RFC3339Nano),
+		)
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		"GET",
+		"/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=now-24h&end=now&limit=1",
+		nil,
+	)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp patternsResponse
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected one pattern, got %v", resp.Data)
+	}
+	samples := resp.Data[0].Samples
+	if len(samples) < 100 {
+		t.Fatalf("expected long-range relative fill to produce >=100 buckets, got %d samples: %v", len(samples), samples)
+	}
+}
+
+func TestContract_Patterns_FillCoarsensHugePointRanges(t *testing.T) {
+	entries := []patternResultEntry{
+		{
+			Pattern: "GET <_> <_> <_>",
+			Samples: [][]interface{}{
+				{int64(172799), 3},
+				{int64(172800), 4},
+			},
+		},
+	}
+
+	filled := fillPatternSamplesAcrossRequestedRange(entries, "0", "172800", "1s")
+	if len(filled) != 1 {
+		t.Fatalf("expected one filled entry, got %d", len(filled))
+	}
+	if got := len(filled[0].Samples); got <= 100 || got > 11000 {
+		t.Fatalf("expected adaptive coarsening to keep buckets in 101..11000, got %d", got)
+	}
+	firstTS, okFirst := numberToInt64(filled[0].Samples[0][0])
+	lastTS, okLast := numberToInt64(filled[0].Samples[len(filled[0].Samples)-1][0])
+	if !okFirst || !okLast {
+		t.Fatalf("expected numeric filled timestamps, got first=%v last=%v", filled[0].Samples[0], filled[0].Samples[len(filled[0].Samples)-1])
+	}
+	if firstTS != 0 || lastTS != 172800 {
+		t.Fatalf("expected filled range to remain anchored to request boundaries, got %d..%d", firstTS, lastTS)
+	}
+}
+
 func TestContract_Patterns_CustomPatternsPrepended(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
