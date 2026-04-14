@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-04-14
+
 ### Bug Fixes
 
 - patterns: derive and forward a stable `step` for `/loki/api/v1/patterns` when clients omit it, preserving full selected time-range bucketization after Drilldown refresh
