@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - patterns: normalize relative-range (`now`/`now-*`) cache key boundaries for `/loki/api/v1/patterns` so Drilldown refresh requests consistently reuse the correct time-scoped cache entries
 - patterns: fill returned `samples` across the full requested range (`start..end` by `step`) with zero buckets for missing intervals, preventing short-tail-only pattern graphs after refresh
+- patterns: parse relative (`now`/`now-*`) boundaries in extraction/fill paths and adaptively coarsen overly dense bucket grids, so large-scope high-volume pattern charts render full selected ranges instead of collapsing to recent minutes
 
 ## [1.0.18] - 2026-04-14
 

@@ -297,20 +297,12 @@ func parsePatternUnixSeconds(raw interface{}) (int64, bool) {
 	if parsed, err := time.Parse(time.RFC3339, timeStr); err == nil {
 		return parsed.Unix(), true
 	}
-	value, err := strconv.ParseInt(timeStr, 10, 64)
-	if err != nil {
-		return 0, false
+	// Reuse Loki-compatible parser for numeric, RFC3339, and relative ("now-24h")
+	// boundaries so pattern sampling/filling stays stable with Drilldown ranges.
+	if ns, ok := parseLokiTimeToUnixNano(timeStr); ok {
+		return ns / int64(time.Second), true
 	}
-	switch l := len(timeStr); {
-	case l >= 19:
-		return value / 1_000_000_000, true
-	case l >= 16:
-		return value / 1_000_000, true
-	case l >= 13:
-		return value / 1_000, true
-	default:
-		return value, true
-	}
+	return 0, false
 }
 
 func patternMessageFromEntry(entry map[string]interface{}) (string, bool) {
