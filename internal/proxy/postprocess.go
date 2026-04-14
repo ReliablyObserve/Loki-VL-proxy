@@ -667,22 +667,6 @@ func cloneInts(src []int) []int {
 	return out
 }
 
-type patternBucketHeap []*patternBucket
-
-func (h patternBucketHeap) Len() int           { return len(h) }
-func (h patternBucketHeap) Less(i, j int) bool { return h[i].total < h[j].total }
-func (h patternBucketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *patternBucketHeap) Push(x interface{}) {
-	*h = append(*h, x.(*patternBucket))
-}
-func (h *patternBucketHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
-}
-
 // tokenizeToPattern converts a log line into a pattern by replacing variable parts with <_>.
 // This is a simplified version of the drain log pattern mining algorithm.
 func tokenizeToPattern(line string) string {
