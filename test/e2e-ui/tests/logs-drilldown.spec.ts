@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import {
   PROXY_DS,
   PROXY_MULTI_DS,
+  PROXY_PATTERNS_AUTODETECT_DS,
   installGrafanaGuards,
   openLogsDrilldown,
   resolveDatasourceUid,
@@ -192,6 +193,46 @@ test.describe("Grafana Logs Drilldown", () => {
     await waitForDrilldownDetails(page);
     await expectFilterApplied(page, "Filter by labels", "service_name", "api-gateway");
     await expect(page.getByText("No logs found")).toHaveCount(0);
+    await guards.assertClean();
+  });
+
+  test("patterns are visible in drilldown for autodetected datasource @drilldown-core", async ({
+    page,
+  }) => {
+    const guards = installGrafanaGuards(page);
+    const responses: Array<{ status: number; json: unknown }> = [];
+    page.on("response", async (response) => {
+      if (!response.url().includes("/resources/patterns")) {
+        return;
+      }
+      let json: unknown = null;
+      try {
+        json = await response.json();
+      } catch {
+        json = null;
+      }
+      responses.push({ status: response.status(), json });
+    });
+
+    await openServiceDrilldown(page, PROXY_PATTERNS_AUTODETECT_DS, "pattern-test", "logs");
+
+    const patternsTab = page.getByRole("tab", { name: /^Patterns/i }).first();
+    if (await patternsTab.isVisible({ timeout: 5_000 }).catch(() => false)) {
+      await patternsTab.click();
+    }
+
+    await expect
+      .poll(() => {
+        const good = responses.find(
+          (resp) =>
+            resp.status === 200 &&
+            Array.isArray((resp.json as { data?: unknown[] } | null)?.data) &&
+            ((resp.json as { data?: unknown[] }).data?.length ?? 0) > 0
+        );
+        return Boolean(good);
+      }, { timeout: 30_000 })
+      .toBe(true);
+
     await guards.assertClean();
   });
 });

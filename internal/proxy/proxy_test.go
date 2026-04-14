@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -898,7 +899,7 @@ func TestContract_RefreshVolumeRangeCacheAsync_PopulatesCache(t *testing.T) {
 	}
 }
 
-func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
+func TestContract_DrilldownLimits_DefaultPatternFlagsAdvertised(t *testing.T) {
 	p := newTestProxy(t, "http://unused")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
@@ -909,15 +910,52 @@ func TestContract_DrilldownLimits_PatternsEnabledAdvertised(t *testing.T) {
 	}
 	var resp map[string]interface{}
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if resp["pattern_ingester_enabled"] != false {
+		t.Fatalf("expected pattern_ingester_enabled=false by default, got %v", resp["pattern_ingester_enabled"])
+	}
+	limits, ok := resp["limits"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected limits object, got %T", resp["limits"])
+	}
+	if limits["pattern_persistence_enabled"] != false {
+		t.Fatalf("expected limits.pattern_persistence_enabled=false by default, got %v", limits["pattern_persistence_enabled"])
+	}
+}
+
+func TestContract_DrilldownLimits_PatternFlagsReflectRuntime(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vlBackend.Close()
+
+	persistPath := filepath.Join(t.TempDir(), "patterns.snapshot.json")
+	p, err := New(Config{
+		BackendURL:                    vlBackend.URL,
+		PatternsAutodetectFromQueries: true,
+		PatternsPersistPath:           persistPath,
+	})
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/drilldown-limits", nil)
+	p.handleDrilldownLimits(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from drilldown-limits, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
 	if resp["pattern_ingester_enabled"] != true {
-		t.Fatalf("expected pattern_ingester_enabled=true, got %v", resp["pattern_ingester_enabled"])
+		t.Fatalf("expected pattern_ingester_enabled=true when autodetect is enabled, got %v", resp["pattern_ingester_enabled"])
 	}
 	limits, ok := resp["limits"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected limits object, got %T", resp["limits"])
 	}
 	if limits["pattern_persistence_enabled"] != true {
-		t.Fatalf("expected limits.pattern_persistence_enabled=true, got %v", limits["pattern_persistence_enabled"])
+		t.Fatalf("expected limits.pattern_persistence_enabled=true when persistence path configured, got %v", limits["pattern_persistence_enabled"])
 	}
 }
 

@@ -4482,6 +4482,8 @@ func (p *Proxy) handleFormatQuery(w http.ResponseWriter, r *http.Request) {
 // handleDrilldownLimits returns Grafana Logs Drilldown limits metadata.
 // Grafana uses this as a lightweight capability/bootstrap probe.
 func (p *Proxy) handleDrilldownLimits(w http.ResponseWriter, r *http.Request) {
+	patternPersistenceEnabled := p.patternsEnabled && strings.TrimSpace(p.patternsPersistPath) != ""
+	patternIngesterEnabled := p.patternsEnabled && p.patternsAutodetectFromQueries
 	p.writeJSON(w, map[string]interface{}{
 		"limits": map[string]interface{}{
 			"discover_log_levels":         true,
@@ -4505,13 +4507,13 @@ func (p *Proxy) handleDrilldownLimits(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			},
-			"pattern_persistence_enabled": p.patternsEnabled,
+			"pattern_persistence_enabled": patternPersistenceEnabled,
 			"query_timeout":               "1m",
 			"retention_period":            "0s",
 			"volume_enabled":              true,
 			"volume_max_series":           1000,
 		},
-		"pattern_ingester_enabled": p.patternsEnabled,
+		"pattern_ingester_enabled": patternIngesterEnabled,
 		"version":                  "unknown",
 		"maxDetectedFields":        1000,
 		"maxDetectedValues":        1000,

@@ -140,6 +140,7 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 	start := now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	end := now.Format(time.RFC3339Nano)
 	dsUID := grafanaDatasourceUID(t, "Loki (via VL proxy)")
+	autodetectUID := grafanaDatasourceUID(t, "Loki (via VL proxy patterns autodetect)")
 	multiUID := grafanaDatasourceUID(t, "Loki (via VL proxy multi-tenant)")
 
 	t.Run("service_buckets", func(t *testing.T) {
@@ -190,11 +191,44 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		if limits["discover_service_name"] == nil || limits["log_level_fields"] == nil {
 			t.Fatalf("expected Drilldown config arrays in drilldown-limits: %v", resp)
 		}
-		if _, ok := resp["pattern_ingester_enabled"]; !ok {
-			t.Fatalf("expected pattern_ingester_enabled in drilldown-limits: %v", resp)
+		patternIngesterEnabled, ok := resp["pattern_ingester_enabled"].(bool)
+		if !ok {
+			t.Fatalf("expected boolean pattern_ingester_enabled in drilldown-limits: %v", resp)
+		}
+		if patternIngesterEnabled {
+			t.Fatalf("expected pattern_ingester_enabled=false for default proxy datasource: %v", resp)
+		}
+		patternPersistenceEnabled, ok := limits["pattern_persistence_enabled"].(bool)
+		if !ok {
+			t.Fatalf("expected boolean limits.pattern_persistence_enabled in drilldown-limits: %v", resp)
+		}
+		if patternPersistenceEnabled {
+			t.Fatalf("expected limits.pattern_persistence_enabled=false for default proxy datasource: %v", resp)
 		}
 		if _, ok := resp["version"]; !ok {
 			t.Fatalf("expected version in drilldown-limits: %v", resp)
+		}
+	})
+
+	t.Run("drilldown_limits_pattern_flags_for_autodetect_datasource", func(t *testing.T) {
+		resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+autodetectUID+"/resources/drilldown-limits")
+		limits := extractMap(resp, "limits")
+		if limits == nil {
+			t.Fatalf("expected Loki-style limits object, got %v", resp)
+		}
+		patternIngesterEnabled, ok := resp["pattern_ingester_enabled"].(bool)
+		if !ok {
+			t.Fatalf("expected boolean pattern_ingester_enabled in drilldown-limits: %v", resp)
+		}
+		if !patternIngesterEnabled {
+			t.Fatalf("expected pattern_ingester_enabled=true for autodetect datasource: %v", resp)
+		}
+		patternPersistenceEnabled, ok := limits["pattern_persistence_enabled"].(bool)
+		if !ok {
+			t.Fatalf("expected boolean limits.pattern_persistence_enabled in drilldown-limits: %v", resp)
+		}
+		if !patternPersistenceEnabled {
+			t.Fatalf("expected limits.pattern_persistence_enabled=true for autodetect datasource: %v", resp)
 		}
 	})
 
@@ -599,6 +633,39 @@ func TestDrilldown_GrafanaResourceContracts(t *testing.T) {
 		}
 		if len(data) != 1 {
 			t.Fatalf("expected one limited pattern result, got %v", resp)
+		}
+	})
+
+	t.Run("patterns_resource_from_autodetection_after_query_range", func(t *testing.T) {
+		seedQuery := url.Values{}
+		seedQuery.Set("query", `{app="pattern-test"}`)
+		seedQuery.Set("start", start)
+		seedQuery.Set("end", end)
+		seedQuery.Set("limit", "200")
+		seedQuery.Set("direction", "backward")
+
+		seedResp := getJSON(t, grafanaURL+"/api/datasources/proxy/uid/"+autodetectUID+"/loki/api/v1/query_range?"+seedQuery.Encode())
+		if seedResp == nil || seedResp["status"] != "success" {
+			t.Fatalf("expected successful query_range seed on autodetect datasource, got %v", seedResp)
+		}
+
+		params := url.Values{}
+		params.Set("query", `{app="pattern-test"}`)
+		params.Set("start", start)
+		params.Set("end", end)
+		params.Set("step", "60s")
+
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			resp := getJSON(t, grafanaURL+"/api/datasources/uid/"+autodetectUID+"/resources/patterns?"+params.Encode())
+			data, ok := resp["data"].([]interface{})
+			if ok && len(data) > 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected non-empty autodetected patterns via Grafana resource, got %v", resp)
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 	})
 

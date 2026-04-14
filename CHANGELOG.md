@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- drilldown-limits: advertise `pattern_ingester_enabled` from actual query-autodetect runtime state and `limits.pattern_persistence_enabled` from configured persistence path, so Grafana capability probing reflects real proxy behavior
+
+### Tests
+
+- e2e compat: add Drilldown contract coverage for pattern flags and query-range-seeded autodetection through Grafana datasource resources
+- e2e compat: add dedicated autodetect proxy verification (`localhost:3110`) asserting `patterns_detected_total` increases after `query_range`
+- e2e UI: add Playwright Drilldown regression test proving `/resources/patterns` returns non-empty data for autodetect-enabled datasource
+
 ## [1.0.10] - 2026-04-14
 
 ### Documentation
