@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- ci: remove an unused Grafana surface helper that triggered lint failure.
+- tests: harden long-range patterns contract tests against race conditions under parallel window fanout (`-race`).
+
 ## [1.0.21] - 2026-04-14
 
 ### Bug Fixes

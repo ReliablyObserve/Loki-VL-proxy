@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -880,6 +881,7 @@ func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
 
 func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 	receivedLimits := make([]string, 0, 32)
+	var limitsMu sync.Mutex
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/select/logsql/query_range" {
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
@@ -887,7 +889,9 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form: %v", err)
 		}
+		limitsMu.Lock()
 		receivedLimits = append(receivedLimits, r.FormValue("limit"))
+		limitsMu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}` + "\n"))
 	}))
@@ -905,10 +909,13 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
 	}
-	if len(receivedLimits) < 2 {
-		t.Fatalf("expected windowed query_range fanout for long range, got %d backend calls", len(receivedLimits))
+	limitsMu.Lock()
+	limitsSnapshot := append([]string(nil), receivedLimits...)
+	limitsMu.Unlock()
+	if len(limitsSnapshot) < 2 {
+		t.Fatalf("expected windowed query_range fanout for long range, got %d backend calls", len(limitsSnapshot))
 	}
-	for i, limit := range receivedLimits {
+	for i, limit := range limitsSnapshot {
 		n, err := strconv.Atoi(limit)
 		if err != nil {
 			t.Fatalf("expected numeric per-window limit at call %d, got %q", i+1, limit)
@@ -921,6 +928,7 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 
 func TestContract_Patterns_DerivesStepWhenMissing(t *testing.T) {
 	var receivedStep string
+	var stepMu sync.Mutex
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/select/logsql/query_range" {
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
@@ -928,7 +936,11 @@ func TestContract_Patterns_DerivesStepWhenMissing(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form: %v", err)
 		}
-		receivedStep = r.FormValue("step")
+		stepMu.Lock()
+		if strings.TrimSpace(receivedStep) == "" {
+			receivedStep = r.FormValue("step")
+		}
+		stepMu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}` + "\n"))
 	}))
@@ -946,7 +958,10 @@ func TestContract_Patterns_DerivesStepWhenMissing(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
 	}
-	if strings.TrimSpace(receivedStep) == "" {
+	stepMu.Lock()
+	stepSnapshot := receivedStep
+	stepMu.Unlock()
+	if strings.TrimSpace(stepSnapshot) == "" {
 		t.Fatalf("expected derived step to be forwarded when request step is missing")
 	}
 }

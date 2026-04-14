@@ -9780,11 +9780,6 @@ func detectGrafanaClientProfile(r *http.Request, endpoint, route string) grafana
 	}
 }
 
-func detectGrafanaClientSurface(r *http.Request, endpoint, route string) (surface, sourceTag, version string) {
-	profile := detectGrafanaClientProfile(r, endpoint, route)
-	return profile.surface, profile.sourceTag, profile.version
-}
-
 func parseGrafanaSourceTag(values []string) string {
 	for _, raw := range values {
 		for _, part := range strings.Split(raw, ",") {
