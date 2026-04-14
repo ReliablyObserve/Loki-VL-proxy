@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -216,19 +217,79 @@ func TestPatternsAutodetectFromWindowEntries_PopulatesCacheAndSnapshot(t *testin
 	}
 }
 
+func TestPatternsAutodetectCacheKey_NormalizesTimeAndStepFormats(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	persistPath := filepath.Join(t.TempDir(), "patterns.snapshot.json")
+	p := newPatternPersistenceProxy(t, backend.URL, persistPath, true)
+	t.Cleanup(func() {
+		_ = p.Shutdown(context.Background())
+	})
+
+	query := `{app="web"} | json | filter source_message_bytes:=89`
+	startTime := time.Unix(1710000000, 0).UTC()
+	endTime := startTime.Add(5 * time.Minute)
+
+	numericKey := p.patternsAutodetectCacheKey(
+		"org-a",
+		query,
+		strconv.FormatInt(startTime.UnixNano(), 10),
+		strconv.FormatInt(endTime.UnixNano(), 10),
+		"60",
+	)
+	rfcKey := p.patternsAutodetectCacheKey(
+		"org-a",
+		query,
+		startTime.Format(time.RFC3339Nano),
+		endTime.Format(time.RFC3339Nano),
+		"1m",
+	)
+	if numericKey != rfcKey {
+		t.Fatalf("expected normalized pattern cache key parity, got numeric=%q rfc=%q", numericKey, rfcKey)
+	}
+}
+
+func TestPatternsRestoreFromDisk_EmptyFileIsNoop(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	persistPath := filepath.Join(t.TempDir(), "patterns.snapshot.json")
+	if err := os.WriteFile(persistPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write empty patterns snapshot: %v", err)
+	}
+
+	p := newPatternPersistenceProxy(t, backend.URL, persistPath, true)
+	t.Cleanup(func() {
+		_ = p.Shutdown(context.Background())
+	})
+
+	ok, restoredAt, err := p.restorePatternsFromDisk()
+	if err != nil {
+		t.Fatalf("restorePatternsFromDisk returned error for empty file: %v", err)
+	}
+	if ok || restoredAt != 0 {
+		t.Fatalf("expected empty snapshot restore noop, got ok=%v restoredAt=%d", ok, restoredAt)
+	}
+}
+
 func newPatternPersistenceProxy(t *testing.T, backendURL, persistPath string, autodetect bool) *Proxy {
 	t.Helper()
 	enabled := true
 	p, err := New(Config{
-		BackendURL:                   backendURL,
-		Cache:                        cache.New(60*time.Second, 1000),
-		LogLevel:                     "error",
-		PatternsEnabled:              &enabled,
+		BackendURL:                    backendURL,
+		Cache:                         cache.New(60*time.Second, 1000),
+		LogLevel:                      "error",
+		PatternsEnabled:               &enabled,
 		PatternsAutodetectFromQueries: autodetect,
-		PatternsPersistPath:          persistPath,
-		PatternsPersistInterval:      30 * time.Second,
-		PatternsStartupStale:         5 * time.Minute,
-		PatternsPeerWarmTimeout:      200 * time.Millisecond,
+		PatternsPersistPath:           persistPath,
+		PatternsPersistInterval:       30 * time.Second,
+		PatternsStartupStale:          5 * time.Minute,
+		PatternsPeerWarmTimeout:       200 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("failed to create pattern persistence proxy: %v", err)

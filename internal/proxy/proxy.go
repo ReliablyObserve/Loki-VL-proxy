@@ -2298,6 +2298,9 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 		}
 		return false, 0, fmt.Errorf("read patterns snapshot: %w", err)
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false, 0, nil
+	}
 
 	var snapshot patternsSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
@@ -4019,36 +4022,26 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	}
 	r = withOrgID(r)
 	orgID := r.Header.Get("X-Scope-OrgID")
-	cacheKey := "patterns:" + orgID + ":" + r.URL.RawQuery
+	query := patternScopeQuery(r.FormValue("query"))
+	startParam := r.FormValue("start")
+	endParam := r.FormValue("end")
+	stepParam := r.FormValue("step")
+	patternLimit := parsePatternLimit(r.FormValue("limit"))
+	cacheKey := p.patternsAutodetectCacheKey(orgID, query, startParam, endParam, stepParam)
+	if cacheKey == "" {
+		cacheKey = "patterns:" + orgID + ":" + r.URL.RawQuery
+	}
 	if cached, ok := p.cache.Get(cacheKey); ok {
+		body := limitPatternPayload(cached, patternLimit)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(cached)
+		_, _ = w.Write(body)
 		p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
 		p.metrics.RecordCacheHit()
 		return
 	}
 	p.metrics.RecordCacheMiss()
-	query := r.FormValue("query")
-	if strings.TrimSpace(query) == "" {
-		query = "*"
-	}
-	startParam := r.FormValue("start")
-	endParam := r.FormValue("end")
-	stepParam := r.FormValue("step")
-	patternLimit := parsePatternLimit(r.FormValue("limit"))
-	autodetectCacheKey := p.patternsAutodetectCacheKey(orgID, query, startParam, endParam, stepParam)
-	if autodetectCacheKey != "" && autodetectCacheKey != cacheKey {
-		if cached, ok := p.cache.Get(autodetectCacheKey); ok {
-			body := limitPatternPayload(cached, patternLimit)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-			p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
-			p.metrics.RecordCacheHit()
-			return
-		}
-	}
 
-	logsqlQuery, err := p.translateQuery(query)
+	logsqlQuery, err := p.translatePatternQuery(query)
 	if err != nil {
 		p.writeJSON(w, map[string]interface{}{
 			"status": "success",
@@ -4130,14 +4123,49 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	if len(patterns) > 0 {
 		p.cache.SetWithTTL(cacheKey, resultBody, patternsCacheRetention)
 		p.recordPatternSnapshotEntry(cacheKey, resultBody, time.Now().UTC())
-		if autodetectCacheKey != "" && autodetectCacheKey != cacheKey {
-			p.cache.SetWithTTL(autodetectCacheKey, resultBody, patternsCacheRetention)
-			p.recordPatternSnapshotEntry(autodetectCacheKey, resultBody, time.Now().UTC())
-		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(resultBody)
 	p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+}
+
+func patternScopeQuery(query string) string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return "*"
+	}
+	query = strings.TrimSpace(streamSelectorPrefix(query))
+	if query == "" {
+		return "*"
+	}
+	if query == "*" || strings.HasPrefix(query, "{") {
+		return query
+	}
+	// Drilldown can emit LogsQL-like top-level filters (`field:=value`) without
+	// braces. Keep those as-is and avoid wrapping into LogQL selector syntax.
+	if looksLikeLogsQLQuery(query) {
+		return query
+	}
+	return normalizeBareSelectorQuery(query)
+}
+
+func looksLikeLogsQLQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	return strings.Contains(query, ":=") ||
+		strings.Contains(query, ":~") ||
+		strings.Contains(query, ":>") ||
+		strings.Contains(query, ":<")
+}
+
+func (p *Proxy) translatePatternQuery(query string) (string, error) {
+	scoped := patternScopeQuery(query)
+	if scoped == "*" {
+		return scoped, nil
+	}
+	if looksLikeLogsQLQuery(scoped) {
+		return scoped, nil
+	}
+	return p.translateQuery(scoped)
 }
 
 func parsePatternLimit(raw string) int {
@@ -4173,21 +4201,37 @@ func limitPatternPayload(payload []byte, limit int) []byte {
 }
 
 func (p *Proxy) patternsAutodetectCacheKey(orgID, query, start, end, step string) string {
+	query = patternScopeQuery(query)
 	if strings.TrimSpace(query) == "" {
 		return ""
 	}
 	params := url.Values{}
 	params.Set("query", strings.TrimSpace(query))
 	if trimmed := strings.TrimSpace(start); trimmed != "" {
-		params.Set("start", trimmed)
+		params.Set("start", formatVLTimestamp(trimmed))
 	}
 	if trimmed := strings.TrimSpace(end); trimmed != "" {
-		params.Set("end", trimmed)
+		params.Set("end", formatVLTimestamp(trimmed))
 	}
 	if trimmed := strings.TrimSpace(step); trimmed != "" {
-		params.Set("step", trimmed)
+		params.Set("step", normalizePatternCacheStep(trimmed))
 	}
 	return "patterns:" + orgID + ":" + params.Encode()
+}
+
+func normalizePatternCacheStep(step string) string {
+	step = strings.TrimSpace(formatVLStep(step))
+	if step == "" {
+		return ""
+	}
+	dur, err := time.ParseDuration(step)
+	if err != nil || dur <= 0 {
+		return step
+	}
+	if dur%time.Second == 0 {
+		return strconv.FormatInt(int64(dur/time.Second), 10) + "s"
+	}
+	return dur.String()
 }
 
 func (p *Proxy) maybeAutodetectPatternsFromNDJSON(orgID, query, start, end, step string, body []byte) {
