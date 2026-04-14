@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -810,7 +811,7 @@ func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
 }
 
 func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
-	var receivedLimit string
+	receivedLimits := make([]string, 0, 32)
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/select/logsql/query_range" {
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
@@ -818,7 +819,7 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form: %v", err)
 		}
-		receivedLimit = r.FormValue("limit")
+		receivedLimits = append(receivedLimits, r.FormValue("limit"))
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","level":"info"}` + "\n"))
 	}))
@@ -836,8 +837,20 @@ func TestContract_Patterns_AdaptiveSourceLimitForLongRanges(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
 	}
-	if receivedLimit != "50000" {
-		t.Fatalf("expected adaptive source limit capped at 50000 for long range, got %q", receivedLimit)
+	if len(receivedLimits) < 2 {
+		t.Fatalf("expected windowed query_range fanout for long range, got %d backend calls", len(receivedLimits))
+	}
+	if receivedLimits[0] != "50000" {
+		t.Fatalf("expected initial adaptive source limit capped at 50000 for long range, got %q", receivedLimits[0])
+	}
+	for i, limit := range receivedLimits[1:] {
+		n, err := strconv.Atoi(limit)
+		if err != nil {
+			t.Fatalf("expected numeric per-window limit at call %d, got %q", i+2, limit)
+		}
+		if n <= 0 || n > 10000 {
+			t.Fatalf("expected per-window limit in range 1..10000 at call %d, got %d", i+2, n)
+		}
 	}
 }
 
@@ -870,6 +883,61 @@ func TestContract_Patterns_DerivesStepWhenMissing(t *testing.T) {
 	}
 	if strings.TrimSpace(receivedStep) == "" {
 		t.Fatalf("expected derived step to be forwarded when request step is missing")
+	}
+}
+
+func TestContract_Patterns_WindowedSamplingCoversWholeRange(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/query_range" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		startRaw := strings.TrimSpace(r.FormValue("start"))
+		startVal, err := strconv.ParseInt(startRaw, 10, 64)
+		if err != nil {
+			t.Fatalf("expected numeric start timestamp, got %q: %v", startRaw, err)
+		}
+		startSec := startVal
+		if len(startRaw) > 10 {
+			startSec = startVal / int64(time.Second)
+		}
+		ts := time.Unix(startSec, 0).UTC().Format(time.RFC3339)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"_time":"%s","_msg":"finished_unary_call code=OK method=Fetch","level":"info"}`+"\n", ts)))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		"GET",
+		"/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=1712311200&end=1712484000&step=60s&line_limit=20",
+		nil,
+	)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp patternsResponse
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if len(resp.Data) == 0 {
+		t.Fatalf("expected non-empty patterns response")
+	}
+	samples := resp.Data[0].Samples
+	if len(samples) < 2 {
+		t.Fatalf("expected windowed sampling to produce samples across range, got %v", samples)
+	}
+	firstTS, okFirst := numberToInt64(samples[0][0])
+	lastTS, okLast := numberToInt64(samples[len(samples)-1][0])
+	if !okFirst || !okLast {
+		t.Fatalf("expected numeric sample timestamps, got first=%v last=%v", samples[0], samples[len(samples)-1])
+	}
+	if firstTS >= lastTS {
+		t.Fatalf("expected increasing sample timestamps across range, got first=%d last=%d", firstTS, lastTS)
 	}
 }
 
