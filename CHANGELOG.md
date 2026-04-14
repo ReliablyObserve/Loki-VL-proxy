@@ -6,9 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-
-## [1.0.23] - 2026-04-15
-
 ### Bug Fixes
 
 - patterns: stabilize `/loki/api/v1/patterns` ordering under equal-count ties (sort by total, then level, then pattern) to prevent refresh-to-refresh pattern reshuffling on dense scopes.
@@ -17,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 
 - add regression coverage for dense window config fanout bounds, dense partial-window acceptance gating, and deterministic tie ordering in merged pattern results.
+
+## [1.0.23] - 2026-04-15
 
 ## [1.0.22] - 2026-04-14
 
