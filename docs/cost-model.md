@@ -133,6 +133,64 @@ loki_gb = victorialogs_gb / 0.63
 monthly_total = compute_monthly + storage_gb * 0.08
 ```
 
+## Observed VictoriaLogs Baseline
+
+The table below uses a real VictoriaLogs system snapshot instead of the generic
+`250 B` line-size assumption above:
+
+| Metric | Observed value |
+|---|---:|
+| Total log entries | `800 M` |
+| Ingested logs `24h` | `112 M` |
+| Ingested bytes `24h` | `310 GiB` |
+| Insert requests per second | `1.20 K` |
+| Read requests per second | `0` |
+| Compression ratio | `54.9` |
+| Disk space usage | `40.5 GiB` |
+| Available CPU | `43` |
+| Available memory | `43 GiB` |
+
+Derived observations:
+
+- retained window from `800 M / 112 M per day` is about `7.14 days`
+- average raw event size is about `2.9 KiB`
+- compressed data blocks per day are about `5.65 GiB` at the observed
+  `54.9x` ratio
+- projected `7d` compressed data blocks are about `39.5 GiB`, which lines up
+  closely with the observed `40.5 GiB` disk usage
+
+Important:
+
+- this is a **write-heavy** snapshot because read traffic is `0 rps`
+- `available CPU` and `available memory` are capacity figures, not proven
+  consumed usage, so they should **not** be turned into direct CPU or RAM
+  savings claims by themselves
+
+## Scaling The Observed Baseline To Loki Floors
+
+The table below keeps the real VictoriaLogs baseline for storage and retention,
+then maps scaled ingest to Loki's published throughput tiers. For the Loki
+storage column, it uses the same conservative cross-system assumption as the
+rest of this page: `VictoriaLogs retained bytes = 63% of Loki retained bytes`.
+
+| Scale | Raw ingest/day | VictoriaLogs retained `~7.1d` | Estimated Loki retained `~7.1d` | VictoriaLogs gp3 | Loki gp3 | Loki published tier | Loki compute floor |
+|---|---:|---:|---:|---:|---:|---|---:|
+| `1x` | `0.333 TB/day` | `40.5 GiB` | `64.3 GiB` | `$3.24` | `$5.14` | `<3 TB/day` | `$1,489.20 / month` |
+| `10x` | `3.33 TB/day` | `405 GiB` | `642.9 GiB` | `$32.40` | `$51.43` | `3-30 TB/day` | `$13,402.80 / month` |
+| `30x` | `9.99 TB/day` | `1,215 GiB` | `1,928.6 GiB` | `$97.20` | `$154.29` | `3-30 TB/day` | `$13,402.80 / month` |
+| `100x` | `33.29 TB/day` | `4,050 GiB` | `6,428.6 GiB` | `$324.00` | `$514.29` | `~30 TB/day` | `$38,222.80 / month` |
+
+What this real baseline says:
+
+- the observed VictoriaLogs storage footprint is extremely small for the raw
+  bytes ingested because the measured compression ratio is high
+- the storage delta versus Loki is real, but at larger scales the **published
+  Loki compute floor** dominates the monthly bill much more than gp3 storage
+  does
+- because the observed snapshot has `0` read requests per second, it is useful
+  for **storage and ingest-tier calibration**, but not for proving read-path
+  savings from the proxy cache stack
+
 ## Storage Model Output
 
 | Scenario | Raw 7d retained data | VictoriaLogs stored data | Loki stored data |

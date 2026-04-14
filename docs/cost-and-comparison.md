@@ -25,7 +25,7 @@ For the separate AWS-style cost worksheet and scenario model, see
 | Search-heavy broad scans | Broad searches can become stream selection plus line filtering because line content is not indexed. | VictoriaLogs publishes fast full-text search as a core capability. | The proxy can additionally suppress repeated scans with Tier0, L1/L2/L3, and long-range window cache. |
 | Compression and stored-byte shape | Loki docs say chunk blocks and structured metadata are stored compressed, but the retained footprint still includes label-driven index structures and chunk/object-store layout. | VictoriaLogs docs say logs usually compress by `10x` or more, and some deployments observe `50-60x` on the data-block compression ratio metric excluding `indexdb`. | The proxy adds compressed read-path hops under its control: `zstd`/`gzip` client responses, `zstd`/`gzip` peer-cache transfers, gzip disk-cache values, and negotiated upstream compression with safe decode. |
 | Published large-workload sizing | Grafana's own sizing guide reaches `431 vCPU / 857 Gi` at `3-30 TB/day` and `1221 vCPU / 2235 Gi` at about `30 TB/day` before query spikes. | VictoriaLogs docs do not publish an equivalent distributed throughput tier matrix in the same form; the safer claim is lower RAM/disk posture plus operator reports and backend compression behavior. | The proxy keeps the read-side tax small while making downstream, upstream, and cache behavior observable enough to prove whether the smaller stack is really holding. |
-| Deployment shape | Single-binary mode exists, but scalable Loki is documented as a microservices-based system with multiple components. | VictoriaLogs docs position the backend as a single zero-config executable. | Adds one small read-side compatibility layer with explicit route-aware telemetry. |
+| Deployment shape | Single-binary mode exists, but scalable Loki is documented as a microservices-based system with multiple components. | VictoriaLogs docs position the backend as a simple single executable for the easy path, but they also document cluster mode with `vlinsert`, `vlselect`, `vlstorage`, replication, multi-level cluster setup, and HA patterns across independent availability zones. | Adds one small read-side compatibility layer with explicit route-aware telemetry, and can front either single-node or clustered VictoriaLogs. |
 | Grafana integration | Native Loki datasource and native Loki UX. | Native path is VictoriaLogs plugin or direct VictoriaLogs APIs. | Keeps Grafana on the native Loki datasource, Explore, and Drilldown workflows. |
 | Read-path caching levers | Loki-specific caches and query path tuning. | Backend-native behavior only. | Adds Tier0 compatibility cache, local cache, disk cache, peer cache, and query-range window cache. |
 | Visibility into compatibility work | No separate compatibility layer exists to observe. | No Loki-compatibility layer exists to observe. | Splits downstream latency, upstream latency, cache efficiency, and proxy overhead by route. |
@@ -55,13 +55,18 @@ Official VictoriaLogs docs state the following:
 - full-text search works across all fields
 - high-cardinality values work fine as ordinary fields unless they are promoted
   to stream fields
-- the backend is a single zero-config executable
+- the easy path is a single zero-config executable
+- cluster mode is also documented with `vlinsert`, `vlselect`, `vlstorage`,
+  replication, and multi-level cluster setup
+- HA guidance explicitly discusses sending copies of logs to independent
+  VictoriaLogs instances or clusters in separate availability zones
 - VictoriaLogs publishes up to `30x` less RAM and up to `15x` less disk than
   Loki or Elasticsearch
 
 Sources:
 
 - [VictoriaLogs overview](https://docs.victoriametrics.com/victorialogs/)
+- [VictoriaLogs cluster docs](https://docs.victoriametrics.com/victorialogs/cluster/)
 - [VictoriaLogs key concepts](https://docs.victoriametrics.com/victorialogs/keyconcepts/)
 - [VictoriaLogs LogsQL docs](https://docs.victoriametrics.com/victorialogs/logsql/)
 

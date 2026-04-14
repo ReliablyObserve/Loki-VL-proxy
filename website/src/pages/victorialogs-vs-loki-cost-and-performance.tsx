@@ -38,9 +38,9 @@ const comparisonRows = [
     loki:
       'Loki can run single-binary, but its scalable architecture is microservices-based with multiple components.',
     victorialogs:
-      'VictoriaLogs docs position the backend as a single zero-config executable with reasonable defaults.',
+      'VictoriaLogs docs position the backend as a simple single executable on the easy path, but they also document cluster mode with `vlinsert`, `vlselect`, `vlstorage`, replication, multi-level cluster setup, and HA patterns across independent availability zones.',
     proxy:
-      'The proxy adds one small read-side compatibility layer with route-aware metrics and structured logs instead of hiding translation work inside clients.',
+      'The proxy adds one small read-side compatibility layer with route-aware metrics and structured logs instead of hiding translation work inside clients, and can sit in front of either single-node or clustered VictoriaLogs.',
   },
   {
     dimension: 'Published resource claims',
@@ -113,6 +113,49 @@ const scenarioRows = [
     combo: '$2,388.55',
     delta: '$12,934.25',
     savings: '84.4%',
+  },
+];
+
+const observedRows = [
+  {
+    scale: '1x',
+    ingest: '0.333 TB/day',
+    vl: '40.5 GiB',
+    loki: '64.3 GiB',
+    vlCost: '$3.24',
+    lokiCost: '$5.14',
+    tier: '<3 TB/day',
+    compute: '$1,489.20 / month',
+  },
+  {
+    scale: '10x',
+    ingest: '3.33 TB/day',
+    vl: '405 GiB',
+    loki: '642.9 GiB',
+    vlCost: '$32.40',
+    lokiCost: '$51.43',
+    tier: '3-30 TB/day',
+    compute: '$13,402.80 / month',
+  },
+  {
+    scale: '30x',
+    ingest: '9.99 TB/day',
+    vl: '1,215 GiB',
+    loki: '1,928.6 GiB',
+    vlCost: '$97.20',
+    lokiCost: '$154.29',
+    tier: '3-30 TB/day',
+    compute: '$13,402.80 / month',
+  },
+  {
+    scale: '100x',
+    ingest: '33.29 TB/day',
+    vl: '4,050 GiB',
+    loki: '6,428.6 GiB',
+    vlCost: '$324.00',
+    lokiCost: '$514.29',
+    tier: '~30 TB/day',
+    compute: '$38,222.80 / month',
   },
 ];
 
@@ -300,6 +343,59 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
               size, and a conservative VictoriaLogs storage factor of `10x`,
               even though some real deployments observe much higher
               data-block-only compression ratios.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.columns}>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Observed VictoriaLogs baseline</h2>
+            <ul className={styles.list}>
+              <li>Real snapshot: `800 M` total entries, `112 M` ingested in `24h`, `310 GiB` ingested in `24h`, and `40.5 GiB` on disk.</li>
+              <li>The observed compression ratio is `54.9`, which implies about `5.65 GiB/day` of compressed data blocks.</li>
+              <li>`800 M / 112 M per day` implies about `7.14d` of retained data, which matches the `40.5 GiB` disk footprint closely.</li>
+              <li>Average raw event size on this system is about `2.9 KiB`, which is far larger than the earlier generic `250 B` planning model.</li>
+              <li>This is a write-heavy calibration point because observed read traffic is `0 rps`, so it is useful for storage and ingest-tier math, not for proving read-path cache savings by itself.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Scaling the observed baseline to Loki floors</h2>
+            <div className={styles.tableWrap}>
+              <table className={styles.comparisonTable}>
+                <thead>
+                  <tr>
+                    <th>Scale</th>
+                    <th>Raw ingest/day</th>
+                    <th>VictoriaLogs retained `~7.1d`</th>
+                    <th>Estimated Loki retained `~7.1d`</th>
+                    <th>VictoriaLogs gp3</th>
+                    <th>Loki gp3</th>
+                    <th>Loki published tier</th>
+                    <th>Loki compute floor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {observedRows.map((row) => (
+                    <tr key={row.scale}>
+                      <td>{row.scale}</td>
+                      <td>{row.ingest}</td>
+                      <td>{row.vl}</td>
+                      <td>{row.loki}</td>
+                      <td>{row.vlCost}</td>
+                      <td>{row.lokiCost}</td>
+                      <td>{row.tier}</td>
+                      <td>{row.compute}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p>
+              This uses the observed `40.5 GiB` retained VictoriaLogs footprint
+              as the base, then applies the same conservative `VL = 63% of Loki`
+              retained-bytes assumption used in the docs cost model.
             </p>
           </div>
         </div>
