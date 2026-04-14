@@ -4411,35 +4411,71 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 	}
 	params.Set("limit", strconv.Itoa(sourceLimit))
 
-	fetchPatterns := func(endpoint string) ([]map[string]interface{}, bool) {
-		resp, err := p.vlPost(r.Context(), endpoint, params)
-		if err != nil {
+	fetchPatterns := func(endpoint string) ([]patternResultEntry, bool) {
+		fetchFromParams := func(queryParams url.Values) ([]patternResultEntry, bool) {
+			resp, err := p.vlPost(r.Context(), endpoint, queryParams)
+			if err != nil {
+				return nil, false
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode >= http.StatusBadRequest {
+				return nil, false
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, false
+			}
+			extracted := extractLogPatterns(body, stepParam, patternLimit)
+			if len(extracted) == 0 {
+				return nil, false
+			}
+			entries := patternResultEntriesFromMaps(extracted)
+			if len(entries) == 0 {
+				return nil, false
+			}
+			return entries, true
+		}
+
+		entries, ok := fetchFromParams(params)
+		if !ok {
 			return nil, false
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= http.StatusBadRequest {
-			return nil, false
+		if endpoint != "/select/logsql/query_range" {
+			return entries, true
 		}
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, false
+
+		startNs, endNs, splitInterval, perWindowLimit, ok := patternWindowedSamplingConfig(startParam, endParam, sourceLimit)
+		if !ok {
+			return entries, true
 		}
-		extracted := extractLogPatterns(body, stepParam, patternLimit)
-		if len(extracted) == 0 {
-			return nil, false
+		windows := splitQueryRangeWindowsWithOptions(startNs, endNs, splitInterval, "backward", true)
+		if len(windows) <= 1 {
+			return entries, true
 		}
-		return extracted, true
+
+		merged := entries
+		for _, window := range windows {
+			windowParams := cloneURLValues(params)
+			windowParams.Set("start", strconv.FormatInt(window.startNs, 10))
+			windowParams.Set("end", strconv.FormatInt(window.endNs, 10))
+			windowParams.Set("limit", strconv.Itoa(perWindowLimit))
+			windowEntries, ok := fetchFromParams(windowParams)
+			if !ok {
+				continue
+			}
+			merged = mergePatternResultEntries(merged, windowEntries)
+		}
+		return merged, true
 	}
 
 	// Prefer query_range to preserve full selected-range buckets in Drilldown graphs.
-	patterns, ok := fetchPatterns("/select/logsql/query_range")
+	entries, ok := fetchPatterns("/select/logsql/query_range")
 	if !ok {
-		patterns, _ = fetchPatterns("/select/logsql/query")
+		entries, _ = fetchPatterns("/select/logsql/query")
 	}
-	if patterns == nil {
-		patterns = []map[string]interface{}{}
+	if entries == nil {
+		entries = []patternResultEntry{}
 	}
-	entries := patternResultEntriesFromMaps(patterns)
 	p.metrics.RecordPatternsDetected(len(entries))
 	entries = p.prependCustomPatternEntries(entries, startParam, stepParam, patternLimit)
 	resultBody, err := json.Marshal(patternsResponse{
@@ -4527,6 +4563,16 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func cloneURLValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for k, vals := range in {
+		copied := make([]string, len(vals))
+		copy(copied, vals)
+		out[k] = copied
+	}
+	return out
+}
+
 func parsePatternSourceLineLimit(raw, startParam, endParam, stepParam string) int {
 	const (
 		defaultPatternSourceLimit = 10_000
@@ -4588,6 +4634,49 @@ func derivePatternStep(startParam, endParam string) string {
 		stepSeconds = maxStep
 	}
 	return strconv.FormatInt(stepSeconds, 10) + "s"
+}
+
+func patternWindowedSamplingConfig(startParam, endParam string, sourceLimit int) (int64, int64, time.Duration, int, bool) {
+	startNs, endNs, ok := parseLokiTimeRangeToUnixNano(startParam, endParam)
+	if !ok || sourceLimit <= 0 || endNs <= startNs {
+		return 0, 0, 0, 0, false
+	}
+
+	span := time.Duration(endNs - startNs)
+	const (
+		minWindowedSpan         = 30 * time.Minute
+		targetWindowSpan        = 15 * time.Minute
+		minWindowSourceLimit    = 500
+		maxWindowSourceLimit    = 10_000
+		maxPatternWindowSamples = 24
+	)
+	if span < minWindowedSpan {
+		return 0, 0, 0, 0, false
+	}
+
+	windowCount := int(span/targetWindowSpan) + 1
+	if windowCount < 2 {
+		windowCount = 2
+	}
+	if windowCount > maxPatternWindowSamples {
+		windowCount = maxPatternWindowSamples
+	}
+
+	intervalNs := (endNs - startNs) / int64(windowCount)
+	if intervalNs <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	interval := time.Duration(intervalNs)
+
+	perWindowLimit := sourceLimit / windowCount
+	if perWindowLimit < minWindowSourceLimit {
+		perWindowLimit = minWindowSourceLimit
+	}
+	if perWindowLimit > maxWindowSourceLimit {
+		perWindowLimit = maxWindowSourceLimit
+	}
+
+	return startNs, endNs, interval, perWindowLimit, true
 }
 
 func limitPatternPayload(payload []byte, limit int) []byte {
@@ -4657,6 +4746,83 @@ func patternResultEntriesFromMaps(patterns []map[string]interface{}) []patternRe
 	if len(out) == 0 {
 		return nil
 	}
+	return out
+}
+
+func mergePatternResultEntries(base, extra []patternResultEntry) []patternResultEntry {
+	if len(base) == 0 {
+		return extra
+	}
+	if len(extra) == 0 {
+		return base
+	}
+
+	type bucket struct {
+		level   string
+		pattern string
+		samples map[int64]int
+		total   int
+	}
+
+	merged := map[string]*bucket{}
+	add := func(items []patternResultEntry) {
+		for _, item := range items {
+			pattern := strings.TrimSpace(item.Pattern)
+			if pattern == "" {
+				continue
+			}
+			key := item.Level + "\x00" + pattern
+			b := merged[key]
+			if b == nil {
+				b = &bucket{
+					level:   strings.TrimSpace(item.Level),
+					pattern: pattern,
+					samples: map[int64]int{},
+				}
+				merged[key] = b
+			}
+			for _, pair := range item.Samples {
+				if len(pair) < 2 {
+					continue
+				}
+				ts, okTS := numberToInt64(pair[0])
+				count, okCount := numberToInt(pair[1])
+				if !okTS || !okCount {
+					continue
+				}
+				b.samples[ts] += count
+				b.total += count
+			}
+		}
+	}
+
+	add(base)
+	add(extra)
+
+	items := make([]*bucket, 0, len(merged))
+	for _, item := range merged {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].total > items[j].total })
+
+	out := make([]patternResultEntry, 0, len(items))
+	for _, item := range items {
+		timestamps := make([]int64, 0, len(item.samples))
+		for ts := range item.samples {
+			timestamps = append(timestamps, ts)
+		}
+		sort.Slice(timestamps, func(i, j int) bool { return timestamps[i] < timestamps[j] })
+		samples := make([][]interface{}, 0, len(timestamps))
+		for _, ts := range timestamps {
+			samples = append(samples, []interface{}{ts, item.samples[ts]})
+		}
+		entry := patternResultEntry{Pattern: item.pattern, Samples: samples}
+		if item.level != "" {
+			entry.Level = item.level
+		}
+		out = append(out, entry)
+	}
+
 	return out
 }
 
