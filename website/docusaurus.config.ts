@@ -9,7 +9,7 @@ const siteDescription =
 const config: Config = {
   title: siteTitle,
   tagline: siteDescription,
-  favicon: 'img/logo.svg',
+  favicon: 'img/logo-mark.svg',
   future: {
     v4: true,
   },
@@ -72,6 +72,7 @@ const config: Config = {
       logo: {
         alt: 'Loki-VL-proxy logo',
         src: 'img/logo.svg',
+        srcDark: 'img/logo.svg',
       },
       items: [
         {to: '/', label: 'Overview', position: 'left'},

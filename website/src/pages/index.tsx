@@ -1,6 +1,8 @@
 import type {ReactNode} from 'react';
 import Link from '@docusaurus/Link';
 import Heading from '@theme/Heading';
+import ThemedImage from '@theme/ThemedImage';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 import MarketingLayout from '@site/src/components/MarketingLayout';
 import styles from '@site/src/components/marketing.module.css';
 import {coreFaqs} from '@site/src/data/faqs';
@@ -111,6 +113,9 @@ const operatorCards = [
 ];
 
 export default function Home(): ReactNode {
+  const lightBrand = useBaseUrl('/img/loki-vl-proxy-logo-black.jpg');
+  const darkBrand = useBaseUrl('/img/loki-vl-proxy-logo-white.jpg');
+
   return (
     <MarketingLayout
       path="/"
@@ -146,6 +151,19 @@ export default function Home(): ReactNode {
       faqs={coreFaqs}
       structuredData={[softwareSchema]}
     >
+      <section className={styles.section}>
+        <div className={styles.brandShowcase}>
+          <ThemedImage
+            alt="Loki-VL-proxy marketing logo"
+            className={styles.brandArt}
+            sources={{
+              light: lightBrand,
+              dark: darkBrand,
+            }}
+          />
+        </div>
+      </section>
+
       <section className={styles.section}>
         <div className={styles.sectionHeader}>
           <Heading as="h2" className={styles.sectionTitle}>

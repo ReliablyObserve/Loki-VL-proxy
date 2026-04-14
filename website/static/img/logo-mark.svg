@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">Loki-VL-proxy</title>
+  <desc id="desc">A Loki-inspired green horned source feeding a proxy pipe into a VictoriaLogs-inspired red log module.</desc>
+  <defs>
+    <linearGradient id="bg" x1="22" y1="16" x2="138" y2="148" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14233f"/>
+      <stop offset="1" stop-color="#08101e"/>
+    </linearGradient>
+    <linearGradient id="loki" x1="20" y1="28" x2="72" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#39d98a"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <linearGradient id="pipe" x1="58" y1="64" x2="104" y2="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff4dd"/>
+      <stop offset="1" stop-color="#e7d7b7"/>
+    </linearGradient>
+    <linearGradient id="vl" x1="96" y1="44" x2="142" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff8b5a"/>
+      <stop offset="1" stop-color="#e04f3a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="160" height="160" rx="34" fill="url(#bg)"/>
+
+  <circle cx="44" cy="88" r="24" fill="url(#loki)"/>
+  <path d="M25 64c-1-13 5-24 16-31c0 12 0 21-3 31Z" fill="#63f1b0"/>
+  <path d="M63 64c1-13-5-24-16-31c0 12 0 21 3 31Z" fill="#63f1b0"/>
+  <circle cx="44" cy="88" r="9" fill="#08101e"/>
+  <path d="M40 76h8v24h-8z" fill="#08101e"/>
+  <rect x="62" y="72" width="10" height="18" rx="5" fill="#d5f8eb"/>
+
+  <rect x="68" y="66" width="34" height="30" rx="15" fill="url(#pipe)"/>
+  <rect x="72" y="74" width="26" height="14" rx="7" fill="#11233c" opacity="0.52"/>
+  <rect x="64" y="62" width="8" height="38" rx="4" fill="#efe5d1"/>
+  <rect x="98" y="62" width="8" height="38" rx="4" fill="#efe5d1"/>
+  <path d="M83 79h9l-4.5 6Z" fill="#fff9ee"/>
+
+  <rect x="102" y="44" width="38" height="72" rx="16" fill="url(#vl)"/>
+  <rect x="110" y="63" width="21" height="7" rx="3.5" fill="#fff0ea"/>
+  <rect x="108" y="79" width="24" height="7" rx="3.5" fill="#fff0ea"/>
+  <rect x="112" y="95" width="17" height="7" rx="3.5" fill="#fff0ea"/>
+  <circle cx="104" cy="81" r="4" fill="#ffe9d4"/>
+
+</svg>

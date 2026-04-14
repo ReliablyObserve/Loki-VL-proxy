@@ -17,6 +17,19 @@
   align-items: stretch;
 }
 
+.brandShowcase {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brandArt {
+  width: min(100%, 360px);
+  height: auto;
+  border-radius: 28px;
+  box-shadow: 0 28px 64px rgba(16, 42, 67, 0.14);
+}
+
 .heroCopy,
 .signalPanel,
 .card,
@@ -264,6 +277,10 @@
   .cardGrid,
   .columns {
     grid-template-columns: 1fr;
+  }
+
+  .brandArt {
+    width: min(100%, 320px);
   }
 
   .heroCopy {
