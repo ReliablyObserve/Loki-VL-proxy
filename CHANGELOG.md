@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - align release metadata and notes coverage for `1.0.8`/`1.0.9` so changelog and published GitHub releases remain consistent for patterns/persistence deliverables
 
+### Bug Fixes
+
+- patterns: canonicalize pattern cache keys across RFC3339 and Unix timestamp formats (and equivalent step formats) so Drilldown `/patterns` requests consistently reuse autodetected cache entries
+- patterns: scope pattern detection queries to selector-only context for Drilldown-style pipelines, preventing empty responses when parser/filter stages are present
+- patterns: treat empty on-disk pattern snapshot files as a startup no-op instead of surfacing JSON decode warnings
+
 ## [1.0.9] - 2026-04-14
 
 ### Features

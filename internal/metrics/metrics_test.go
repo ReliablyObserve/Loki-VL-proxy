@@ -126,6 +126,8 @@ func TestMetrics_PatternSnapshotMetrics(t *testing.T) {
 	m.RecordPatternsStored(-2)
 	m.RecordPatternsRestoredFromDisk(-1, -1)
 	m.RecordPatternsRestoredFromPeers(-1, -1)
+	m.RecordPatternsDeduplicated("mem", 0)
+	m.RecordPatternsDeduplicated("disk", -1)
 	m.SetPatternsInMemory(-1, -2, -3)
 	m.SetPatternsPersistedDiskBytes(-10)
 
@@ -134,6 +136,9 @@ func TestMetrics_PatternSnapshotMetrics(t *testing.T) {
 	m.RecordPatternsStored(4)
 	m.RecordPatternsRestoredFromDisk(2, 5)
 	m.RecordPatternsRestoredFromPeers(7, 11)
+	m.RecordPatternsDeduplicated("mem", 13)
+	m.RecordPatternsDeduplicated("disk", 17)
+	m.RecordPatternsDeduplicated("peer", 19)
 	m.SetPatternsInMemory(13, 17, 19)
 	m.SetPatternsPersistedDiskBytes(23)
 
@@ -149,6 +154,9 @@ func TestMetrics_PatternSnapshotMetrics(t *testing.T) {
 		"loki_vl_proxy_patterns_restored_disk_entries_total 5",
 		"loki_vl_proxy_patterns_restored_from_peers_total 7",
 		"loki_vl_proxy_patterns_restored_peer_entries_total 11",
+		`loki_vl_proxy_patterns_deduplicated_total{source="mem"} 13`,
+		`loki_vl_proxy_patterns_deduplicated_total{source="disk"} 17`,
+		`loki_vl_proxy_patterns_deduplicated_total{source="peer"} 19`,
 		"loki_vl_proxy_patterns_in_memory 13",
 		"loki_vl_proxy_patterns_cache_keys 17",
 		"loki_vl_proxy_patterns_in_memory_bytes 19",

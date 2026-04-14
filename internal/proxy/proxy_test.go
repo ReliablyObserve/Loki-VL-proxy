@@ -632,6 +632,41 @@ func TestContract_Patterns_DoesNotAppendSortClause(t *testing.T) {
 	}
 }
 
+func TestContract_Patterns_StripsPipelineAndUsesLabelScope(t *testing.T) {
+	var gotQuery string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		gotQuery = r.FormValue("query")
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:00Z","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}` + "\n"))
+		_, _ = w.Write([]byte(`{"_time":"2026-04-04T10:00:01Z","_msg":"GET /api/users 200 22ms","app":"web","level":"info"}` + "\n"))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D+%7C+json+%7C+filter+source_message_bytes%3A%3D89+%7C+extract+%60%28.%2A%29%60&start=1&end=2", nil)
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(gotQuery, "extract") || strings.Contains(gotQuery, "filter") || strings.Contains(gotQuery, "json") {
+		t.Fatalf("expected /patterns backend query to be selector-scoped, got %q", gotQuery)
+	}
+	if gotQuery != `app:=web` {
+		t.Fatalf("expected translated selector query app:=web, got %q", gotQuery)
+	}
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	data, _ := resp["data"].([]interface{})
+	if len(data) == 0 {
+		t.Fatalf("expected non-empty patterns response, got %v", resp)
+	}
+}
+
 func TestContract_Patterns_FallsBackToQueryRangeWhenQueryUnavailable(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
