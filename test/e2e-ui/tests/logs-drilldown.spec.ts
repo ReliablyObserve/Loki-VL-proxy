@@ -270,7 +270,7 @@ test.describe("Grafana Logs Drilldown", () => {
     await waitForAutodetectedPatterns(
       page,
       PROXY_PATTERNS_AUTODETECT_DS,
-      `{app="api-gateway"}`
+      `{service_name="api-gateway"}`
     );
 
     await openServiceDrilldown(page, PROXY_PATTERNS_AUTODETECT_DS, "api-gateway", "logs");
