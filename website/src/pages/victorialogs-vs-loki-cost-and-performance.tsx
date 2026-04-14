@@ -238,6 +238,34 @@ const computeRows = [
   },
 ];
 
+const highLoadRows = [
+  {
+    scenario: 'Real-life tested steady-state high load',
+    ingest: '0.56 TB/day',
+    vl: '68.3 GiB',
+    loki: '108.4 GiB',
+    envelope: '2.0 cores / 9.9 GiB',
+    floor: '1 x c7i.2xlarge',
+    tier: '<3 TB/day',
+    compute: '$1,489.20 / month',
+    payload: '1,046 GiB/day',
+    network: '$627.60 / month',
+  },
+];
+
+const topologyRows = [
+  {
+    topology: '3 x vlstorage per AZ',
+    components: '3 x vlinsert, 3 x vlselect, 9 x vlstorage',
+    treatment: 'keep the combined compute envelope used in the main tables',
+  },
+  {
+    topology: '4 x vlstorage per AZ',
+    components: '3 x vlinsert, 3 x vlselect, 12 x vlstorage',
+    treatment: 'keep the combined compute envelope used in the main tables',
+  },
+];
+
 export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
   return (
     <MarketingLayout
@@ -267,7 +295,7 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
         },
         {
           value: 'Workload dependent',
-          label: 'The right answer depends on your retention, search mix, and dashboard repetition',
+          label: 'The right answer depends on retention, search mix, and dashboard repetition',
           detail: 'This page separates vendor claims from project benchmarks and third-party reports.',
         },
         {
@@ -342,7 +370,7 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
             </ul>
           </div>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>How to verify the savings in your own environment</h2>
+            <h2 className={styles.cardTitle}>How to verify the savings in another environment</h2>
             <ul className={styles.list}>
               <li>Track `loki_vl_proxy_requests_total` and `loki_vl_proxy_request_duration_seconds` by `endpoint` and `route`.</li>
               <li>Compare `loki_vl_proxy_backend_duration_seconds` with downstream latency to isolate proxy overhead from VictoriaLogs slowness.</li>
@@ -430,18 +458,18 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
       <section className={styles.section}>
         <div className={styles.columns}>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>Observed VictoriaLogs baseline</h2>
+            <h2 className={styles.cardTitle}>Real-life tested VictoriaLogs baseline</h2>
             <ul className={styles.list}>
               <li>Real snapshot: `800 M` total entries, `112 M` ingested in `24h`, `310 GiB` ingested in `24h`, and `40.5 GiB` on disk.</li>
               <li>The observed compression ratio is `54.9`, which implies about `5.65 GiB/day` of compressed data blocks.</li>
               <li>`800 M / 112 M per day` implies about `7.14d` of retained data, which matches the `40.5 GiB` disk footprint closely.</li>
-              <li>Average raw event size on this system is about `2.9 KiB`, which is far larger than the earlier generic `250 B` planning model.</li>
+              <li>Average raw event size in this tested setup is about `2.9 KiB`, which is far larger than the earlier generic `250 B` planning model.</li>
               <li>This is a write-heavy calibration point because observed read traffic is `0 rps`, so it is useful for storage and ingest-tier math, not for proving read-path cache savings by itself.</li>
               <li>`available CPU = 43` and `available memory = 43 GiB` are cluster headroom signals, not service consumption, so they are not used as the VictoriaLogs compute baseline.</li>
             </ul>
           </div>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>Scaling the observed baseline to Loki floors</h2>
+            <h2 className={styles.cardTitle}>Scaling the real-life tested baseline to Loki floors</h2>
             <div className={styles.tableWrap}>
               <table className={styles.comparisonTable}>
                 <thead>
@@ -473,9 +501,10 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
               </table>
             </div>
             <p>
-              This uses the observed `40.5 GiB` retained VictoriaLogs footprint
-              as the base, then applies the same conservative `VL = 63% of Loki`
-              retained-bytes assumption used in the docs cost model.
+              This uses the real-life tested `40.5 GiB` retained VictoriaLogs
+              footprint as the base, then applies the same conservative
+              `VL = 63% of Loki` retained-bytes assumption used in the docs
+              cost model.
             </p>
           </div>
         </div>
@@ -484,7 +513,7 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
       <section className={styles.section}>
         <div className={styles.columns}>
           <div className={styles.card}>
-            <h2 className={styles.cardTitle}>Observed compute envelope vs Loki floor</h2>
+            <h2 className={styles.cardTitle}>Real-life tested compute envelope vs Loki floor</h2>
             <div className={styles.tableWrap}>
               <table className={styles.comparisonTable}>
                 <thead>
@@ -517,19 +546,95 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
             </div>
             <p>
               This uses the measured VictoriaLogs process envelope from the same
-              environment: about `1.2` cores and `5.85 GiB` total across
-              `vlstorage`, `vlinsert`, and `vlselect`.
+              real-life tested setup: about `1.2` cores and `5.85 GiB` total
+              across `vlstorage`, `vlinsert`, and `vlselect`.
             </p>
           </div>
           <div className={styles.card}>
             <h2 className={styles.cardTitle}>What this comparison means</h2>
             <ul className={styles.list}>
-              <li>At the exact observed baseline, the VictoriaLogs service envelope is small enough to fit on a single `c7i.xlarge`, while Loki’s published throughput floor for the same ingest tier is already `3 x c7i.4xlarge`.</li>
-              <li>Even when you scale the measured VictoriaLogs envelope linearly, Loki’s published floor stays materially larger on both CPU and memory.</li>
-              <li>This does not prove that VictoriaLogs scales perfectly linearly; it only shows that your measured baseline is far below Loki’s published distributed floor at the same ingest tier.</li>
-              <li>That is the right way to compare here: measured VictoriaLogs envelope versus Loki’s own published cluster-sizing floor, not marketing slogans versus marketing slogans.</li>
+              <li>At the exact real-life tested baseline, the VictoriaLogs service envelope is small enough to fit on a single `c7i.xlarge`, while Loki’s published throughput floor for the same ingest tier is already `3 x c7i.4xlarge`.</li>
+              <li>Even when the measured VictoriaLogs envelope is scaled linearly, Loki’s published floor stays materially larger on both CPU and memory.</li>
+              <li>This does not prove that VictoriaLogs scales perfectly linearly; it shows that the real-life tested baseline is far below Loki’s published distributed floor at the same ingest tier.</li>
+              <li>That is the right way to compare here: a real-life tested VictoriaLogs envelope versus Loki’s own published cluster-sizing floor, not marketing slogans versus marketing slogans.</li>
             </ul>
           </div>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.card}>
+          <h2 className={styles.cardTitle}>Real-life tested steady-state high-load envelope</h2>
+          <div className={styles.tableWrap}>
+            <table className={styles.comparisonTable}>
+              <thead>
+                <tr>
+                  <th>Scenario</th>
+                  <th>Raw ingest/day</th>
+                  <th>VictoriaLogs retained `~7.1d`</th>
+                  <th>Estimated Loki retained `~7.1d`</th>
+                  <th>Scaled VL envelope</th>
+                  <th>Illustrative VL EC2 floor</th>
+                  <th>Loki published tier</th>
+                  <th>Loki compute floor</th>
+                  <th>Loki cross-AZ write payload/day</th>
+                  <th>Effective inter-AZ monthly cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {highLoadRows.map((row) => (
+                  <tr key={row.scenario}>
+                    <td>{row.scenario}</td>
+                    <td>{row.ingest}</td>
+                    <td>{row.vl}</td>
+                    <td>{row.loki}</td>
+                    <td>{row.envelope}</td>
+                    <td>{row.floor}</td>
+                    <td>{row.tier}</td>
+                    <td>{row.compute}</td>
+                    <td>{row.payload}</td>
+                    <td>{row.network}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ul className={styles.list}>
+            <li>This row uses the higher real-life tested envelope of about `2.5k` events per second and about `6.5 MB/s` raw ingest bandwidth.</li>
+            <li>It is intentionally separate from the daily average snapshot so the page shows both the average storage baseline and the heavier sustained operating shape.</li>
+            <li>Even at this higher steady-state envelope, the tested VictoriaLogs setup remains far below Loki’s first published distributed compute floor.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.card}>
+          <h2 className={styles.cardTitle}>3-AZ VictoriaLogs topology note</h2>
+          <div className={styles.tableWrap}>
+            <table className={styles.comparisonTable}>
+              <thead>
+                <tr>
+                  <th>Topology</th>
+                  <th>Minimum pod shape</th>
+                  <th>Cost-model treatment</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topologyRows.map((row) => (
+                  <tr key={row.topology}>
+                    <td>{row.topology}</td>
+                    <td>{row.components}</td>
+                    <td>{row.treatment}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ul className={styles.list}>
+            <li>This captures the normal production pod shape for a 3-AZ cluster with one `vlinsert` and one `vlselect` per AZ plus `3-4` `vlstorage` pods per AZ.</li>
+            <li>The cost worksheet still uses combined compute in the main tables so the comparison stays about total service envelope rather than node-placement policy.</li>
+            <li>The measured `vlstorage` footprint used elsewhere is for the tested `vlstorage` service envelope as a whole, not per storage pod.</li>
+          </ul>
         </div>
       </section>
 
@@ -574,7 +679,7 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
               <li>That lets operators keep normal reads AZ-local and reserve cross-AZ fanout for explicit global or failover queries.</li>
               <li>The proxy adds `zstd` and `gzip` on the read path it controls, which reduces client and peer-cache transport bytes for repeated reads.</li>
               <li>I did not attach a hard VictoriaLogs inter-AZ dollar figure because the docs do not publish a stable per-hop replication compression ratio, and inventing one would make the model less honest.</li>
-              <li>On your observed system, `0 rps` reads means the measurable network bill is dominated by write replication, not by query fanout.</li>
+              <li>In the tested setup, `0 rps` reads means the measurable network bill is dominated by write replication, not by query fanout.</li>
             </ul>
           </div>
         </div>

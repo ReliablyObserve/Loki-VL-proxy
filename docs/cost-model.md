@@ -59,8 +59,8 @@ So this worksheet uses:
 - `VictoriaLogs stored bytes = raw retained bytes / 10`
 - `Loki stored bytes = VictoriaLogs stored bytes / 0.63`
 
-This is intentionally conservative and transparent. Change the factors if your
-environment has better measurements.
+This is intentionally conservative and transparent. Change the factors if a
+target environment has better measurements.
 
 ### Real-life VictoriaLogs compression note
 
@@ -133,10 +133,10 @@ loki_gb = victorialogs_gb / 0.63
 monthly_total = compute_monthly + storage_gb * 0.08
 ```
 
-## Observed VictoriaLogs Baseline
+## Real-Life Tested VictoriaLogs Baseline
 
-The table below uses a real VictoriaLogs system snapshot instead of the generic
-`250 B` line-size assumption above:
+The table below uses a real-life tested VictoriaLogs setup instead of the
+generic `250 B` line-size assumption above:
 
 | Metric | Observed value |
 |---|---:|
@@ -166,9 +166,10 @@ Important:
   consumed usage, so they should **not** be turned into direct CPU or RAM
   savings claims by themselves
 
-### Observed compute envelope
+### Real-Life Tested Compute Envelope
 
-Using the measured component footprint for the same environment:
+Using the measured component footprint from the same real-life tested
+VictoriaLogs setup:
 
 - `vlstorage`: about `1.0` core and `5.0 GiB`
 - `vlinsert`: about `0.1` core and `0.6 GiB`
@@ -197,12 +198,68 @@ Illustrative monthly VictoriaLogs compute floors for those rows are:
 - `30x`: `$2,978.40 / month`
 - `100x`: `$9,431.60 / month`
 
-## Scaling The Observed Baseline To Loki Floors
+### Real-Life Tested Steady-State High-Load Envelope
 
-The table below keeps the real VictoriaLogs baseline for storage and retention,
-then maps scaled ingest to Loki's published throughput tiers. For the Loki
-storage column, it uses the same conservative cross-system assumption as the
-rest of this page: `VictoriaLogs retained bytes = 63% of Loki retained bytes`.
+The real-life tested setup also includes a higher steady-state envelope:
+
+- ingest throughput: about `2.5k` events per second
+- raw ingest bandwidth: about `6.5 MB/s`
+- component footprint:
+  - `vlstorage`: about `1.0` core and `5.0 GiB`
+  - `vlinsert`: about `0.1` core and `0.6 GiB`
+  - `vlselect`: about `0.1` core and `0.25 GiB`
+
+Converted into the same worksheet shape, that envelope becomes:
+
+| Scenario | Raw ingest/day | VictoriaLogs retained `~7.1d` | Estimated Loki retained `~7.1d` | Scaled VL envelope | Illustrative VL EC2 floor | Loki published tier | Loki compute floor | Loki cross-AZ write payload/day | Effective inter-AZ monthly cost |
+|---|---:|---:|---:|---:|---|---|---:|---:|---:|
+| Real-life tested steady-state high load | `0.56 TB/day` | `68.3 GiB` | `108.4 GiB` | `2.0 cores / 9.9 GiB` | `1 x c7i.2xlarge` | `<3 TB/day` | `$1,489.20 / month` | `1,046 GiB/day` | `$627.60 / month` |
+
+What this extra row means:
+
+- it is materially above the daily average snapshot, so it should be treated as
+  a sustained higher-load envelope rather than as the primary daily baseline
+- it still lands well below Loki's first published distributed throughput floor
+- even at that higher steady-state envelope, Loki's published compute and
+  replication floor remain much larger than the tested VictoriaLogs shape
+
+### 3-AZ VictoriaLogs Topology Note
+
+The resource tables above describe measured process envelope and use combined
+compute for cost comparison. A normal multi-AZ production layout is different
+because `vlinsert`, `vlselect`, and `vlstorage` are usually spread across
+separate nodes or pools.
+
+For a 3-AZ VictoriaLogs cluster with:
+
+- `1 x vlinsert` per AZ
+- `1 x vlselect` per AZ
+- `3-4 x vlstorage` pods per AZ
+
+the minimum pod topology is:
+
+- `3 x vlinsert`
+- `3 x vlselect`
+- `9-12 x vlstorage`
+
+For the worksheet, those topologies still use the combined compute rows above:
+
+| Topology | Minimum pod shape | Cost-model treatment |
+|---|---|---|
+| `3 x vlstorage` per AZ | `3 x vlinsert`, `3 x vlselect`, `9 x vlstorage` | keep the combined compute envelope used in the main tables |
+| `4 x vlstorage` per AZ | `3 x vlinsert`, `3 x vlselect`, `12 x vlstorage` | keep the combined compute envelope used in the main tables |
+
+This avoids overstating VictoriaLogs cost by multiplying the measured service
+envelope per pod. The measured `5.0 GiB` and `1.0` core figures apply to the
+tested `vlstorage` service envelope as a whole, not per storage pod.
+
+## Scaling The Real-Life Tested Baseline To Loki Floors
+
+The table below keeps the real-life tested VictoriaLogs baseline for storage
+and retention, then maps scaled ingest to Loki's published throughput tiers.
+For the Loki storage column, it uses the same conservative cross-system
+assumption as the rest of this page: `VictoriaLogs retained bytes = 63% of Loki
+retained bytes`.
 
 | Scale | Raw ingest/day | VictoriaLogs retained `~7.1d` | Estimated Loki retained `~7.1d` | VictoriaLogs gp3 | Loki gp3 | Loki published tier | Loki compute floor |
 |---|---:|---:|---:|---:|---:|---|---:|
@@ -334,7 +391,7 @@ for the compressed data blocks, excluding `indexdb`.
 Use that range as:
 
 - an optimistic real-life storage floor for VictoriaLogs data blocks
-- a sanity check when your actual retained-disk bill is much higher or lower
+- a sanity check when the actual retained-disk bill is much higher or lower
 
 Do **not** treat it as a full retained-storage number until you add:
 
@@ -417,7 +474,7 @@ The model assumes three things compound together as ingest grows:
 
 That is why the gap widens in the medium and large scenarios.
 
-If your actual VictoriaLogs dataset stays closer to the observed `50-60x`
+If the actual VictoriaLogs dataset stays closer to the observed `50-60x`
 data-only compression range, the storage part of the `Proxy + VL` column can
 drop further than the conservative table shows. The compute and proxy sections
 of the model stay the same.
@@ -450,9 +507,9 @@ The table above does **not** include:
 If you need a finance-grade model, this page is the starting point, not the
 final calculator.
 
-## How To Make The Model More Honest For Your Environment
+## How To Recalibrate This Model For Another Environment
 
-Replace the assumptions with measured values from your own cluster:
+Replace the assumptions with measured values from the target cluster:
 
 1. Measure actual average raw bytes per log line.
 2. Measure real active-user read request rates from Grafana and API clients.
@@ -460,9 +517,10 @@ Replace the assumptions with measured values from your own cluster:
    chunk and index/object-store footprint.
 4. Measure VictoriaLogs data-block bytes, `indexdb` bytes, and total retained
    bytes separately.
-5. Replace the `10x` VictoriaLogs storage factor with your real total retained
+5. Replace the `10x` VictoriaLogs storage factor with the real total retained
    compression result, and keep the data-block ratio as a separate note.
-6. Replace the `37%` storage delta with your own side-by-side retained bytes.
+6. Replace the `37%` storage delta with a real side-by-side retained-bytes
+   measurement.
 7. Measure actual bytes moved between Grafana, proxy, peers, and VictoriaLogs
    with compression enabled.
 8. Replace the reference compute packs with observed CPU and memory saturation

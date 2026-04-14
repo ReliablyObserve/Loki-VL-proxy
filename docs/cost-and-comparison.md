@@ -84,7 +84,7 @@ VictoriaLogs publishes:
 - up to `15x` less disk
 
 That is a vendor claim from VictoriaMetrics documentation. Treat it as a
-directional signal, not as a guaranteed result in your environment.
+directional signal, not as a guaranteed result in every environment.
 
 ### TrueFoundry case study
 
@@ -231,11 +231,11 @@ Related docs:
 | Situation | Why |
 |---|---|
 | You need native Loki writes through the same endpoint | This project is read-focused; normal Loki push remains blocked. |
-| Your workload is mostly narrow label-first queries and you already operate Loki comfortably | The benefit of all-field indexing and compatibility caching may be smaller. |
+| Mostly narrow label-first query workloads that already run well on Loki | The benefit of all-field indexing and compatibility caching may be smaller. |
 | You want zero extra read components in the path | Native Loki is simpler because there is no compatibility layer at all. |
 | You want universal numeric savings promises | No honest doc can guarantee one fixed ratio across every cluster. |
 
-## How To Validate Savings In Your Own Environment
+## How To Validate Savings In Another Environment
 
 Use these signals before claiming success:
 
