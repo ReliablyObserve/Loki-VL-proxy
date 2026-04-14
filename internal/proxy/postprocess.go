@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"container/heap"
 	"encoding/json"
 	"net"
 	"regexp"
@@ -409,40 +408,26 @@ func buildPatternResponse(miner *patternMiner, limit int) []map[string]interface
 		limit = maxPatternResponseLimit
 	}
 	clusters := miner.AllClusters()
-	entryCap := len(clusters)
-	if entryCap > maxPatternResponseLimit {
-		entryCap = maxPatternResponseLimit
+	entries := make([]*patternBucket, 0, len(clusters))
+	entries = append(entries, clusters...)
+	for _, e := range entries {
+		e.pattern = miner.tokenizer.Join(e.tokens, e.spacesAfter)
 	}
-	entries := make([]*patternBucket, 0, entryCap)
-	if len(clusters) <= limit {
-		entries = append(entries, clusters...)
-		sort.Slice(entries, func(i, j int) bool {
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].total != entries[j].total {
 			return entries[i].total > entries[j].total
-		})
-	} else {
-		h := &patternBucketHeap{}
-		heap.Init(h)
-		for _, entry := range clusters {
-			if h.Len() < limit {
-				heap.Push(h, entry)
-				continue
-			}
-			if (*h)[0].total < entry.total {
-				(*h)[0] = entry
-				heap.Fix(h, 0)
-			}
 		}
-		for h.Len() > 0 {
-			entries = append(entries, heap.Pop(h).(*patternBucket))
+		if entries[i].level != entries[j].level {
+			return entries[i].level < entries[j].level
 		}
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].total > entries[j].total
-		})
+		return entries[i].pattern < entries[j].pattern
+	})
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
 
 	result := make([]map[string]interface{}, 0, len(entries))
 	for _, e := range entries {
-		e.pattern = miner.tokenizer.Join(e.tokens, e.spacesAfter)
 		sampleTimes := make([]int64, 0, len(e.buckets))
 		for bucket := range e.buckets {
 			sampleTimes = append(sampleTimes, bucket)
