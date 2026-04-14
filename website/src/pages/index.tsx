@@ -44,6 +44,11 @@ const practicalGuides = [
     body: 'See downstream, proxy, cache, and upstream behavior with route-aware metrics, logs, and runtime resource signals.',
   },
   {
+    to: '/victorialogs-vs-loki-cost-and-performance/',
+    title: 'Compare Cost and Performance',
+    body: 'See what Loki docs, VictoriaLogs docs, third-party benchmarks, and the proxy cache model actually support about savings.',
+  },
+  {
     to: '/migrate-grafana-from-loki-to-victorialogs/',
     title: 'Migrate from Loki',
     body: 'Use a parallel datasource path, validate Grafana workflows, and cut over only after route-aware checks are green.',
@@ -90,6 +95,11 @@ const intentPages = [
     to: '/loki-vs-victorialogs-grafana-query-workflows/',
     title: 'Loki vs VictoriaLogs for Grafana Query Workflows',
     body: 'Operational comparison of a native Loki backend versus VictoriaLogs routed through Loki-VL-proxy for Grafana query paths.',
+  },
+  {
+    to: '/victorialogs-vs-loki-cost-and-performance/',
+    title: 'VictoriaLogs vs Loki Cost and Performance',
+    body: 'Source-backed comparison of indexing model, high-cardinality posture, operational shape, and the extra savings levers from the proxy.',
   },
 ];
 

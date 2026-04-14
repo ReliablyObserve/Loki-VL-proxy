@@ -146,9 +146,9 @@ extraArgs:
   cache-max: "10000"
   disk-cache-path: "/cache/proxy.db"
   disk-cache-compress: "true"
-  peer-self: "$(POD_IP):3100"
-  peer-discovery: "dns"
-  peer-dns: "loki-vl-proxy-headless.default.svc.cluster.local"
+peerCache:
+  enabled: true
+  discovery: dns
 persistence:
   enabled: true
   size: 5Gi
@@ -184,12 +184,9 @@ extraArgs:
   disk-cache-path: "/cache/proxy.db"
   disk-cache-compress: "true"
   disk-cache-flush-size: "500"
-  peer-self: "$(POD_IP):3100"
-  peer-discovery: "dns"
-  peer-dns: "loki-vl-proxy-headless.default.svc.cluster.local"
-  rate-per-second: "200"
-  rate-burst: "500"
-  max-concurrent: "500"
+peerCache:
+  enabled: true
+  discovery: dns
 persistence:
   enabled: true
   size: 10Gi
@@ -209,16 +206,25 @@ podDisruptionBudget:
   minAvailable: 2
 ```
 
+The current chart does not expose direct rate-limit, max-concurrency, or circuit-breaker tuning flags. The proxy currently uses built-in defaults in code:
+
+- per-client rate limit `50 req/s`
+- per-client burst `100`
+- global concurrent backend queries `100`
+- circuit breaker open after `5` failures for `10s`
+
+Use HPA, cache sizing, Grafana refresh policy, and outer traffic shaping as the main scaling controls.
+
 ## Monitoring Metrics
 
 ### Per-Tenant (Rate, Throughput, Latency)
 
 ```promql
 # Request rate per tenant
-rate(loki_vl_proxy_tenant_requests_total[5m])
+sum(rate(loki_vl_proxy_tenant_requests_total{system="loki",direction="downstream"}[5m])) by (tenant)
 
 # P99 latency per tenant
-histogram_quantile(0.99, rate(loki_vl_proxy_tenant_request_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, sum(rate(loki_vl_proxy_tenant_request_duration_seconds_bucket{system="loki",direction="downstream"}[5m])) by (le, tenant))
 
 # Error rate per tenant
 sum(rate(loki_vl_proxy_tenant_requests_total{status=~"4..|5.."}[5m])) by (tenant)
@@ -237,13 +243,13 @@ Datasource/basic-auth credentials are tracked separately and are not used as cli
 
 ```promql
 # Request rate per client
-rate(loki_vl_proxy_client_requests_total[5m])
+sum(rate(loki_vl_proxy_client_requests_total{system="loki",direction="downstream"}[5m])) by (client)
 
 # Throughput per client (bytes/s)
-rate(loki_vl_proxy_client_response_bytes_total[5m])
+sum(rate(loki_vl_proxy_client_response_bytes_total[5m])) by (client)
 
 # P95 latency per client
-histogram_quantile(0.95, rate(loki_vl_proxy_client_request_duration_seconds_bucket[5m]))
+histogram_quantile(0.95, sum(rate(loki_vl_proxy_client_request_duration_seconds_bucket{system="loki",direction="downstream"}[5m])) by (le, client))
 
 # Top 10 clients by request count
 topk(10, sum(rate(loki_vl_proxy_client_requests_total[5m])) by (client))
@@ -252,7 +258,7 @@ topk(10, sum(rate(loki_vl_proxy_client_requests_total[5m])) by (client))
 topk(10, sum(rate(loki_vl_proxy_client_status_total{status="429"}[5m])) by (client))
 
 # Clients issuing the largest queries
-topk(10, histogram_quantile(0.95, rate(loki_vl_proxy_client_query_length_chars_bucket[5m])))
+topk(10, histogram_quantile(0.95, sum(rate(loki_vl_proxy_client_query_length_chars_bucket{system="loki",direction="downstream"}[5m])) by (le, client)))
 ```
 
 ### Fleet Peer-Cache
@@ -368,4 +374,4 @@ Example: AWS EKS, us-east-1, 1,000 req/s workload
 | VictoriaLogs (backend) | Varies | Varies |
 | **Total proxy infra** | | **~$134/month** |
 
-Compare to running Loki at the same scale: Loki typically requires 10-30x more resources due to ingestion, indexing, and compaction overhead.
+Treat this as proxy-only infrastructure cost, not a full backend comparison. Actual Loki versus VictoriaLogs economics depend on ingestion profile, retention window, storage class, and query mix. Loki's own docs note that high-cardinality labels hurt performance and cost-effectiveness, while VictoriaLogs publishes lower-RAM and lower-disk claims and third-party case studies report materially lower CPU, RAM, and storage usage on search-heavy workloads. Use the route-aware metrics and cache ratios in this project to validate the savings against your own traffic rather than assuming a fixed multiplier.

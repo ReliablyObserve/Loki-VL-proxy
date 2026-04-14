@@ -1,0 +1,355 @@
+import type {ReactNode} from 'react';
+import Link from '@docusaurus/Link';
+import Heading from '@theme/Heading';
+import MarketingLayout from '@site/src/components/MarketingLayout';
+import styles from '@site/src/components/marketing.module.css';
+import {coreFaqs} from '@site/src/data/faqs';
+
+const comparisonRows = [
+  {
+    dimension: 'Indexing strategy',
+    loki:
+      'Loki docs: labels index streams, but the content of each log line is not indexed.',
+    victorialogs:
+      'VictoriaLogs docs: all fields are indexed and the query model supports full-text search across fields.',
+    proxy:
+      'The proxy keeps the Loki read contract in front of that backend so Grafana can stay on the native Loki datasource.',
+  },
+  {
+    dimension: 'High-cardinality behavior',
+    loki:
+      'Loki docs recommend low-cardinality labels and warn that high cardinality hurts performance and cost-effectiveness.',
+    victorialogs:
+      'VictoriaLogs docs say high-cardinality values such as `trace_id`, `user_id`, and `ip` work fine as fields as long as they are not used as stream fields.',
+    proxy:
+      'The proxy lets Grafana keep Loki-safe label surfaces while VictoriaLogs keeps the richer field model underneath.',
+  },
+  {
+    dimension: 'Search-heavy workloads',
+    loki:
+      'Broad or text-heavy searches can devolve into stream selection plus line filtering because line content is not indexed.',
+    victorialogs:
+      'VictoriaLogs publishes fast full-text search as a core capability, and third-party benchmarks report materially faster broad-search latency on large datasets.',
+    proxy:
+      'Tier0, L1/L2/L3, and window cache can further suppress repeated read work after the first expensive search path.',
+  },
+  {
+    dimension: 'Operational shape',
+    loki:
+      'Loki can run single-binary, but its scalable architecture is microservices-based with multiple components.',
+    victorialogs:
+      'VictoriaLogs docs position the backend as a single zero-config executable with reasonable defaults.',
+    proxy:
+      'The proxy adds one small read-side compatibility layer with route-aware metrics and structured logs instead of hiding translation work inside clients.',
+  },
+  {
+    dimension: 'Published resource claims',
+    loki:
+      'Grafana docs do not market a universal fixed savings ratio; they emphasize label strategy, storage, and deployment architecture.',
+    victorialogs:
+      'VictoriaLogs docs publish up to `30x` less RAM and up to `15x` less disk than Loki or Elasticsearch, while TrueFoundry reports `≈40%` less storage and much lower CPU and RAM on its workload.',
+    proxy:
+      'The proxy adds its own small runtime cost, but published project benchmarks show it remains CPU-light and can sharply reduce repeated backend work through caching.',
+  },
+  {
+    dimension: 'Published large-workload sizing',
+    loki:
+      'Grafana’s own sizing guide reaches `431 vCPU / 857 Gi` at `3-30 TB/day` and `1221 vCPU / 2235 Gi` around `30 TB/day` before query spikes.',
+    victorialogs:
+      'VictoriaLogs docs do not publish an equivalent distributed tier matrix on the same shape; the safer claim is lower-resource posture plus stronger compression and search behavior on published comparisons.',
+    proxy:
+      'The proxy does not change backend ingest economics by itself, but it keeps the read side small and can cut repeated backend work through tiered caches and route-aware control.',
+  },
+];
+
+const lokiSizingRows = [
+  {
+    tier: '<3 TB/day',
+    request: '38 vCPU / 59 Gi',
+    nodes: '3 x c7i.4xlarge',
+    cost: '$1,489.20 / month',
+  },
+  {
+    tier: '3-30 TB/day',
+    request: '431 vCPU / 857 Gi',
+    nodes: '27 x c7i.4xlarge',
+    cost: '$13,402.80 / month',
+  },
+  {
+    tier: '~30 TB/day',
+    request: '1221 vCPU / 2235 Gi',
+    nodes: '77 x c7i.4xlarge',
+    cost: '$38,222.80 / month',
+  },
+];
+
+const scenarioRows = [
+  {
+    scenario: 'Small',
+    users: '100',
+    ingest: '100k lines/s',
+    daily: '2.16 TB/day',
+    loki: '$1,681.20',
+    combo: '$369.16',
+    delta: '$1,312.04',
+    savings: '78.0%',
+  },
+  {
+    scenario: 'Medium',
+    users: '1,000',
+    ingest: '500k lines/s',
+    daily: '10.8 TB/day',
+    loki: '$14,362.80',
+    combo: '$1,101.20',
+    delta: '$13,261.60',
+    savings: '92.3%',
+  },
+  {
+    scenario: 'Large',
+    users: '10,000',
+    ingest: '1M lines/s',
+    daily: '21.6 TB/day',
+    loki: '$15,322.80',
+    combo: '$2,388.55',
+    delta: '$12,934.25',
+    savings: '84.4%',
+  },
+];
+
+export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
+  return (
+    <MarketingLayout
+      path="/victorialogs-vs-loki-cost-and-performance/"
+      title="VictoriaLogs vs Loki Cost and Performance"
+      description="Source-backed comparison of Loki and VictoriaLogs for cost and search performance, plus what Loki-VL-proxy adds on the Grafana read path with cache tiers, route-aware telemetry, and migration control."
+      eyebrow="Cost and performance"
+      headline="Compare VictoriaLogs and Loki with a source-backed cost lens"
+      lede="The cost story is not that a proxy magically makes every logging stack cheap. The defensible argument is narrower: Loki's own docs describe a label-indexed system that is sensitive to high-cardinality labels, VictoriaLogs publishes an all-field index and lower-resource claims, and Loki-VL-proxy adds concrete read-path caches plus observability so repeated Grafana traffic can cost less."
+      primaryCta={{label: 'Read the cache guide', to: '/cache-tiers-and-fleet-cache-for-victorialogs/'}}
+      secondaryCta={{label: 'Read the monitoring guide', to: '/monitor-loki-vl-proxy/'}}
+      highlights={[
+        {
+          value: 'Label-only vs all-field',
+          label: 'Loki indexes labels; VictoriaLogs indexes all fields',
+          detail: 'That difference matters most on broad or text-heavy searches.',
+        },
+        {
+          value: 'High-cardinality posture',
+          label: 'Loki warns about high-cardinality labels; VictoriaLogs supports high-cardinality fields',
+          detail: 'The proxy keeps those richer fields usable without forcing Grafana off Loki semantics.',
+        },
+        {
+          value: 'Cache stack on top',
+          label: 'Tier0, L1, L2, L3, and window cache can suppress repeated read work',
+          detail: 'This is where the proxy adds its own efficiency story.',
+        },
+        {
+          value: 'Workload dependent',
+          label: 'The right answer depends on your retention, search mix, and dashboard repetition',
+          detail: 'This page separates vendor claims from project benchmarks and third-party reports.',
+        },
+        {
+          value: 'Loki docs publish big tiers',
+          label: 'Grafana’s own sizing guide reaches 431 vCPU / 857 Gi at 3-30 TB/day',
+          detail: 'That gives the cost discussion a real published compute floor instead of a hand-wavy cluster sketch.',
+        },
+      ]}
+      faqs={coreFaqs}
+    >
+      <section className={styles.section}>
+        <div className={styles.tableWrap}>
+          <table className={styles.comparisonTable}>
+            <thead>
+              <tr>
+                <th>Dimension</th>
+                <th>What official Loki docs say</th>
+                <th>What VictoriaLogs docs or published reports say</th>
+                <th>What Loki-VL-proxy adds</th>
+              </tr>
+            </thead>
+            <tbody>
+              {comparisonRows.map((row) => (
+                <tr key={row.dimension}>
+                  <td>{row.dimension}</td>
+                  <td>{row.loki}</td>
+                  <td>{row.victorialogs}</td>
+                  <td>{row.proxy}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.cardGrid}>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Why the Loki cost floor matters</h2>
+            <ul className={styles.list}>
+              <li>Grafana already publishes large distributed Loki sizing floors by ingest throughput, so the high-end compute side is not a vague anti-Loki argument.</li>
+              <li>At `3-30 TB/day`, the published Loki floor is `431 vCPU / 857 Gi` before storage and before the `10x` querier-spike warning in the same docs.</li>
+              <li>That is why this project’s cost page converts Loki’s own sizing guide into on-demand EC2 floors before comparing it with a smaller `VictoriaLogs + Loki-VL-proxy` reference pack.</li>
+              <li>The proxy layer is intentionally modeled as a small read-path tax, not as the source of backend ingest savings.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Where the savings argument is strongest</h2>
+            <ul className={styles.list}>
+              <li>Search-heavy workloads where users often scan broad time ranges for words, phrases, or IDs.</li>
+              <li>Data models with many useful fields and high-cardinality values that should stay as fields rather than labels.</li>
+              <li>Repeated Grafana dashboard, Explore, or Drilldown reads that can hit Tier0, local cache, disk cache, or peer cache.</li>
+              <li>Migrations where you want VictoriaLogs economics without forcing Grafana and Loki API clients to change first.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Where to be precise instead of hype-driven</h2>
+            <ul className={styles.list}>
+              <li>Do not present the proxy as a generic ingestion benchmark; standard Loki push stays blocked.</li>
+              <li>Do not treat third-party workload numbers as universal truths for every cluster.</li>
+              <li>Do not attribute VictoriaLogs backend savings to the proxy itself; the proxy adds read-path suppression and migration control.</li>
+              <li>Do compare end-to-end client latency with upstream latency so you can see whether the proxy or the backend owns the cost.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>What the proxy measurably contributes</h2>
+            <ul className={styles.list}>
+              <li>`query_range` warm hits in the published project benchmark land at `0.64-0.67 us` versus `4.58 ms` on the cold delayed path.</li>
+              <li>`detected_field_values` warm hits land at `0.71 us` versus `2.76 ms` without Tier0.</li>
+              <li>Peer-cache warm shadow-copy hits land at `52 ns` after the first owner fetch.</li>
+              <li>Long-range prefiltering cut backend query calls by about `81.6%` on the published benchmark shape.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>How to verify the savings in your own environment</h2>
+            <ul className={styles.list}>
+              <li>Track `loki_vl_proxy_requests_total` and `loki_vl_proxy_request_duration_seconds` by `endpoint` and `route`.</li>
+              <li>Compare `loki_vl_proxy_backend_duration_seconds` with downstream latency to isolate proxy overhead from VictoriaLogs slowness.</li>
+              <li>Watch `loki_vl_proxy_cache_hits_by_endpoint` and `_misses_by_endpoint` to see whether repeated reads are really being suppressed.</li>
+              <li>Use structured logs with `proxy.overhead_ms` and `upstream.duration_ms` for exact per-request decomposition.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.columns}>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Loki published sizing converted to EC2</h2>
+            <div className={styles.tableWrap}>
+              <table className={styles.comparisonTable}>
+                <thead>
+                  <tr>
+                    <th>Loki docs ingest tier</th>
+                    <th>Published base request</th>
+                    <th>Illustrative EC2 floor</th>
+                    <th>Monthly compute floor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lokiSizingRows.map((row) => (
+                    <tr key={row.tier}>
+                      <td>{row.tier}</td>
+                      <td>{row.request}</td>
+                      <td>{row.nodes}</td>
+                      <td>{row.cost}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p>
+              This uses simple `c7i.4xlarge` on-demand packing in `us-east-1` to
+              turn Grafana&apos;s published CPU and memory requests into an
+              operator-readable monthly floor.
+            </p>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Illustrative monthly cost scenarios</h2>
+            <div className={styles.tableWrap}>
+              <table className={styles.comparisonTable}>
+                <thead>
+                  <tr>
+                    <th>Scenario</th>
+                    <th>Active users</th>
+                    <th>Ingest</th>
+                    <th>Raw ingest/day</th>
+                    <th>Loki total</th>
+                    <th>Proxy + VL total</th>
+                    <th>Monthly delta</th>
+                    <th>Savings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scenarioRows.map((row) => (
+                    <tr key={row.scenario}>
+                      <td>{row.scenario}</td>
+                      <td>{row.users}</td>
+                      <td>{row.ingest}</td>
+                      <td>{row.daily}</td>
+                      <td>{row.loki}</td>
+                      <td>{row.combo}</td>
+                      <td>{row.delta}</td>
+                      <td>{row.savings}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p>
+              These scenarios assume `7d` retention, `250 B` average raw line
+              size, and a conservative VictoriaLogs storage factor of `10x`,
+              even though some real deployments observe much higher
+              data-block-only compression ratios.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.columns}>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Published numbers worth citing carefully</h2>
+            <ul className={styles.list}>
+              <li>VictoriaLogs docs: up to `30x` less RAM and up to `15x` less disk than Loki or Elasticsearch.</li>
+              <li>VictoriaLogs docs: all fields are indexed and high-cardinality values work unless promoted to stream fields.</li>
+              <li>Some real deployments observe `50-60x` VictoriaLogs compression ratios on the data-block metric, but that excludes `indexdb` and should be treated as a lower-bound, not the full storage bill.</li>
+              <li>TrueFoundry `500 GB / 7 day` benchmark: `≈40%` less storage and materially lower CPU and RAM than Loki on its workload.</li>
+              <li>TrueFoundry broad-search results: VictoriaLogs was faster on its needle-in-haystack and negative-match tests.</li>
+              <li>Grafana’s own Loki sizing guide publishes a `3-30 TB/day` base cluster at `431 vCPU / 857 Gi` and a `~30 TB/day` cluster at `1221 vCPU / 2235 Gi` before query spikes, which makes the compute side of the cost story concrete.</li>
+            </ul>
+          </div>
+          <div className={styles.card}>
+            <h2 className={styles.cardTitle}>Published Loki behaviors worth keeping in mind</h2>
+            <ul className={styles.list}>
+              <li>Loki docs: labels are for low-cardinality values and line content is not indexed.</li>
+              <li>Loki docs: high-cardinality labels build a huge index, flush tiny chunks, and reduce performance and cost-effectiveness.</li>
+              <li>Loki docs: scalable deployments are multi-component and query-frontend based.</li>
+              <li>Loki docs: OTel resource attributes promoted to labels are rewritten from dots to underscores, which the proxy can mirror on the Grafana side.</li>
+              <li>Loki docs: unoptimized queries can need `10x` the suggested querier resources, so the published tier tables are a floor, not a worst case.</li>
+              <li>Loki costs grow fast when the workload crosses published ingest tiers, because those tiers already assume a sizeable distributed footprint before storage and object-transfer overhead.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.callout}>
+          <Heading as="h2" className={styles.sectionTitle}>
+            Follow-up docs and sources
+          </Heading>
+          <div className={styles.inlineLinks}>
+            <Link to="/docs/cost-model/">Docs cost model</Link>
+            <Link to="/docs/cost-and-comparison/">Docs comparison matrix</Link>
+            <a href="https://grafana.com/docs/loki/latest/get-started/labels/">Loki labels docs</a>
+            <a href="https://grafana.com/docs/loki/latest/get-started/architecture/">Loki architecture docs</a>
+            <a href="https://docs.victoriametrics.com/victorialogs/">VictoriaLogs overview</a>
+            <a href="https://docs.victoriametrics.com/victorialogs/keyconcepts/">VictoriaLogs key concepts</a>
+            <a href="https://www.truefoundry.com/blog/victorialogs-vs-loki">TrueFoundry benchmark report</a>
+            <Link to="/docs/performance/">Project performance docs</Link>
+            <Link to="/docs/benchmarks/">Project benchmarks</Link>
+          </div>
+        </div>
+      </section>
+    </MarketingLayout>
+  );
+}

@@ -28,6 +28,7 @@ import (
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/cache"
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/metrics"
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/proxy"
+	"github.com/klauspost/compress/zstd"
 )
 
 type fakeReloadableProxy struct {
@@ -198,7 +199,7 @@ func TestRun_Success(t *testing.T) {
 	if recorder.options.proxyCfg.backendURL != "http://backend.test" {
 		t.Fatalf("unexpected backend URL: %+v", recorder.options.proxyCfg)
 	}
-	if recorder.options.proxyCfg.tailMode != "synthetic" || recorder.options.enableGzip {
+	if recorder.options.proxyCfg.tailMode != "synthetic" || recorder.options.responseCompression != "none" {
 		t.Fatalf("unexpected parsed runtime options: %+v", recorder.options)
 	}
 	if recorder.options.serverOpts.listenAddr != ":9999" {
@@ -521,7 +522,7 @@ func TestWrapHandler_GzipEnabled(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept-Encoding", "gzip")
 	w := httptest.NewRecorder()
-	wrapHandler(next, 1024, true).ServeHTTP(w, req)
+	wrapHandler(next, 1024, "auto").ServeHTTP(w, req)
 
 	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
 		t.Fatalf("expected gzip response, got %q", got)
@@ -537,6 +538,33 @@ func TestWrapHandler_GzipEnabled(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "hello") {
 		t.Fatalf("expected decompressed body, got %q", string(body))
+	}
+}
+
+func TestWrapHandler_ZstdPreferred(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("hello", 20)))
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+	w := httptest.NewRecorder()
+	wrapHandler(next, 1024, "auto").ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("expected zstd response, got %q", got)
+	}
+	zr, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("create zstd reader: %v", err)
+	}
+	defer zr.Close()
+	body, err := zr.DecodeAll(w.Body.Bytes(), nil)
+	if err != nil {
+		t.Fatalf("decode zstd body: %v", err)
+	}
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("expected decoded body, got %q", string(body))
 	}
 }
 
@@ -1442,8 +1470,8 @@ func TestBuildRuntime_Success(t *testing.T) {
 			compression: "gzip",
 			serviceName: "proxy",
 		},
-		maxBodyBytes: 1024,
-		enableGzip:   true,
+		maxBodyBytes:        1024,
+		responseCompression: "auto",
 		serverOpts: serverRuntimeOptions{
 			listenAddr:     ":0",
 			readTimeout:    time.Second,

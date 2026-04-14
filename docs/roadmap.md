@@ -6,7 +6,7 @@
 - [x] Response format conversion (VL NDJSON -> Loki streams, VL stats -> Prometheus matrix/vector)
 - [x] Request coalescing (singleflight: N queries -> 1 backend request)
 - [x] Rate limiting (per-client token bucket + global concurrency)
-- [x] Circuit breaker (closed->open->half-open with configurable thresholds)
+- [x] Circuit breaker (closed->open->half-open with built-in defaults)
 - [x] Query normalization (sort matchers, collapse whitespace for cache keys)
 - [x] Tiered cache (per-endpoint TTLs, L1 in-memory, L2 bbolt on-disk)
 - [x] Multitenancy (string->int tenant mapping, numeric passthrough, SIGHUP reload)
@@ -16,7 +16,6 @@
 - [x] HTTP hardening (timeouts, body limits, security headers)
 - [x] Index stats, volume, volume_range via VL `/select/logsql/hits`
 - [x] Query fingerprinting + analytics (`/debug/queries`)
-- [x] Auto-warming cache for top-N queries
 - [x] Graceful HTTP server shutdown (SIGTERM/SIGINT)
 - [x] Grafana datasource config (maxLines, basic auth, backend timeout, TLS, header/cookie forwarding, optional listener mTLS)
 - [x] Derived fields (regex extraction for trace linking)
@@ -30,7 +29,7 @@
 - [x] `| decolorize` proxy-side ANSI stripping
 - [x] `| ip("CIDR")` proxy-side IP range filtering
 - [x] `| line_format` full Go templates
-- [x] pprof, SIGHUP reload, rate limit headers
+- [x] pprof, SIGHUP reload, and rate-limit response headers
 - [x] Per-endpoint cache/backend metrics, CB state gauge
 - [x] Fuzz testing (1.2M+ executions, no panics)
 - [x] Nested binary metric queries (`sum(rate(...)) / sum(rate(...))`)
@@ -54,10 +53,10 @@
 - [x] Backslash-escaped quotes in stream selectors — findMatchingBrace handles `\"`
 - [x] Binary expression detection before metric query (fixes `rate(...) > 0` being misrouted)
 - [x] Peer cache design doc + headless service Helm template
-- [x] Performance: 39K req/s (buffer pools, sync.Pool, GOGC=200, connection pool)
+- [x] Performance-focused optimization pass (buffer pools, sync.Pool, connection-pool tuning, cache hot-path benchmarks)
 - [x] Complete Helm chart: 11 templates, GOMEMLIMIT auto-calc, HTTPRoute
-- [x] 542 tests, CI bench job, regression gates
-- [x] Repository coverage raised above 90% with additional runtime, middleware, cache, and proxy-path tests
+- [x] Broad test suite, CI bench job, and regression gates
+- [x] Coverage and quality-gate reinforcement for runtime, middleware, cache, and proxy-path tests
 - [x] Tier0 compatibility-edge cache with bounded memory budget, safe GET-only guardrails, and reload invalidation
 - [x] Fleet shadow-copy validation for 3-peer cache reuse plus Tier0/fleet micro-benchmarks
 

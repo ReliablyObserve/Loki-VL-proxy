@@ -71,3 +71,9 @@ flowchart TD
 ```
 
 For full details including request flow diagrams, TTL preservation, circuit breaker states, and performance characteristics, see [Fleet Cache Architecture](fleet-cache.md).
+
+Current implementation notes:
+
+- the current chart can wire peer discovery automatically through `peerCache.enabled=true`
+- larger `/_cache/get` responses can be `zstd`- or `gzip`-compressed between peers
+- `-peer-auth-token` can require a shared token on peer fetches when the fleet crosses a broader network boundary

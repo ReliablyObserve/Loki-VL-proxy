@@ -64,6 +64,7 @@ type proxyRuntimeConfig struct {
 	maxLines                           int
 	backendTimeout                     time.Duration
 	backendBasicAuth                   string
+	backendCompression                 string
 	backendTLSSkip                     bool
 	forwardHeaders                     string
 	forwardAuthorization               bool
@@ -207,7 +208,7 @@ type runtimeOptions struct {
 	proxyCfg              proxyRuntimeConfig
 	otlpCfg               otlpRuntimeConfig
 	maxBodyBytes          int64
-	enableGzip            bool
+	responseCompression   string
 	serverOpts            serverRuntimeOptions
 }
 
@@ -328,12 +329,14 @@ func run(
 	tlsRequireClientCert := fs.Bool("tls-require-client-cert", false, "Require and verify HTTPS client certificates")
 
 	// Response compression
-	enableGzip := fs.Bool("response-gzip", true, "Enable gzip response compression for clients that accept it")
+	enableGzip := fs.Bool("response-gzip", true, "Deprecated: enable compressed responses for clients that accept them; prefer -response-compression")
+	responseCompression := fs.String("response-compression", "", "Response compression codec: auto, gzip, zstd, none (default: auto)")
 
 	// Grafana datasource compatibility
 	maxLines := fs.Int("max-lines", 1000, "Default max lines per query")
 	backendTimeout := fs.Duration("backend-timeout", 120*time.Second, "Timeout for non-streaming requests to the VictoriaLogs backend")
 	backendBasicAuth := fs.String("backend-basic-auth", "", "Basic auth for VL backend (user:password)")
+	backendCompression := fs.String("backend-compression", "auto", "Backend HTTP compression preference: auto, gzip, zstd, none")
 	backendTLSSkip := fs.Bool("backend-tls-skip-verify", false, "Skip TLS verification for VL backend")
 	forwardHeaders := fs.String("forward-headers", "", "Comma-separated list of HTTP headers to forward to VL backend")
 	forwardAuthorization := fs.Bool("forward-authorization", false, "Forward Authorization header to VL backend (equivalent to including Authorization in -forward-headers)")
@@ -416,6 +419,15 @@ func run(
 		return err
 	}
 
+	resolvedResponseCompression, err := resolveResponseCompression(*responseCompression, *enableGzip)
+	if err != nil {
+		return err
+	}
+	resolvedBackendCompression, err := normalizeCompressionSetting(*backendCompression)
+	if err != nil {
+		return fmt.Errorf("invalid -backend-compression: %w", err)
+	}
+
 	envCfg := applyEnvOverrides(envConfig{
 		listenAddr:        *listenAddr,
 		backendURL:        *backendURL,
@@ -481,6 +493,7 @@ func run(
 			maxLines:                           *maxLines,
 			backendTimeout:                     *backendTimeout,
 			backendBasicAuth:                   *backendBasicAuth,
+			backendCompression:                 resolvedBackendCompression,
 			backendTLSSkip:                     *backendTLSSkip,
 			forwardHeaders:                     *forwardHeaders,
 			forwardAuthorization:               *forwardAuthorization,
@@ -561,8 +574,8 @@ func run(
 			serviceInstanceID:     envCfg.serviceInstanceID,
 			deploymentEnvironment: envCfg.deploymentEnv,
 		},
-		maxBodyBytes: *maxBodyBytes,
-		enableGzip:   *enableGzip,
+		maxBodyBytes:        *maxBodyBytes,
+		responseCompression: resolvedResponseCompression,
 		serverOpts: serverRuntimeOptions{
 			listenAddr:           envCfg.listenAddr,
 			readTimeout:          *readTimeout,
@@ -693,7 +706,7 @@ func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifie
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 	serverOpts := opts.serverOpts
-	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.enableGzip)
+	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.responseCompression)
 	srv, err := buildHTTPServer(serverOpts)
 	if err != nil {
 		stopOTLP()
@@ -767,12 +780,34 @@ func maxBodyHandler(maxBytes int64, next http.Handler) http.Handler {
 	})
 }
 
-func wrapHandler(next http.Handler, maxBodyBytes int64, enableGzip bool) http.Handler {
+func wrapHandler(next http.Handler, maxBodyBytes int64, responseCompression string) http.Handler {
 	handler := maxBodyHandler(maxBodyBytes, next)
-	if enableGzip {
-		handler = mw.GzipHandler(handler)
+	return mw.CompressionHandler(handler, responseCompression)
+}
+
+func resolveResponseCompression(explicit string, legacyEnabled bool) (string, error) {
+	if strings.TrimSpace(explicit) == "" {
+		if legacyEnabled {
+			return "auto", nil
+		}
+		return "none", nil
 	}
-	return handler
+	mode, err := normalizeCompressionSetting(explicit)
+	if err != nil {
+		return "", fmt.Errorf("invalid -response-compression: %w", err)
+	}
+	return mode, nil
+}
+
+func normalizeCompressionSetting(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return "auto", nil
+	case "none", "gzip", "zstd":
+		return strings.ToLower(strings.TrimSpace(mode)), nil
+	default:
+		return "", fmt.Errorf("%q (must be auto, gzip, zstd, or none)", mode)
+	}
 }
 
 func parseCSV(s string) []string {
@@ -1154,6 +1189,7 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		MaxLines:                           cfg.maxLines,
 		BackendTimeout:                     cfg.backendTimeout,
 		BackendBasicAuth:                   cfg.backendBasicAuth,
+		BackendCompression:                 cfg.backendCompression,
 		BackendTLSSkip:                     cfg.backendTLSSkip,
 		ForwardHeaders:                     parseForwardHeaders(cfg.forwardHeaders, cfg.forwardAuthorization),
 		ForwardCookies:                     parseCSV(cfg.forwardCookies),

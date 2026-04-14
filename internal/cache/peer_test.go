@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestHashRing_Consistent(t *testing.T) {
@@ -161,6 +164,40 @@ func TestPeerCache_ServeHTTP_HitCompressed(t *testing.T) {
 	}
 }
 
+func TestPeerCache_ServeHTTP_HitCompressedZstd(t *testing.T) {
+	localCache := New(60*time.Second, 1000)
+	defer localCache.Close()
+	payload := []byte(strings.Repeat("x", 1024))
+	localCache.Set("test-key", payload)
+
+	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost"})
+	defer pc.Close()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/_cache/get?key=test-key", nil)
+	r.Header.Set("Accept-Encoding", "zstd, gzip")
+	pc.ServeHTTP(w, r, localCache)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := w.Header().Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("expected zstd content encoding, got %q", got)
+	}
+	zr, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("create zstd reader: %v", err)
+	}
+	defer zr.Close()
+	decoded, err := zr.DecodeAll(w.Body.Bytes(), nil)
+	if err != nil {
+		t.Fatalf("decode zstd payload: %v", err)
+	}
+	if !bytes.Equal(decoded, payload) {
+		t.Fatalf("unexpected zstd payload, want len=%d got len=%d", len(payload), len(decoded))
+	}
+}
+
 func TestPeerCache_ServeHTTP_Miss(t *testing.T) {
 	localCache := New(60*time.Second, 1000)
 	defer localCache.Close()
@@ -246,6 +283,64 @@ func TestPeerCache_FetchFromPeer(t *testing.T) {
 		}
 	}
 	t.Log("no key mapped to peer — acceptable for small hash ring")
+}
+
+func TestPeerCache_Get_DecodesCompressedPeerPayload(t *testing.T) {
+	payload := []byte(strings.Repeat("peer-data", 128))
+	var badAcceptEncoding atomic.Value
+	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept-Encoding"); !strings.Contains(got, "zstd") {
+			badAcceptEncoding.Store(got)
+			http.Error(w, "unexpected accept-encoding", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("X-Cache-TTL-Ms", "60000")
+		w.Header().Set("Content-Encoding", "zstd")
+		zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
+		if err != nil {
+			t.Fatalf("create zstd writer: %v", err)
+		}
+		if _, err := zw.Write(payload); err != nil {
+			t.Fatalf("write zstd payload: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("close zstd writer: %v", err)
+		}
+	}))
+	defer peerServer.Close()
+
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:      "self:3100",
+		DiscoveryType: "static",
+		StaticPeers:   peerServer.Listener.Addr().String(),
+		Timeout:       2 * time.Second,
+	})
+	defer pc.Close()
+
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("compressed-key-%d", i)
+		pc.mu.RLock()
+		owner := pc.ring.get(key)
+		pc.mu.RUnlock()
+		if owner != peerServer.Listener.Addr().String() {
+			continue
+		}
+		value, ttl, found := pc.Get(key)
+		if !found {
+			t.Fatalf("expected peer hit for key %q", key)
+		}
+		if ttl <= 0 {
+			t.Fatalf("expected remaining ttl, got %s", ttl)
+		}
+		if !bytes.Equal(value, payload) {
+			t.Fatalf("unexpected decoded peer payload, want len=%d got len=%d", len(payload), len(value))
+		}
+		if got, _ := badAcceptEncoding.Load().(string); got != "" {
+			t.Fatalf("unexpected accept-encoding seen by peer server: %q", got)
+		}
+		return
+	}
+	t.Fatal("no key mapped to peer")
 }
 
 func TestPeerCache_ShadowCopy_ShortTTL(t *testing.T) {

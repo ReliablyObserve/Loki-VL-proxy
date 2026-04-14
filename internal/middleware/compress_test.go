@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestGzipHandler_CompressesWhenAccepted(t *testing.T) {
@@ -89,6 +91,55 @@ func TestGzipHandler_LargeResponse(t *testing.T) {
 	}
 }
 
+func TestCompressionHandler_AutoPrefersZstd(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.Repeat("hello", 64)))
+	})
+
+	handler := CompressionHandler(inner, "auto")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/test", nil)
+	r.Header.Set("Accept-Encoding", "gzip, zstd")
+
+	handler.ServeHTTP(w, r)
+
+	if got := w.Header().Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("expected zstd response, got %q", got)
+	}
+	zr, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("create zstd reader: %v", err)
+	}
+	defer zr.Close()
+	body, err := zr.DecodeAll(w.Body.Bytes(), nil)
+	if err != nil {
+		t.Fatalf("decode zstd body: %v", err)
+	}
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("unexpected decoded body %q", string(body))
+	}
+}
+
+func TestCompressionHandler_ZstdModeFallsBackToIdentityWhenUnsupported(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"success"}`))
+	})
+
+	handler := CompressionHandler(inner, "zstd")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/test", nil)
+	r.Header.Set("Accept-Encoding", "gzip")
+
+	handler.ServeHTTP(w, r)
+
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected identity response, got %q", got)
+	}
+	if w.Body.String() != `{"status":"success"}` {
+		t.Fatalf("unexpected body %q", w.Body.String())
+	}
+}
+
 func TestGzipHandler_FlushSupport(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("chunk1"))
@@ -158,7 +209,7 @@ func TestGzipResponseWriter_WriteHeaderDeletesContentLength(t *testing.T) {
 	gz := gzip.NewWriter(io.Discard)
 	defer gz.Close()
 
-	writer := &gzipResponseWriter{
+	writer := &compressedResponseWriter{
 		ResponseWriter: recorder,
 		writer:         gz,
 	}
@@ -181,7 +232,7 @@ func TestGzipResponseWriter_Hijack(t *testing.T) {
 
 	t.Run("supported", func(t *testing.T) {
 		recorder := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
-		writer := &gzipResponseWriter{
+		writer := &compressedResponseWriter{
 			ResponseWriter: recorder,
 			writer:         gz,
 		}
@@ -196,7 +247,7 @@ func TestGzipResponseWriter_Hijack(t *testing.T) {
 	})
 
 	t.Run("unsupported", func(t *testing.T) {
-		writer := &gzipResponseWriter{
+		writer := &compressedResponseWriter{
 			ResponseWriter: httptest.NewRecorder(),
 			writer:         gz,
 		}

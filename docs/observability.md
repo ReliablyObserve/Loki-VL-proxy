@@ -228,6 +228,70 @@ These are the metrics to use when you want to identify the users or tenants actu
 | `loki_vl_proxy_client_query_length_chars` | histogram | `system`, `direction`, `client`, `endpoint`, `route` | query size outliers by client |
 | `loki_vl_proxy_client_errors_total` | counter | `system`, `direction`, `endpoint`, `route`, `reason` | categorized downstream client errors |
 
+This is one of the main advantages of putting an explicit proxy between the
+Grafana Loki datasource and VictoriaLogs: the read path becomes attributable.
+
+Instead of only seeing aggregate datasource traffic, operators can see:
+
+- which Grafana user or trusted client identity is generating load
+- which tenant is hot
+- which route is expensive for that client or tenant
+- which client is producing the largest responses, longest queries, or most bad requests
+
+### Grafana Client Visibility, Offenders, and User Patterns
+
+When `-metrics.trust-proxy-headers=true` is enabled behind a trusted Grafana or
+auth proxy, the proxy can turn northbound identity into durable read-path
+signals without using raw datasource credentials as the end-user key.
+
+That gives you:
+
+- per-client request rate by route via `loki_vl_proxy_client_requests_total`
+- per-client latency by route via `loki_vl_proxy_client_request_duration_seconds`
+- per-client response-volume visibility via `loki_vl_proxy_client_response_bytes_total`
+- per-client query-size outlier visibility via `loki_vl_proxy_client_query_length_chars`
+- per-client bad-request and error clustering via `loki_vl_proxy_client_status_total` and `loki_vl_proxy_client_errors_total`
+- per-tenant volume and latency visibility via `loki_vl_proxy_tenant_*`
+
+At log level, the same request can also carry:
+
+- `enduser.id`
+- `enduser.name`
+- `enduser.source`
+- `auth.principal`
+- `auth.source`
+- `loki.tenant.id`
+- `http.route`
+
+That separation matters:
+
+- `enduser.*` answers "which Grafana user or trusted client triggered this?"
+- `auth.*` answers "which datasource or auth principal was used on the request path?"
+- `loki.tenant.id` answers "which tenant boundary did the request execute in?"
+
+This is what makes offender analysis practical on the read path instead of only
+looking at coarse IP-level traffic.
+
+### Northbound and Southbound Auth Boundaries
+
+The same proxy layer also improves trust separation between components.
+
+| Boundary | Main controls | Why it matters operationally |
+|---|---|---|
+| Grafana or client -> proxy | `-auth.enabled`, `-tls-client-ca-file`, `-tls-require-client-cert`, trusted user headers with `-metrics.trust-proxy-headers` | Lets the proxy require tenant context, optionally require client certs, and attribute read traffic to the actual Grafana user or trusted upstream identity. |
+| Proxy -> VictoriaLogs | `-backend-basic-auth`, `-forward-authorization`, `-forward-headers` | Lets the lower layer keep its own auth boundary while the proxy preserves full Loki-client compatibility on the northbound side. |
+| Proxy -> peer cache | `-peer-auth-token` | Prevents peer-cache reuse from becoming an unauthenticated east-west path when the fleet spans a broader network boundary. |
+| Operator -> admin/debug endpoints | `-server.admin-auth-token` | Protects admin and troubleshooting surfaces without weakening the main read path. |
+
+When trusted proxy headers are enabled, the proxy also forwards derived context
+headers to VictoriaLogs:
+
+- `X-Loki-VL-Client-ID`
+- `X-Loki-VL-Client-Source`
+
+That gives the lower layer better context about who is really behind the read
+traffic while still preserving datasource compatibility at the Grafana edge.
+
 ### Runtime and Process Metrics
 
 The proxy also exports a lightweight built-in set of runtime and process/container health metrics.

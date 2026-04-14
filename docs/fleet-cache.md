@@ -179,6 +179,13 @@ stateDiagram-v2
   -peer-self=10.0.0.1:3100 \
   -peer-discovery=static \
   -peer-static=10.0.0.1:3100,10.0.0.2:3100,10.0.0.3:3100
+
+# Shared-token protected peer cache
+./loki-vl-proxy \
+  -peer-self=10.0.0.1:3100 \
+  -peer-discovery=static \
+  -peer-static=10.0.0.1:3100,10.0.0.2:3100,10.0.0.3:3100 \
+  -peer-auth-token=shared-secret
 ```
 
 ### Helm Values
@@ -189,6 +196,8 @@ extraArgs:
   peer-discovery: "dns"
   peer-dns: "loki-vl-proxy-headless.default.svc.cluster.local"
 ```
+
+When you use the Helm chart, prefer `peerCache.enabled=true` and let the chart wire the discovery flags. Use `extraArgs.peer-auth-token` only when you need a shared secret for peer fetches.
 
 ## Performance Characteristics
 
@@ -203,6 +212,11 @@ extraArgs:
 | Shadow copy overhead | ~0 (uses owner's remaining TTL) |
 | Hash ring lookup | O(log N) |
 | Discovery refresh | Every 15s (DNS only) |
+
+Peer fetch behavior details:
+
+- larger `/_cache/get` payloads are compressed when peers request `Accept-Encoding`, preferring `zstd` and falling back to `gzip`
+- when `-peer-auth-token` is set, peer fetches must carry the shared token or the endpoint fails closed
 
 ## Fleet Metrics
 

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 var lookupHost = net.LookupHost
@@ -191,6 +194,7 @@ func (pc *PeerCache) Get(key string) ([]byte, time.Duration, bool) {
 		pc.PeerErrors.Add(1)
 		return nil, 0, false
 	}
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
 
 	resp, err := pc.client.Do(req)
 	if err != nil {
@@ -213,6 +217,12 @@ func (pc *PeerCache) Get(key string) ([]byte, time.Duration, bool) {
 	}
 
 	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		pc.recordPeerFailure(owner)
+		pc.PeerErrors.Add(1)
+		return nil, 0, false
+	}
+	body, err = decodePeerResponseBody(resp.Header.Get("Content-Encoding"), body)
 	if err != nil {
 		pc.recordPeerFailure(owner)
 		pc.PeerErrors.Add(1)
@@ -280,7 +290,24 @@ func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCach
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Cache-TTL-Ms", fmt.Sprintf("%d", remaining.Milliseconds()))
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && len(value) >= 256 {
+	if len(value) >= 256 && acceptsPeerEncoding(r.Header.Get("Accept-Encoding"), "zstd") {
+		w.Header().Set("Content-Encoding", "zstd")
+		zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
+		if err != nil {
+			http.Error(w, "compression init error", http.StatusInternalServerError)
+			return
+		}
+		if _, err := zw.Write(value); err != nil {
+			zw.Close()
+			http.Error(w, "compression write error", http.StatusInternalServerError)
+			return
+		}
+		if err := zw.Close(); err != nil {
+			http.Error(w, "compression close error", http.StatusInternalServerError)
+		}
+		return
+	}
+	if len(value) >= 256 && acceptsPeerEncoding(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		zw, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
 		if err != nil {
@@ -296,6 +323,39 @@ func (pc *PeerCache) ServeHTTP(w http.ResponseWriter, r *http.Request, localCach
 		return
 	}
 	w.Write(value)
+}
+
+func acceptsPeerEncoding(header, encoding string) bool {
+	for _, part := range strings.Split(strings.ToLower(header), ",") {
+		token := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if token == encoding || token == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func decodePeerResponseBody(contentEncoding string, body []byte) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(contentEncoding)) {
+	case "", "identity":
+		return body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		return io.ReadAll(zr)
+	case "zstd":
+		zr, err := zstd.NewReader(nil)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		return zr.DecodeAll(body, nil)
+	default:
+		return body, nil
+	}
 }
 
 // PeerCount returns the number of active peers (excluding self).

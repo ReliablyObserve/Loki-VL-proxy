@@ -1,0 +1,317 @@
+---
+sidebar_position: 17
+description: Illustrative AWS EC2 cost model for Loki versus VictoriaLogs plus Loki-VL-proxy across three user and ingestion scenarios, with explicit assumptions and formulas.
+---
+
+# Cost Model
+
+This page is an **illustrative** AWS cost worksheet, not a product benchmark.
+
+It exists to make the cost discussion concrete for three paired scenarios:
+
+- `100` active users with `100k` log lines per second
+- `1,000` active users with `500k` log lines per second
+- `10,000` active users with `1M` log lines per second
+
+The numbers below are useful because they are explicit. They are also limited
+because they depend on assumptions. Use them as a planning aid, not as a
+guaranteed savings promise.
+
+## Assumptions
+
+### Traffic and retention
+
+- `7d` retention
+- average raw log line size: `250 B`
+- active read demand: `0.1` Grafana or API read requests per second per active
+  user
+
+That gives these paired scenarios:
+
+| Scenario | Active users | Read demand | Log ingest |
+|---|---:|---:|---:|
+| Small | `100` | `10 rps` | `100k lines/s` |
+| Medium | `1,000` | `100 rps` | `500k lines/s` |
+| Large | `10,000` | `1,000 rps` | `1M lines/s` |
+
+### AWS price assumptions
+
+Illustrative `us-east-1` on-demand list prices:
+
+| Resource | Assumed monthly price |
+|---|---:|
+| `c7i.large` | `$62.05` |
+| `c7i.xlarge` | `$124.10` |
+| `c7i.2xlarge` | `$248.20` |
+| `c7i.4xlarge` | `$496.40` |
+| `gp3` EBS | `$0.08 / GB-month` |
+
+### Storage assumptions
+
+The storage model uses two sourced inputs:
+
+- VictoriaLogs docs say logs usually compress by `10x` or more.
+- TrueFoundry reported VictoriaLogs storage at about `37%` less than Loki on
+  its side-by-side workload.
+
+So this worksheet uses:
+
+- `VictoriaLogs stored bytes = raw retained bytes / 10`
+- `Loki stored bytes = VictoriaLogs stored bytes / 0.63`
+
+This is intentionally conservative and transparent. Change the factors if your
+environment has better measurements.
+
+### Real-life VictoriaLogs compression note
+
+Some operators see much higher VictoriaLogs compression ratios in practice,
+including `50-60x` on the VictoriaLogs compression-ratio metric.
+
+That number is useful, but it is **not** identical to full billed retained
+storage:
+
+- it is a ratio between original data size and compressed data blocks on disk
+- it explicitly excludes `indexdb` size
+- it moves over time as background merges and retention policies reshape the
+  stored dataset
+
+For that reason, the main table below keeps the more conservative `10x`
+VictoriaLogs storage factor for budget planning, and then shows the `50-60x`
+data-only view separately as an optimistic lower-bound.
+
+### Compute-topology assumptions
+
+The Loki side now uses Grafana's own published distributed sizing guide as the
+starting point.
+
+Grafana's Loki sizing docs publish these base cluster requests by ingest tier:
+
+- `<3 TB/day`: `38 vCPU`, `59 Gi`
+- `3-30 TB/day`: `431 vCPU`, `857 Gi`
+- `~30 TB/day`: `1221 vCPU`, `2235 Gi`
+
+That is a **base request floor**, not a hard cap. The same page also warns that
+unoptimized queries can require `10x` the suggested querier resources.
+
+This worksheet converts those published Loki CPU/memory requests into the
+closest simple `c7i.4xlarge` node floor (`16 vCPU`, `32 Gi` each), then keeps a
+separate conservative reference pack for `VictoriaLogs + Loki-VL-proxy`.
+
+Reference compute packs used in the table below:
+
+| Scenario | Raw ingest/day | Loki docs tier | Loki published base request | Loki EC2 compute floor | VictoriaLogs + proxy reference compute |
+|---|---:|---|---|---|---|
+| Small | `2.16 TB/day` | `<3 TB/day` | `38 vCPU / 59 Gi` | `3 x c7i.4xlarge` | `2 x c7i.large` proxy + `2 x c7i.large` backend |
+| Medium | `10.8 TB/day` | `3-30 TB/day` | `431 vCPU / 857 Gi` | `27 x c7i.4xlarge` | `2 x c7i.large` proxy + `3 x c7i.xlarge` backend |
+| Large | `21.6 TB/day` | `3-30 TB/day` | `431 vCPU / 857 Gi` | `27 x c7i.4xlarge` | `3 x c7i.large` proxy + `4 x c7i.2xlarge` backend |
+
+There is no equally detailed official VictoriaLogs ingest-tier sizing matrix
+for a direct like-for-like conversion here. The `VictoriaLogs + proxy` side
+therefore remains a conservative project-side reference pack rather than a
+vendor-published floor.
+
+## Formulas
+
+### Raw retained data
+
+```text
+raw_bytes_per_second = lines_per_second * 250
+raw_gb_per_day = raw_bytes_per_second * 86400 / 1e9
+raw_gb_for_7_days = raw_gb_per_day * 7
+```
+
+### Stored data
+
+```text
+victorialogs_gb = raw_gb_for_7_days / 10
+loki_gb = victorialogs_gb / 0.63
+```
+
+### Monthly total
+
+```text
+monthly_total = compute_monthly + storage_gb * 0.08
+```
+
+## Storage Model Output
+
+| Scenario | Raw 7d retained data | VictoriaLogs stored data | Loki stored data |
+|---|---:|---:|---:|
+| Small | `15,120 GB` | `1,512 GB` | `2,400 GB` |
+| Medium | `75,600 GB` | `7,560 GB` | `12,000 GB` |
+| Large | `151,200 GB` | `15,120 GB` | `24,000 GB` |
+
+## VictoriaLogs Data-Only Compression View
+
+This table uses the real-life `50-60x` VictoriaLogs compression ratio **only**
+for the compressed data blocks, excluding `indexdb`.
+
+| Scenario | Raw 7d retained data | VictoriaLogs data blocks at `50x` | VictoriaLogs data blocks at `60x` | Data-block storage cost range |
+|---|---:|---:|---:|---:|
+| Small | `15,120 GB` | `302.4 GB` | `252.0 GB` | `$24.19 -> $20.16` |
+| Medium | `75,600 GB` | `1,512 GB` | `1,260 GB` | `$120.96 -> $100.80` |
+| Large | `151,200 GB` | `3,024 GB` | `2,520 GB` | `$241.92 -> $201.60` |
+
+Use that range as:
+
+- an optimistic real-life storage floor for VictoriaLogs data blocks
+- a sanity check when your actual retained-disk bill is much higher or lower
+
+Do **not** treat it as a full retained-storage number until you add:
+
+- `indexdb`
+- filesystem overhead
+- snapshots and backups
+- retention-window skew
+- temporary variance during background merges
+
+## Monthly Cost Scenarios
+
+| Scenario | Loki compute | Loki storage | Loki total | Proxy compute | VictoriaLogs compute | VictoriaLogs storage | Proxy + VL total | Monthly delta | Savings |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Small | `$1,489.20` | `$192.00` | `$1,681.20` | `$124.10` | `$124.10` | `$120.96` | `$369.16` | `$1,312.04` | `78.0%` |
+| Medium | `$13,402.80` | `$960.00` | `$14,362.80` | `$124.10` | `$372.30` | `$604.80` | `$1,101.20` | `$13,261.60` | `92.3%` |
+| Large | `$13,402.80` | `$1,920.00` | `$15,322.80` | `$186.15` | `$992.80` | `$1,209.60` | `$2,388.55` | `$12,934.25` | `84.4%` |
+
+## Loki Sizing Guide Converted To EC2 Cost
+
+This is the raw conversion of Grafana's published Loki tier requests into a
+simple `c7i.4xlarge` floor before storage and before any query spikes.
+
+| Loki docs ingest tier | Published base request | `c7i.4xlarge` nodes required | Monthly compute floor |
+|---|---:|---:|---:|
+| `<3 TB/day` | `38 vCPU / 59 Gi` | `3` | `$1,489.20` |
+| `3-30 TB/day` | `431 vCPU / 857 Gi` | `27` | `$13,402.80` |
+| `~30 TB/day` | `1221 vCPU / 2235 Gi` | `77` | `$38,222.80` |
+
+Those numbers are important because they come from Loki's own distributed
+throughput guidance, not from a marketing claim made by this project.
+
+## Compression Between Components
+
+Compression affects both the retained-storage bill and the network bill, but
+they are different layers:
+
+- Loki docs describe compressed chunk blocks and compressed structured metadata
+  inside chunk storage
+- VictoriaLogs docs describe `10x` or better usual log compression and expose a
+  data-block compression ratio that some operators observe at `50-60x`,
+  excluding `indexdb`
+- Loki-VL-proxy adds compressed transport on the read path it controls:
+  `zstd`/`gzip` client responses, `zstd`/`gzip` peer-cache transfers, gzip
+  disk-cache values, and negotiated upstream compression with safe decode
+
+That means:
+
+- backend storage savings are mostly a VictoriaLogs-versus-Loki question
+- repeated-read network savings are partly a proxy question, because cache hits
+  and compressed peer/client hops reduce bytes moved for the same user action
+
+## Why VictoriaLogs Compression Ratios And Loki Customer Reports Differ
+
+When a VictoriaLogs operator sees `50-60x`, that is usually a **data-block**
+number. When a Loki customer publishes a side-by-side retained-storage delta,
+that is a **whole-system footprint** number.
+
+Example:
+
+- VictoriaLogs data blocks might compress `50-60x`
+- the same VictoriaLogs deployment can still have a higher total retained
+  footprint once `indexdb` and filesystem overhead are included
+- a Loki side-by-side report such as TrueFoundry's `≈40%` storage reduction is
+  comparing full retained bytes across two different systems, not just one
+  internal compression metric
+
+Use the `50-60x` number as a lower-bound signal for VictoriaLogs data blocks.
+Use cross-system retained-byte comparisons to talk about the actual bill.
+
+## What These Numbers Mean
+
+### Why the delta grows with scale
+
+The model assumes three things compound together as ingest grows:
+
+- VictoriaLogs stores less data than Loki on the same retained raw workload
+- VictoriaLogs backend compute pack stays smaller than Loki's reference pack
+- proxy cache layers remove repeated read work instead of sending every repeated
+  dashboard refresh upstream
+
+That is why the gap widens in the medium and large scenarios.
+
+If your actual VictoriaLogs dataset stays closer to the observed `50-60x`
+data-only compression range, the storage part of the `Proxy + VL` column can
+drop further than the conservative table shows. The compute and proxy sections
+of the model stay the same.
+
+### Why the proxy does not erase the savings
+
+The proxy is not free, but it is intentionally small.
+
+The reference proxy pool in this worksheet costs:
+
+- `$124.10 / month` in the small and medium scenarios
+- `$186.15 / month` in the large scenario
+
+That extra layer is still substantially cheaper than forcing the backend to do
+the same repeated read work on every refresh.
+
+## What This Model Does Not Include
+
+The table above does **not** include:
+
+- cross-AZ traffic
+- load balancers
+- object storage requests
+- backup systems
+- snapshots
+- EKS control-plane cost
+- operational labor
+- alerting, dashboards, or query burst headroom beyond the reference packs
+
+If you need a finance-grade model, this page is the starting point, not the
+final calculator.
+
+## How To Make The Model More Honest For Your Environment
+
+Replace the assumptions with measured values from your own cluster:
+
+1. Measure actual average raw bytes per log line.
+2. Measure real active-user read request rates from Grafana and API clients.
+3. Measure full retained Loki bytes for the same retention window, including
+   chunk and index/object-store footprint.
+4. Measure VictoriaLogs data-block bytes, `indexdb` bytes, and total retained
+   bytes separately.
+5. Replace the `10x` VictoriaLogs storage factor with your real total retained
+   compression result, and keep the data-block ratio as a separate note.
+6. Replace the `37%` storage delta with your own side-by-side retained bytes.
+7. Measure actual bytes moved between Grafana, proxy, peers, and VictoriaLogs
+   with compression enabled.
+8. Replace the reference compute packs with observed CPU and memory saturation
+   under load.
+
+## Signals To Collect Before Claiming Savings
+
+- `loki_vl_proxy_requests_total`
+- `loki_vl_proxy_request_duration_seconds`
+- `loki_vl_proxy_backend_duration_seconds`
+- `loki_vl_proxy_cache_hits_by_endpoint`
+- `loki_vl_proxy_cache_misses_by_endpoint`
+- `loki_vl_proxy_process_cpu_usage_ratio`
+- `loki_vl_proxy_process_resident_memory_bytes`
+- `loki_vl_proxy_process_network_receive_bytes_total`
+- `loki_vl_proxy_process_network_transmit_bytes_total`
+- Loki retained chunk/index or object-store bytes for the same retention window
+- VictoriaLogs data-block bytes, `indexdb` bytes, and total retained bytes
+- VictoriaLogs compression-ratio metric and real disk bytes used at the same time
+- EC2 node counts and saturation for queriers, ingesters, proxy pods, and backend pods
+
+Pair those with storage consumption and VictoriaLogs runtime metrics before
+turning the worksheet into an internal budget claim.
+
+## Related Docs
+
+- [Comparison Matrix](cost-and-comparison.md)
+- [Performance](performance.md)
+- [Benchmarks](benchmarks.md)
+- [Fleet Cache](fleet-cache.md)
+- [Observability](observability.md)

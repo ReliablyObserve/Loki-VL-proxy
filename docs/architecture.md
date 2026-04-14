@@ -76,13 +76,13 @@ flowchart TD
 | Layer | Purpose | Default Config |
 |---|---|---|
 | Tenant validation | Enforce Loki-style tenant header policy and mapping rules before backend access | Enabled on tenant-scoped routes |
-| Per-client rate limiter | Prevent individual client abuse | 50 req/s, burst 100 |
-| Global concurrent limit | Cap total backend load | 100 concurrent queries |
+| Per-client rate limiter | Prevent individual client abuse | Built-in default `50 req/s`, burst `100` |
+| Global concurrent limit | Cap total backend load | Built-in default `100` concurrent backend queries |
 | Request coalescing | Deduplicate identical queries | Automatic (singleflight) |
 | Query normalization | Improve cache hit rate | Sort matchers, collapse whitespace |
 | Tier0 response cache | Short-circuit repeated safe GET reads after tenant validation | Enabled, 10% of L1 memory budget, safe GET read endpoints only |
 | Tiered cache | Reduce backend calls with local, disk, and peer reuse | L1 memory, optional L2 disk, optional L3 peer cache |
-| Circuit breaker | Protect VL from cascading failure | Opens after 5 failures, 10s backoff |
+| Circuit breaker | Protect VL from cascading failure | Built-in default: opens after `5` failures, `10s` backoff |
 | Tail origin allowlist | Reject browser websocket origins unless explicitly trusted | Deny browser origins by default |
 
 ### How Coalescing Works
@@ -232,12 +232,12 @@ HTTP handlers for Loki-compatible read endpoints. The main execution paths are:
 - rules and alerts read-through compatibility against a configured backend such as `vmalert`
 
 ### Middleware (`internal/middleware/`)
-- **Rate limiter**: per-client token bucket + global semaphore
+- **Rate limiter**: per-client token bucket + global semaphore (current defaults are built in, not user-exposed flags)
 - **Coalescer**: singleflight-based request deduplication
-- **Circuit breaker**: 3-state (closed/open/half-open) with configurable thresholds
+- **Circuit breaker**: 3-state (closed/open/half-open) with current built-in defaults
 
 ### Cache (`internal/cache/`)
-Three-tier: L1 in-memory (sync.Map + atomic counters), optional L2 on-disk (bbolt with gzip compression), and optional L3 peer cache (consistent hash ring). Disk encryption is delegated to cloud provider (EBS, PD, etc.).
+Three-tier: L1 in-memory (sync.Map + atomic counters), optional L2 on-disk (bbolt with gzip compression), and optional L3 peer cache (consistent hash ring, `zstd`/`gzip` on larger peer transfers). Disk encryption is delegated to cloud provider (EBS, PD, etc.).
 
 ### Metrics (`internal/metrics/`)
-Prometheus text exposition at `/metrics`. Per-endpoint request counts, per-tenant breakdowns, cache stats, circuit breaker state gauge.
+Prometheus text exposition at `/metrics` plus OTLP push. Route-aware downstream and upstream request metrics, tenant/client breakdowns, cache and windowing metrics, peer-cache state, circuit-breaker state, and prefixed process/runtime health.

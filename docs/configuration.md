@@ -257,6 +257,7 @@ Tier0 is a separate in-memory cache instance that reuses the same cache implemen
 | `-disk-cache-compress` | — | `true` | Gzip compression for disk cache |
 | `-disk-cache-flush-size` | — | `100` | Flush write buffer after N entries |
 | `-disk-cache-flush-interval` | — | `5s` | Write buffer flush interval |
+| `-disk-cache-min-ttl` | — | `30s` | Minimum TTL required before an entry is eligible for L2 disk-cache writes |
 | `-disk-cache-max-bytes` | — | `0` | Maximum on-disk L2 cache size in bytes (`0` = unlimited) |
 
 ## Query Range Window Cache
@@ -280,6 +281,14 @@ These flags control Loki-compatible `query_range` split/merge execution with per
 | `-query-range-history-cache-ttl` | — | `24h` | Cache TTL for historical windows older than `now-freshness` |
 | `-query-range-prefilter-index-stats` | — | `true` | Use `/select/logsql/hits` preflight to skip empty split windows before expensive log fanout |
 | `-query-range-prefilter-min-windows` | — | `8` | Minimum split-window count required before prefilter is enabled |
+| `-query-range-stream-aware-batching` | — | `true` | Reduce parallelism for windows estimated as expensive from prefilter hits |
+| `-query-range-expensive-hit-threshold` | — | `2000` | Prefilter hit threshold above which a window is treated as expensive |
+| `-query-range-expensive-max-parallel` | — | `1` | Maximum parallel fetches for expensive windows |
+| `-query-range-align-windows` | — | `true` | Align split windows to fixed interval boundaries for overlap-cache reuse |
+| `-query-range-window-timeout` | — | `20s` | Per-window backend timeout budget (`0` disables) |
+| `-query-range-partial-responses` | — | `false` | Allow partial `query_range` responses on retryable backend failures |
+| `-query-range-background-warm` | — | `true` | Continue warming failed windows in background after a partial response |
+| `-query-range-background-warm-max-windows` | — | `24` | Cap background warm fanout after a partial response |
 
 ### Loki-Aligned Defaults
 
@@ -344,6 +353,9 @@ The proxy keeps faster-changing paths conservative and slower-changing metadata 
 | Flag | Env | Default | Description |
 |---|---|---|---|
 | `-tenant-map` | `TENANT_MAP` | — | JSON string→int tenant mapping |
+| `-tenant-limits-allow-publish` | `TENANT_LIMITS_ALLOW_PUBLISH` | built-in allowlist | Comma-separated limit fields exposed on `/config/tenant/v1/limits` and `/loki/api/v1/drilldown-limits` |
+| `-tenant-default-limits` | `TENANT_DEFAULT_LIMITS` | — | JSON map of default published-limit overrides |
+| `-tenant-limits` | `TENANT_LIMITS` | — | JSON map of per-tenant published-limit overrides keyed by `X-Scope-OrgID` |
 | `-auth.enabled` | — | `false` | Require `X-Scope-OrgID` on query requests |
 | `-tenant.allow-global` | — | `false` | Allow `X-Scope-OrgID: *` to bypass tenant scoping and use the backend default tenant even when a tenant map is configured |
 
@@ -438,6 +450,25 @@ Tenant mappings and field mappings can be reloaded without restart via SIGHUP:
 kill -HUP $(pidof loki-vl-proxy)
 ```
 
+### Published Tenant Limits Compatibility Surface
+
+The proxy also exposes tenant-limit compatibility endpoints for Grafana and Logs Drilldown bootstrap:
+
+- `GET /config/tenant/v1/limits` returns YAML
+- `GET /loki/api/v1/drilldown-limits` returns JSON
+
+The base payload is generated in-proxy and then filtered/overridden by:
+
+- `-tenant-limits-allow-publish`
+- `-tenant-default-limits`
+- `-tenant-limits`
+
+Operational notes:
+
+- multi-tenant `X-Scope-OrgID: a|b` is rejected on `/config/tenant/v1/limits`
+- `X-Scope-OrgID` omitted on these endpoints uses the default published limits surface
+- these flags only shape the published compatibility payload; they do not enforce backend quotas
+
 ## OTLP Telemetry
 
 | Flag | Env | Default | Description |
@@ -470,17 +501,39 @@ kill -HUP $(pidof loki-vl-proxy)
 | `-max-lines` | — | `1000` | Default max lines per query |
 | `-backend-timeout` | — | `120s` | Timeout for non-streaming VL backend requests |
 | `-stream-response` | — | `false` | Stream via chunked transfer |
-| `-response-gzip` | — | `true` | Compress responses |
+| `-response-compression` | — | `auto` | Response compression codec: `auto`, `gzip`, `zstd`, `none` |
+| `-response-gzip` | — | `true` | Deprecated compatibility switch; `false` disables response compression when `-response-compression` is unset |
 | `-derived-fields` | — | — | JSON derived fields for trace linking |
 | `-forward-headers` | — | — | HTTP headers to forward to VL |
 | `-forward-authorization` | — | `false` | Forward client `Authorization` header to VL backend (adds `Authorization` to forwarded headers list) |
 | `-forward-cookies` | — | — | Cookie names to forward to VL |
 | `-backend-basic-auth` | — | — | `user:password` for VL basic auth |
+| `-backend-compression` | — | `auto` | Upstream compression preference: `auto`, `gzip`, `zstd`, `none` |
 | `-backend-tls-skip-verify` | — | `false` | Skip TLS on VL connection |
 | `-tail.allowed-origins` | — | — | Comma-separated WebSocket Origin allowlist for `/loki/api/v1/tail` |
 | `-tail.mode` | — | `auto` | `auto`, `native`, or `synthetic` for `/tail` streaming mode |
 
 `-tail.mode=auto` prefers native backend tailing and falls back to synthetic polling when native streaming is unavailable. `native` disables the fallback, and `synthetic` forces the polling bridge even when the backend can stream natively.
+
+Compression notes:
+
+- `-response-compression=auto` prefers `zstd` for clients that advertise it and falls back to `gzip`.
+- peer-cache `/_cache/get` fetches follow the same preference order: `zstd`, then `gzip`, then identity.
+- `-backend-compression=auto` advertises `zstd, gzip` upstream and the proxy safely decodes either on the way back.
+- current VictoriaLogs docs describe HTTP response compression in general terms, not a guaranteed `zstd` select-query path, so in practice many deployments will still observe `gzip` or identity from stock VictoriaLogs today.
+- Grafana `12.4.2` datasource proxy requests advertised `Accept-Encoding: deflate, gzip`, not `zstd`, in local verification, so `auto` will not magically turn standard Grafana datasource traffic into `zstd` today.
+
+## Built-In Protection Defaults
+
+The current CLI does not expose direct tuning flags for the in-proxy rate limiter, global concurrent-query guard, or backend circuit breaker. The current built-in defaults in the code are:
+
+- per-client rate limit: `50 req/s`
+- per-client burst: `100`
+- global concurrent backend queries: `100`
+- circuit breaker open after `5` failures
+- circuit breaker open duration: `10s`
+
+Treat these as current implementation defaults, not stable configuration API. If you need different behavior today, shape traffic at Grafana, ingress, or an outer proxy layer.
 
 ## Observability and Admin Surfaces
 
@@ -493,6 +546,22 @@ kill -HUP $(pidof loki-vl-proxy)
 | `-metrics.max-tenants` | — | `256` | Max unique tenant labels retained in `/metrics` before using `__overflow__` |
 | `-metrics.max-clients` | — | `256` | Max unique client labels retained in `/metrics` before using `__overflow__` |
 | `-metrics.trust-proxy-headers` | — | `false` | Trust user/proxy headers (`X-Grafana-User`, `X-Forwarded-User`, `X-Webauth-User`, `X-Auth-Request-User`, `X-Forwarded-*`) for client metrics/log attribution and backend context forwarding |
+
+## Peer Cache
+
+| Flag | Env | Default | Description |
+|---|---|---|---|
+| `-peer-self` | — | — | This instance address used for peer-cache ownership and fetches |
+| `-peer-discovery` | — | — | Peer discovery mode: `dns` or `static` |
+| `-peer-dns` | — | — | Headless service DNS name used when `-peer-discovery=dns` |
+| `-peer-static` | — | — | Comma-separated peer list used when `-peer-discovery=static` |
+| `-peer-auth-token` | — | — | Shared token required on `/_cache/get` peer-cache requests when set |
+
+Peer-cache notes:
+
+- the Helm chart manages `-peer-self`, `-peer-discovery`, and `-peer-dns` automatically when `peerCache.enabled=true`
+- peer-cache fetches preserve owner TTL and can compress larger `/_cache/get` responses with `zstd` or `gzip`
+- when `-peer-auth-token` is set, all peers must share the same token or peer-cache reuse will fail closed
 
 ## Grafana Datasource Mapping
 

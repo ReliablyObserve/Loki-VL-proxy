@@ -13,9 +13,30 @@ The proxy's HTTP transport is tuned for high-concurrency single-backend proxying
 | `MaxConnsPerHost` | 0 (unlimited) | No artificial cap on concurrent VL connections |
 | `IdleConnTimeout` | 90s | Reuse warm connections |
 | `ResponseHeaderTimeout` | 120s | Allow slow VL queries to complete |
-| `DisableCompression` | false | Accept gzip from VL if available |
+| `DisableCompression` | false | Allow negotiated upstream compression |
 
 Go's default `MaxIdleConnsPerHost=2` causes ephemeral port exhaustion at >50 concurrent requests. Our tuning handles 200+ concurrent with 0 errors.
+
+### Compression Path
+
+The proxy now uses compression on multiple read-path hops:
+
+| Hop | Current behavior |
+|---|---|
+| Client -> proxy response | `-response-compression=auto` prefers `zstd`, then `gzip`, then identity |
+| Proxy -> peer-cache owner | `/_cache/get` prefers `zstd`, then `gzip`, then identity for larger payloads |
+| Proxy -> VictoriaLogs | `-backend-compression=auto` advertises `zstd, gzip`; the proxy decodes either safely before translation or passthrough |
+| Disk cache | gzip-compressed value storage |
+| OTLP push | `none`, `gzip`, or `zstd` |
+
+Important: current VictoriaLogs docs clearly describe HTTP response compression, but not a guaranteed `zstd` query-response contract on the normal select path. The proxy can accept `zstd` from upstream when the backend provides it, but stock VictoriaLogs deployments may still return `gzip` or identity today.
+
+Verification note: against Grafana `12.4.2`, the datasource proxy path
+advertised `Accept-Encoding: deflate, gzip`, not `zstd`, in local
+verification. That means `-response-compression=auto` is immediately useful
+for direct clients and peer-cache hops, but standard Grafana datasource
+traffic will only see `zstd` if you force it explicitly or Grafana adds
+`zstd` negotiation in a future release.
 
 ### NDJSON Parsing Optimization
 

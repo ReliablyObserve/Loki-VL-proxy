@@ -7,11 +7,11 @@
 
 1. `sum(rate(loki_vl_proxy_client_errors_total{reason="rate_limited"}[5m])) by (client, endpoint)`
 2. Check per-client request volume and retry behavior.
-3. Validate configured `rate-per-second` and `rate-burst` values.
+3. Compare incident traffic with the current built-in limiter defaults (`50 req/s` per client, burst `100`).
 
 ## Mitigation
 
-- Tune rate limits to expected client traffic profile.
+- Shape traffic at Grafana, ingress, or an outer proxy layer if the built-in limiter is too strict for the workload.
 - Add client-side backoff/jitter and reduce retries.
 - Isolate abusive client traffic if needed.
 
