@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.20] - 2026-04-14
+
 ### Features
 
 - add `zstd`-capable read-path compression support for client responses and peer-cache transfers, plus negotiated upstream `zstd`/`gzip` decoding for backend responses when the upstream provides compressed payloads
