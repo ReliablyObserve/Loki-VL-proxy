@@ -410,7 +410,9 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
             <p>
               This uses simple `c7i.4xlarge` on-demand packing in `us-east-1` to
               turn Grafana&apos;s published CPU and memory requests into an
-              operator-readable monthly floor.
+              operator-readable monthly floor. These AWS rows are pure
+              calculations to put `$$` around the comparison, not observed cloud
+              bills.
             </p>
           </div>
           <div className={styles.card}>
@@ -669,7 +671,9 @@ export default function VictoriaLogsVsLokiCostAndPerformance(): ReactNode {
               crossed once because EC2 pricing charges `$0.01/GB` in and
               `$0.01/GB` out across Availability Zones in the same Region. For a
               3-AZ Loki cluster with replication factor `3`, the simple write
-              floor is one local replica plus two remote replicas.
+              floor is one local replica plus two remote replicas. These
+              network-dollar rows are also worksheet calculations, not observed
+              AWS billing lines.
             </p>
           </div>
           <div className={styles.card}>

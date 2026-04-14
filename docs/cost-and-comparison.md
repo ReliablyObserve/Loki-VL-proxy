@@ -137,7 +137,9 @@ cost discussion before:
 
 This project's [Cost Model](cost-model.md) converts those published Loki tiers
 into simple on-demand EC2 floors so the comparison is not just a qualitative
-claim about "lighter architecture".
+claim about "lighter architecture". Those AWS rows are calculation scaffolding
+to show explicit dollar figures, not observed billing from a production cloud
+account.
 
 ## What Loki-VL-proxy Adds To The Read-Path Story
 

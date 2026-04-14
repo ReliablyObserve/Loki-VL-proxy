@@ -6,6 +6,8 @@ description: Illustrative AWS EC2 cost model for Loki versus VictoriaLogs plus L
 # Cost Model
 
 This page is an **illustrative** AWS cost worksheet, not a product benchmark.
+The AWS numbers are pure calculations used to express the comparison in `$$`,
+not observed cloud bills.
 
 It exists to make the cost discussion concrete for three paired scenarios:
 
@@ -36,7 +38,8 @@ That gives these paired scenarios:
 
 ### AWS price assumptions
 
-Illustrative `us-east-1` on-demand list prices:
+Illustrative `us-east-1` on-demand list prices used only to convert resource
+shapes into explicit dollar figures:
 
 | Resource | Assumed monthly price |
 |---|---:|
