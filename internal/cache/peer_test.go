@@ -203,6 +203,13 @@ func TestPeerCache_ServeHTTP_HotIndex(t *testing.T) {
 	localCache := New(60*time.Second, 1000)
 	defer localCache.Close()
 
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:         "localhost:3100",
+		ReadAheadEnabled: true,
+	})
+	defer pc.Close()
+	localCache.SetL3(pc)
+
 	localCache.Set("query_range:tenant-a:a", []byte("value-a"))
 	localCache.Set("query_range:tenant-b:b", []byte("value-b"))
 	for range 10 {
@@ -211,9 +218,6 @@ func TestPeerCache_ServeHTTP_HotIndex(t *testing.T) {
 	for range 3 {
 		_, _ = localCache.Get("query_range:tenant-b:b")
 	}
-
-	pc := NewPeerCache(PeerConfig{SelfAddr: "localhost:3100"})
-	defer pc.Close()
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/_cache/hot?limit=1", nil)
@@ -794,8 +798,12 @@ func TestPeerCache_SetIsNoop(t *testing.T) {
 func TestPeerCache_WriteThroughPushesToOwner(t *testing.T) {
 	ownerCache := NewWithMaxBytes(60*time.Second, 1000, 1024*1024)
 	defer ownerCache.Close()
-	ownerPC := NewPeerCache(PeerConfig{SelfAddr: "owner"})
+	ownerPC := NewPeerCache(PeerConfig{
+		SelfAddr:         "owner",
+		ReadAheadEnabled: true,
+	})
 	defer ownerPC.Close()
+	ownerCache.SetL3(ownerPC)
 	ownerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ownerPC.ServeHTTP(w, r, ownerCache)
 	}))
@@ -1360,8 +1368,12 @@ func TestPeerCache_CoalescingAndCacheIntegration(t *testing.T) {
 func TestPeerCache_ReadAhead_BoundedFairPrefetch(t *testing.T) {
 	ownerCache := NewWithMaxBytes(60*time.Second, 1000, 1024*1024)
 	defer ownerCache.Close()
-	ownerPC := NewPeerCache(PeerConfig{SelfAddr: "owner"})
+	ownerPC := NewPeerCache(PeerConfig{
+		SelfAddr:         "owner",
+		ReadAheadEnabled: true,
+	})
 	defer ownerPC.Close()
+	ownerCache.SetL3(ownerPC)
 	ownerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ownerPC.ServeHTTP(w, r, ownerCache)
 	}))

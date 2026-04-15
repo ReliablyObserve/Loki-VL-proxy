@@ -621,7 +621,9 @@ func (p *Proxy) volumeByDerivedLabels(ctx context.Context, query, start, end, ta
 	}
 	sourceFields := p.derivedVolumeSourceFields(targets)
 	if len(sourceFields) > 0 {
-		params.Set("field", strings.Join(sourceFields, ","))
+		for _, field := range sourceFields {
+			params.Add("field", field)
+		}
 	}
 
 	resp, err := p.vlGet(ctx, "/select/logsql/hits", params)

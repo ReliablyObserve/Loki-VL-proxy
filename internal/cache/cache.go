@@ -34,6 +34,7 @@ type Cache struct {
 	lruIndex map[string]*list.Element // key → list element for O(1) lookup
 	hot      map[string]hotStat       // lightweight per-key hotness index for peer read-ahead
 	hotMax   int                      // cap hot index growth
+	hotOn    bool                     // only enabled when peer hot read-ahead is enabled
 
 	// Stats
 	Hits      atomic.Int64
@@ -62,6 +63,7 @@ type HotKeySnapshot struct {
 
 const nonOwnerShadowMaxTTL = 30 * time.Second
 const defaultHotIndexMaxEntries = 50000
+const maxHotIndexQueryLimit = 2000
 
 // SetL2 attaches an L2 disk cache. On L1 miss, L2 is checked.
 // On L1 set, values are also written to L2.
@@ -72,7 +74,13 @@ func (c *Cache) SetL2(dc *DiskCache) {
 // SetL3 attaches an L3 peer cache for distributed fleet operation.
 // On L1+L2 miss, the owning peer is queried before hitting VL.
 func (c *Cache) SetL3(pc *PeerCache) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.l3 = pc
+	c.hotOn = pc != nil && pc.readAheadEnabled
+	if !c.hotOn {
+		c.hot = make(map[string]hotStat)
+	}
 	if pc != nil {
 		pc.AttachLocalCache(c)
 	}
@@ -118,7 +126,9 @@ func (c *Cache) GetWithTTL(key string) ([]byte, time.Duration, bool) {
 			if elem, found := c.lruIndex[key]; found {
 				c.lruList.MoveToFront(elem)
 			}
-			c.recordHotLocked(key)
+			if c.hotOn {
+				c.recordHotLocked(key)
+			}
 			c.mu.Unlock()
 			c.Hits.Add(1)
 			return e.value, remaining, true
@@ -136,7 +146,9 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 		if elem, found := c.lruIndex[key]; found {
 			c.lruList.MoveToFront(elem)
 		}
-		c.recordHotLocked(key)
+		if c.hotOn {
+			c.recordHotLocked(key)
+		}
 		c.mu.Unlock()
 		c.Hits.Add(1)
 		return e.value, true
@@ -400,8 +412,14 @@ func (c *Cache) TopHotKeys(limit int, minRemainingTTL time.Duration, maxObjectBy
 	if limit <= 0 {
 		return nil
 	}
+	if limit > maxHotIndexQueryLimit {
+		limit = maxHotIndexQueryLimit
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if !c.hotOn {
+		return nil
+	}
 
 	now := time.Now()
 	out := make([]HotKeySnapshot, 0, min(limit, len(c.hot)))

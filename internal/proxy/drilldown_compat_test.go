@@ -482,6 +482,72 @@ func TestDrilldown_IndexVolumeRange_TargetLabelsDetectedLevelUsesDerivedAggregat
 	}
 }
 
+func TestDrilldown_IndexVolume_DerivedTargetLabelsSendRepeatedFieldParams(t *testing.T) {
+	var receivedFields []string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		receivedFields = append([]string(nil), r.URL.Query()["field"]...)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"hints":{},"hits":[` +
+			`{"fields":{"app":"api-gateway","level":"info"},"timestamps":["2026-04-04T17:18:49Z"],"values":[1]}` +
+			`]}`))
+	}))
+	defer vlBackend.Close()
+
+	p := newGapTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume?query=%7Bservice_name%3D~%60.%2B%60%7D&start=1&end=2&targetLabels=service_name", nil)
+	p.handleVolume(w, r)
+
+	if len(receivedFields) < 2 {
+		t.Fatalf("expected repeated field params for derived service_name grouping, got %v", receivedFields)
+	}
+	for _, field := range receivedFields {
+		if strings.Contains(field, ",") {
+			t.Fatalf("expected each field in its own query param, got combined field %q (%v)", field, receivedFields)
+		}
+	}
+	for _, want := range []string{"service_name", "service.name", "app"} {
+		if !contains(receivedFields, want) {
+			t.Fatalf("expected derived field %q in query params, got %v", want, receivedFields)
+		}
+	}
+}
+
+func TestDrilldown_IndexVolumeRange_MultipleTargetLabelsSendRepeatedFieldParams(t *testing.T) {
+	var receivedFields []string
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/hits" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		receivedFields = append([]string(nil), r.URL.Query()["field"]...)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"hints":{},"hits":[` +
+			`{"fields":{"cluster":"us-east-1","namespace":"prod"},"timestamps":["2026-04-04T17:18:49Z"],"values":[1]}` +
+			`]}`))
+	}))
+	defer vlBackend.Close()
+
+	p := newGapTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume_range?query=%7Bcluster%3D~%60.%2B%60%7D&start=1&end=2&step=60&targetLabels=cluster,namespace", nil)
+	p.handleVolumeRange(w, r)
+
+	if len(receivedFields) != 2 {
+		t.Fatalf("expected two repeated field params for cluster+namespace grouping, got %v", receivedFields)
+	}
+	for _, field := range receivedFields {
+		if strings.Contains(field, ",") {
+			t.Fatalf("expected each field in its own query param, got combined field %q (%v)", field, receivedFields)
+		}
+	}
+	if !contains(receivedFields, "cluster") || !contains(receivedFields, "namespace") {
+		t.Fatalf("expected cluster and namespace field params, got %v", receivedFields)
+	}
+}
+
 func TestDrilldown_IndexVolumeRange_TargetLabelsServiceName_FillsFullRangeBuckets(t *testing.T) {
 	const (
 		start = "2026-04-01T00:00:00Z"

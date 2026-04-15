@@ -4179,7 +4179,9 @@ func (p *Proxy) computeVolumeResult(ctx context.Context, query, start, end, targ
 	if targetLabels != "" {
 		mappedFields := p.resolveTargetLabelFields(ctx, targetLabels, params)
 		if len(mappedFields) > 0 {
-			params.Set("field", strings.Join(mappedFields, ","))
+			for _, field := range mappedFields {
+				params.Add("field", field)
+			}
 		}
 	}
 
@@ -4281,7 +4283,9 @@ func (p *Proxy) computeVolumeRangeResult(ctx context.Context, query, start, end,
 	if targetLabels != "" {
 		mappedFields := p.resolveTargetLabelFields(ctx, targetLabels, params)
 		if len(mappedFields) > 0 {
-			params.Set("field", strings.Join(mappedFields, ","))
+			for _, field := range mappedFields {
+				params.Add("field", field)
+			}
 		}
 	}
 
