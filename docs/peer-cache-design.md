@@ -26,7 +26,7 @@ flowchart TD
 | Decision | Rationale |
 |----------|-----------|
 | Consistent hashing (not gossip) | Zero background traffic, deterministic routing |
-| Shadow copies (not write-through) | Non-owner fetches on demand, no push overhead |
+| Owner write-through + shadow copies | Non-owner long-TTL writes can warm owner shards while local shadows stay short-lived |
 | TTL preservation (not extension) | Never serve stale data beyond original intent |
 | MinUsableTTL = 5s | Don't transfer data that expires in transit |
 | Per-peer circuit breaker | Isolate failures, auto-recover after cooldown |
@@ -76,4 +76,5 @@ Current implementation notes:
 
 - the current chart can wire peer discovery automatically through `peerCache.enabled=true`
 - larger `/_cache/get` responses can be `zstd`- or `gzip`-compressed between peers
-- `-peer-auth-token` can require a shared token on peer fetches when the fleet crosses a broader network boundary
+- `-peer-write-through=true` is enabled by default; non-owner writes above `-peer-write-through-min-ttl` are pushed to owners
+- `-peer-auth-token` can require a shared token on peer fetch and write-through endpoints when the fleet crosses a broader network boundary

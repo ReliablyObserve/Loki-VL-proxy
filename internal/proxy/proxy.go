@@ -1641,9 +1641,12 @@ func (p *Proxy) RegisterRoutes(mux *http.ServeMux) {
 
 	// Peer cache endpoint — internal, for sharded fleet cache
 	if p.peerCache != nil {
-		mux.Handle("/_cache/get", securityHeaders(p.peerCacheMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerCacheHandler := securityHeaders(p.peerCacheMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p.peerCache.ServeHTTP(w, r, p.cache)
-		}))))
+		})))
+		mux.Handle("/_cache/get", peerCacheHandler)
+		mux.Handle("/_cache/set", peerCacheHandler)
+		mux.Handle("/_cache/hot", peerCacheHandler)
 	}
 }
 
@@ -1670,6 +1673,14 @@ func (p *Proxy) peerCacheMetrics() string {
 	hits, _ := stats["peer_hits"].(int64)
 	misses, _ := stats["peer_misses"].(int64)
 	errors, _ := stats["peer_errors"].(int64)
+	wtPushes, _ := stats["wt_pushes"].(int64)
+	wtErrors, _ := stats["wt_errors"].(int64)
+	raHotRequests, _ := stats["ra_hot_requests"].(int64)
+	raHotErrors, _ := stats["ra_hot_errors"].(int64)
+	raPrefetches, _ := stats["ra_prefetches"].(int64)
+	raPrefetchBytes, _ := stats["ra_prefetch_bytes"].(int64)
+	raBudgetDrops, _ := stats["ra_budget_drops"].(int64)
+	raTenantSkips, _ := stats["ra_tenant_skips"].(int64)
 	clusterMembers := len(p.peerCache.Peers())
 
 	return fmt.Sprintf(
@@ -1687,8 +1698,32 @@ func (p *Proxy) peerCacheMetrics() string {
 			"loki_vl_proxy_peer_cache_misses_total %d\n"+
 			"# HELP loki_vl_proxy_peer_cache_errors_total Peer-cache fetch errors.\n"+
 			"# TYPE loki_vl_proxy_peer_cache_errors_total counter\n"+
-			"loki_vl_proxy_peer_cache_errors_total %d\n",
-		remotePeers, clusterMembers, hits, misses, errors,
+			"loki_vl_proxy_peer_cache_errors_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_write_through_pushes_total Successful owner write-through pushes from non-owner peers.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_write_through_pushes_total counter\n"+
+			"loki_vl_proxy_peer_cache_write_through_pushes_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_write_through_errors_total Owner write-through push errors.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_write_through_errors_total counter\n"+
+			"loki_vl_proxy_peer_cache_write_through_errors_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_hot_index_requests_total Peer hot-index requests.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_hot_index_requests_total counter\n"+
+			"loki_vl_proxy_peer_cache_hot_index_requests_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_hot_index_errors_total Peer hot-index request errors.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_hot_index_errors_total counter\n"+
+			"loki_vl_proxy_peer_cache_hot_index_errors_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_read_ahead_prefetches_total Successful hot read-ahead prefetches.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_read_ahead_prefetches_total counter\n"+
+			"loki_vl_proxy_peer_cache_read_ahead_prefetches_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_read_ahead_prefetch_bytes_total Bytes prefetched by hot read-ahead.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_read_ahead_prefetch_bytes_total counter\n"+
+			"loki_vl_proxy_peer_cache_read_ahead_prefetch_bytes_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_read_ahead_budget_drops_total Hot read-ahead candidates dropped by budget/size filters.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_read_ahead_budget_drops_total counter\n"+
+			"loki_vl_proxy_peer_cache_read_ahead_budget_drops_total %d\n"+
+			"# HELP loki_vl_proxy_peer_cache_read_ahead_tenant_skips_total Hot read-ahead candidates skipped by tenant fairness pass.\n"+
+			"# TYPE loki_vl_proxy_peer_cache_read_ahead_tenant_skips_total counter\n"+
+			"loki_vl_proxy_peer_cache_read_ahead_tenant_skips_total %d\n",
+		remotePeers, clusterMembers, hits, misses, errors, wtPushes, wtErrors, raHotRequests, raHotErrors, raPrefetches, raPrefetchBytes, raBudgetDrops, raTenantSkips,
 	)
 }
 
@@ -4144,7 +4179,9 @@ func (p *Proxy) computeVolumeResult(ctx context.Context, query, start, end, targ
 	if targetLabels != "" {
 		mappedFields := p.resolveTargetLabelFields(ctx, targetLabels, params)
 		if len(mappedFields) > 0 {
-			params.Set("field", strings.Join(mappedFields, ","))
+			for _, field := range mappedFields {
+				params.Add("field", field)
+			}
 		}
 	}
 
@@ -4246,7 +4283,9 @@ func (p *Proxy) computeVolumeRangeResult(ctx context.Context, query, start, end,
 	if targetLabels != "" {
 		mappedFields := p.resolveTargetLabelFields(ctx, targetLabels, params)
 		if len(mappedFields) > 0 {
-			params.Set("field", strings.Join(mappedFields, ","))
+			for _, field := range mappedFields {
+				params.Add("field", field)
+			}
 		}
 	}
 
@@ -4590,7 +4629,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 			return entries, true
 		}
 
-		if endpoint == "/select/logsql/query_range" {
+		if endpoint == "/select/logsql/query" {
 			denseWindowing := p.supportsDensePatternWindowingForRequest(r)
 			startNs, endNs, splitInterval, perWindowLimit, ok := patternWindowedSamplingConfig(startParam, endParam, stepParam, sourceLimit, denseWindowing)
 			if ok {
@@ -4613,11 +4652,8 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		return entries, true
 	}
 
-	// Prefer query_range to preserve full selected-range buckets in Drilldown graphs.
-	entries, ok := fetchPatterns("/select/logsql/query_range")
-	if !ok {
-		entries, _ = fetchPatterns("/select/logsql/query")
-	}
+	// Use /query with stratified windowing to preserve full selected-range buckets.
+	entries, _ := fetchPatterns("/select/logsql/query")
 	if entries == nil {
 		entries = []patternResultEntry{}
 	}
@@ -4702,7 +4738,7 @@ func (p *Proxy) fetchPatternsFromWindows(
 			params.Set("start", strconv.FormatInt(window.startNs, 10))
 			params.Set("end", strconv.FormatInt(window.endNs, 10))
 			params.Set("limit", strconv.Itoa(effectiveLimit))
-			resp, err := p.vlPost(r.Context(), "/select/logsql/query_range", params)
+			resp, err := p.vlPost(r.Context(), "/select/logsql/query", params)
 			if err != nil {
 				p.log.Debug(
 					"patterns window fetch failed",

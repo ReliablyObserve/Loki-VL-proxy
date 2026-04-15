@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- peer cache: add optional owner write-through replication (`/_cache/set`) so non-owner replicas can proactively warm ring owners under skewed client traffic, with bounded TTL gating (`peer-write-through`, `peer-write-through-min-ttl`) and peer token support on both peer endpoints.
+- metrics: expose peer write-through counters (`loki_vl_proxy_peer_cache_write_through_pushes_total`, `loki_vl_proxy_peer_cache_write_through_errors_total`) for fleet-cache redistribution observability.
+- peer cache: enable owner write-through by default (`peer-write-through=true`) so skewed client traffic warms owner shards without extra rollout tuning.
+- peer cache: add bounded hot read-ahead with owner hot-index endpoint (`/_cache/hot`), top-N selection, key/byte/concurrency budgets, tenant-fair prefetch selection, jittered periodic pulls, and backoff-aware anti-storm behavior.
+- peer cache: expose read-ahead metrics (`*_hot_index_requests_total`, `*_hot_index_errors_total`, `*_read_ahead_prefetches_total`, `*_read_ahead_prefetch_bytes_total`, `*_read_ahead_budget_drops_total`, `*_read_ahead_tenant_skips_total`) and wire runtime flags for interval/jitter/top-N/budgets/fair-share/backoff.
+
+### Bug Fixes
+
+- cache persistence: skip duplicate L2 disk writes for `patterns:*` keys because patterns already use dedicated snapshot persistence, reducing avoidable local disk write pressure.
+- e2e dense patterns harness: fix synthetic timestamp generation overflow for large ranges/high line counts so 7d dense repro runs generate valid evenly distributed data instead of corrupted short-tail timestamps.
+- cache write path: clamp non-owner local shadow TTL and skip non-owner L2 disk writes when write-through is enabled, reducing hot-pod disk amplification while preserving owner cache warmth.
+
+### Documentation
+
+- fleet-cache/config docs and Helm defaults: document default owner write-through behavior, `peer-write-through*` flags, and peer token requirements on both `/_cache/get` and `/_cache/set`.
+- fleet cache docs: add explicit collapse-forwarding status and a bounded hot-read-ahead design proposal (budgets, jitter, anti-storm guardrails, and validation plan).
+- docs: extend bounded hot-read-ahead proposal with planned flag surface, phased rollout plan, and proposed observability metrics for future regression gates.
+
+### Tests
+
+- cache: add regression tests for hot-index serving and bounded tenant-fair read-ahead prefetch behavior.
+- benchmarks: add cache-path benchmarks for `TopHotKeys` and bounded `PeerCache` read-ahead cycle performance.
+
+### CI
+
+- ci: add `internal/cache` coverage guard (`>=79.0%`) in the main test workflow.
+- ci: add cache benchmark regression guard in CI for hot read-ahead and cache hot paths, with threshold checks and job summary output.
+- auto-release: add PR size/scope-aware version bump heuristics so large runtime-impacting PRs (for example `size/XL` with proxy/cache scopes) auto-promote from patch to minor when no explicit release label overrides are set.
+
 ## [1.0.24] - 2026-04-15
 
 ### Bug Fixes

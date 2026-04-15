@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -143,8 +144,8 @@ func TestCache_Stats(t *testing.T) {
 	c := New(1*time.Hour, 100)
 	c.Set("key", []byte("val"))
 
-	c.Get("key")    // hit
-	c.Get("miss")   // miss
+	c.Get("key")  // hit
+	c.Get("miss") // miss
 
 	if c.Hits.Load() != 1 {
 		t.Errorf("expected 1 hit, got %d", c.Hits.Load())
@@ -227,6 +228,54 @@ func TestCache_ReplaceExistingKey(t *testing.T) {
 	}
 	if bytes != 3 {
 		t.Errorf("expected 3 bytes (len('new')), got %d", bytes)
+	}
+}
+
+func TestCache_TopHotKeys_LimitIsBounded(t *testing.T) {
+	c := New(5*time.Minute, 10000)
+	defer c.Close()
+
+	for i := range maxHotIndexQueryLimit + 100 {
+		k := fmt.Sprintf("query_range:tenant-a:key-%d", i)
+		c.SetWithTTL(k, []byte("value"), 2*time.Minute)
+	}
+
+	hot := c.TopHotKeys(1_000_000, 0, 0)
+	if len(hot) > maxHotIndexQueryLimit {
+		t.Fatalf("expected bounded hot index size <= %d, got %d", maxHotIndexQueryLimit, len(hot))
+	}
+}
+
+func TestCache_TopHotKeys_DisabledWhenReadAheadOff(t *testing.T) {
+	c := New(5*time.Minute, 100)
+	defer c.Close()
+
+	c.Set("query_range:tenant-a:key-1", []byte("value"))
+	_, _ = c.Get("query_range:tenant-a:key-1")
+
+	if hot := c.TopHotKeys(10, 0, 0); len(hot) != 0 {
+		t.Fatalf("expected no hot keys when read-ahead tracking is disabled, got %d", len(hot))
+	}
+}
+
+func TestCache_TopHotKeys_EnabledWhenReadAheadOn(t *testing.T) {
+	c := New(5*time.Minute, 100)
+	defer c.Close()
+
+	pc := NewPeerCache(PeerConfig{
+		SelfAddr:          "self:3100",
+		ReadAheadEnabled:  true,
+		ReadAheadInterval: time.Hour,
+	})
+	defer pc.Close()
+	c.SetL3(pc)
+
+	c.SetWithTTL("query_range:tenant-a:key-1", []byte("value"), 2*time.Minute)
+	_, _ = c.Get("query_range:tenant-a:key-1")
+
+	hot := c.TopHotKeys(10, 0, 0)
+	if len(hot) == 0 {
+		t.Fatal("expected hot keys when read-ahead tracking is enabled")
 	}
 }
 

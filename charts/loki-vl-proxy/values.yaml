@@ -101,6 +101,8 @@ extraArgs:
   backend-min-version: "v1.30.0"
   backend-allow-unsupported-version: "false"
   backend-version-check-timeout: "5s"
+  peer-write-through: "true"
+  peer-write-through-min-ttl: "30s"
   log-level: "info"
   # Hardening
   http-read-timeout: "30s"
@@ -203,7 +205,20 @@ extraArgs:
   # ruler-backend: ""                           # optional /rules passthrough backend
   # alerts-backend: ""                          # optional /alerts passthrough backend
   # extra-label-fields: "service.name,host.name"
-  # peer-auth-token: ""                         # token required for /_cache/get peer calls
+  # peer-auth-token: ""                         # token required for /_cache/get and /_cache/set peer calls
+  # peer-write-through: "true"                  # push eligible non-owner writes to owner peer
+  # peer-write-through-min-ttl: "30s"           # only TTL >= threshold is pushed to owner peer
+  # peer-hot-read-ahead-enabled: "false"        # bounded periodic prefetch from peer hot indexes
+  # peer-hot-read-ahead-interval: "30s"         # base period for hot-index pull cycle
+  # peer-hot-read-ahead-jitter: "5s"            # random jitter added to interval
+  # peer-hot-read-ahead-top-n: "256"            # top N hot keys requested per peer index pull
+  # peer-hot-read-ahead-max-keys-per-interval: "64"     # max prefetched keys per cycle
+  # peer-hot-read-ahead-max-bytes-per-interval: "8388608" # max prefetched bytes per cycle
+  # peer-hot-read-ahead-max-concurrency: "4"    # max concurrent hot-index/prefetch pulls
+  # peer-hot-read-ahead-min-ttl: "30s"          # minimum remaining TTL for prefetch candidates
+  # peer-hot-read-ahead-max-object-bytes: "262144" # max object size eligible for prefetch
+  # peer-hot-read-ahead-tenant-fair-share: "50" # per-tenant first-pass cap (% of key budget)
+  # peer-hot-read-ahead-error-backoff: "15s"    # base cooldown after read-ahead pull errors
   # peer-discovery: "dns"                       # chart-managed via peerCache.* values
   # peer-dns: ""                                # chart-managed when peerCache.enabled=true
   # peer-self: ""                               # chart-managed when peerCache.enabled=true
@@ -576,6 +591,8 @@ httpRoute:
 # Enable this when you run multiple replicas and want cache sharing across pods.
 # With discovery=dns, the chart creates a headless service and injects the
 # peer-discovery flags automatically. This is the preferred mode for HPA.
+# When enabled, owner write-through is on by default (`peer-write-through=true`),
+# so non-owner pods can warm owner shards under skewed traffic.
 peerCache:
   enabled: false
   # Discovery: "dns" (headless service, recommended) or "static" (explicit peers list)

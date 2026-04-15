@@ -102,8 +102,8 @@ Recent PRs added targeted guards in areas that were previously flaky in live Gra
 | `internal/translator/fuzz_test.go` | Fuzz testing harness |
 | `internal/translator/fixes_test.go` | IsScalar, without() clause tests |
 | `internal/cache/cache_test.go` | L1 cache behavior |
-| `internal/cache/cache_bench_test.go` | L1 benchmarks and warm 3-peer shadow-copy benchmark |
-| `internal/cache/peer_test.go` | L3 peer cache behavior, distribution, and 3-peer shadow-copy efficiency |
+| `internal/cache/cache_bench_test.go` | L1/L3 benchmarks including hot-index extraction (`TopHotKeys`) and bounded read-ahead cycle cost |
+| `internal/cache/peer_test.go` | L3 peer cache behavior, distribution, 3-peer shadow-copy efficiency, hot-index serving, and tenant-fair bounded read-ahead prefetch |
 | `internal/cache/disk_test.go` | L2 disk cache |
 | `internal/middleware/middleware_test.go` | Rate limiter, circuit breaker |
 | `test/e2e-compat/` | Docker-based Loki vs proxy comparison |
