@@ -422,7 +422,11 @@ func (c *Cache) TopHotKeys(limit int, minRemainingTTL time.Duration, maxObjectBy
 	}
 
 	now := time.Now()
-	out := make([]HotKeySnapshot, 0, min(limit, len(c.hot)))
+	capHint := len(c.hot)
+	if capHint > maxHotIndexQueryLimit {
+		capHint = maxHotIndexQueryLimit
+	}
+	out := make([]HotKeySnapshot, 0, capHint)
 	for key, stat := range c.hot {
 		e, ok := c.entries[key]
 		if !ok {
