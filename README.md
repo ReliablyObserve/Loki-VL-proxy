@@ -328,6 +328,7 @@ For full detail:
 - `L1` memory cache gives fastest hot-path reads.
 - `L2` disk cache keeps useful historical windows warm across larger working sets.
 - `L3` peer cache lets warm replicas help the fleet instead of refetching from backend.
+- Bounded peer hot read-ahead (optional) prewarms non-owner shadows from owner hot indexes with strict key/byte/concurrency budgets, jitter, and tenant fairness.
 
 See [Performance](docs/performance.md), [Fleet Cache](docs/fleet-cache.md), [Scaling](docs/scaling.md), and [Observability](docs/observability.md).
 

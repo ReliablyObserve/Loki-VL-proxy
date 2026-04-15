@@ -571,6 +571,17 @@ Treat these as current implementation defaults, not stable configuration API. If
 | `-peer-auth-token` | — | — | Shared token required on `/_cache/get` and `/_cache/set` peer-cache requests when set |
 | `-peer-write-through` | — | `true` | Push eligible non-owner cache writes to the owner peer (`/_cache/set`) to keep owner shards warm under skewed traffic |
 | `-peer-write-through-min-ttl` | — | `30s` | Minimum TTL required to push a write-through copy to the owner peer |
+| `-peer-hot-read-ahead-enabled` | — | `false` | Enable bounded periodic hot-read-ahead prefetch from peer hot indexes |
+| `-peer-hot-read-ahead-interval` | — | `30s` | Base interval for hot-index pull cycles |
+| `-peer-hot-read-ahead-jitter` | — | `5s` | Random jitter added to the read-ahead interval |
+| `-peer-hot-read-ahead-top-n` | — | `256` | Number of hot keys requested per peer hot-index pull |
+| `-peer-hot-read-ahead-max-keys-per-interval` | — | `64` | Max prefetched keys per read-ahead cycle |
+| `-peer-hot-read-ahead-max-bytes-per-interval` | — | `8388608` | Max prefetched bytes per read-ahead cycle |
+| `-peer-hot-read-ahead-max-concurrency` | — | `4` | Max concurrent hot-index and prefetch peer requests |
+| `-peer-hot-read-ahead-min-ttl` | — | `30s` | Minimum remaining TTL required for a prefetch candidate |
+| `-peer-hot-read-ahead-max-object-bytes` | — | `262144` | Max object size eligible for read-ahead prefetch |
+| `-peer-hot-read-ahead-tenant-fair-share` | — | `50` | Per-tenant first-pass selection cap (% of key budget) |
+| `-peer-hot-read-ahead-error-backoff` | — | `15s` | Base cooldown after read-ahead/index pull failures |
 
 Peer-cache notes:
 
@@ -581,34 +592,25 @@ Peer-cache notes:
 
 ### Current Tuning For Higher Fleet Reuse
 
-Use these knobs first before introducing any new read-ahead mechanism:
+Use these knobs first:
 
 - keep `-peer-write-through=true` (default) to warm owner shards under skewed traffic
 - tune `-peer-write-through-min-ttl` so only stable/hot entries are replicated
 - keep `-response-compression=auto` and `-backend-compression=auto` for `zstd`/`gzip` negotiation
 - keep `query-range-windowing` enabled with long history TTL and near-now freshness controls for mixed historical/live workloads
 
-### Planned: Bounded Hot Read-Ahead
+### Bounded Hot Read-Ahead
 
-A bounded peer hot-read-ahead mode is planned to periodically prefetch only top hot keys from owners.
-It will be budgeted by keys, bytes, and concurrency to prevent peer traffic storms.
-See [Fleet Cache Architecture](fleet-cache.md#proposed-hot-read-ahead-bounded).
+A bounded peer hot-read-ahead mode is implemented and can be enabled with:
 
-Planned runtime flags (names reserved, not yet active):
+```bash
+-peer-hot-read-ahead-enabled=true
+```
 
-- `-peer-hot-read-ahead-enabled`
-- `-peer-hot-read-ahead-interval`
-- `-peer-hot-read-ahead-jitter`
-- `-peer-hot-read-ahead-top-n`
-- `-peer-hot-read-ahead-max-keys-per-interval`
-- `-peer-hot-read-ahead-max-bytes-per-interval`
-- `-peer-hot-read-ahead-max-concurrency`
-- `-peer-hot-read-ahead-min-ttl`
-- `-peer-hot-read-ahead-max-object-bytes`
-- `-peer-hot-read-ahead-tenant-fair-share`
-- `-peer-hot-read-ahead-error-backoff`
+It keeps traffic bounded via key/byte/concurrency caps, jitter, tenant fairness, and error backoff.
+See [Fleet Cache Architecture](fleet-cache.md#hot-read-ahead-bounded).
 
-These are documented to make rollout intent explicit for operators and CI contracts.
+The owner hot-index endpoint (`/_cache/hot`) is internal peer-cache surface area and should not be exposed publicly.
 
 ## Grafana Datasource Mapping
 

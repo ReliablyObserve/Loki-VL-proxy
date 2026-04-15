@@ -275,51 +275,44 @@ Recent verification coverage:
 
 Peer payload exchange already prefers `zstd`, then `gzip`, then identity.
 
-## Proposed Hot Read-Ahead (Bounded)
+## Hot Read-Ahead (Bounded)
 
-Goal: keep hottest keys resident across replicas without full-mesh cache replication storms.
+Bounded hot read-ahead is implemented and remains disabled by default (`-peer-hot-read-ahead-enabled=false`).
 
-Design (proposed, not enabled yet):
+Runtime behavior:
 
-1. Owners publish a compact hot-key index (top N keys with hit score, size, remaining TTL).
-2. Peers periodically fetch that index with jitter, then prefetch only a bounded subset.
-3. Prefetch candidates are filtered by safeguards:
-   - remaining TTL >= threshold
-   - value size <= max prefetch object bytes
-   - total prefetch bytes <= interval budget
-   - max keys <= interval key budget
-4. Prefetch pulls use existing `/_cache/get` path with `Accept-Encoding: zstd, gzip`.
-5. Local inserts from prefetch are stored as shadow copies with bounded TTL.
-6. Existing singleflight collapse remains active for prefetch and organic traffic paths.
+1. Owners expose a compact hot-key index on `/_cache/hot` (top N keys with score, size, and remaining TTL).
+2. Peers pull owner hot indexes on a periodic, jittered loop.
+3. Prefetch selection is bounded and tenant-fair:
+   - remaining TTL must be above threshold
+   - object size must stay below prefetch object limit
+   - selected keys must stay within key budget
+   - selected bytes must stay within byte budget
+   - first pass enforces per-tenant fairness cap, second pass backfills remaining budget
+4. Prefetch fetches use existing `/_cache/get` with `Accept-Encoding: zstd, gzip`.
+5. Prefetched values are inserted as local shadow copies (no write-through fanout loops).
+6. Existing collapse-forwarding stays in place: concurrent pulls for the same key coalesce.
 
-Anti-storm guardrails (required):
+Anti-storm controls:
 
-- Per-peer prefetch concurrency cap.
-- Global prefetch bytes/sec budget.
-- Token-bucket rate limiter for warm pulls.
-- Jittered scheduling (avoid synchronized bursts).
-- Backoff on peer errors and circuit-breaker open states.
-- Tenant-aware fairness in hot-key selection.
+- max concurrency for hot-index and prefetch pulls
+- strict per-interval key/byte budgets
+- jittered scheduling
+- circuit-breaker-aware peer selection
+- error-streak backoff before next read-ahead cycle
 
-Proposed rollout phases:
-
-1. Phase 1: expose owner hot index endpoint and bounded pull loop (disabled by default).
-2. Phase 2: enable prefetch writes into local shadow cache with strict key/byte budgets.
-3. Phase 3: tune tenant fairness and adaptive backoff from live metrics.
-
-Planned read-ahead observability (metrics):
+Read-ahead observability metrics:
 
 ```text
 loki_vl_proxy_peer_cache_hot_index_requests_total
 loki_vl_proxy_peer_cache_hot_index_errors_total
 loki_vl_proxy_peer_cache_read_ahead_prefetches_total
-loki_vl_proxy_peer_cache_read_ahead_prefetch_errors_total
 loki_vl_proxy_peer_cache_read_ahead_prefetch_bytes_total
 loki_vl_proxy_peer_cache_read_ahead_budget_drops_total
 loki_vl_proxy_peer_cache_read_ahead_tenant_skips_total
 ```
 
-These are additive to existing peer cache metrics and intended to keep regression detection straightforward in dashboards and CI benchmark gates.
+These are additive to existing peer-cache counters and are also used by CI regression guards.
 
 Expected effect:
 
