@@ -23,23 +23,25 @@ type Cache struct {
 	maxEntries int
 	maxBytes   int
 	curBytes   int
-	l2         *DiskCache  // optional L2 disk cache
-	l3         *PeerCache  // optional L3 peer fleet cache
+	l2         *DiskCache    // optional L2 disk cache
+	l3         *PeerCache    // optional L3 peer fleet cache
 	done       chan struct{} // signals cleanup goroutine to stop
 
 	// LRU ordering: front = most recently used, back = least recently used
-	lruList  *list.List            // doubly-linked list of *lruEntry
+	lruList  *list.List               // doubly-linked list of *lruEntry
 	lruIndex map[string]*list.Element // key → list element for O(1) lookup
 
 	// Stats
-	Hits   atomic.Int64
-	Misses atomic.Int64
+	Hits      atomic.Int64
+	Misses    atomic.Int64
 	Evictions atomic.Int64
 }
 
 type lruEntry struct {
 	key string
 }
+
+const nonOwnerShadowMaxTTL = 30 * time.Second
 
 // SetL2 attaches an L2 disk cache. On L1 miss, L2 is checked.
 // On L1 set, values are also written to L2.
@@ -155,6 +157,18 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 		return
 	}
 
+	ownerLocal := true
+	writeThroughEnabled := false
+	if c.l3 != nil {
+		ownerLocal = c.l3.IsOwner(key)
+		writeThroughEnabled = c.l3.WriteThroughEnabled()
+		// When write-through is enabled and this replica isn't owner, keep only
+		// a short-lived shadow copy locally. Owner peer keeps full TTL.
+		if writeThroughEnabled && !ownerLocal && ttl > nonOwnerShadowMaxTTL {
+			ttl = nonOwnerShadowMaxTTL
+		}
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -183,7 +197,12 @@ func (c *Cache) SetWithTTL(key string, value []byte, ttl time.Duration) {
 
 	// Write-through to L2 (disk), except keys that already have dedicated
 	// persistence paths and would otherwise double-write to disk.
-	if c.l2 != nil && !skipL2WriteForKey(key) {
+	shouldWriteL2 := c.l2 != nil && !skipL2WriteForKey(key)
+	// Avoid concentrating disk writes on non-owner pods when write-through is active.
+	if shouldWriteL2 && writeThroughEnabled && !ownerLocal {
+		shouldWriteL2 = false
+	}
+	if shouldWriteL2 {
 		c.l2.Set(key, value, ttl)
 	}
 

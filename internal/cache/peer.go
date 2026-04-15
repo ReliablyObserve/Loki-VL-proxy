@@ -496,6 +496,11 @@ func (pc *PeerCache) Peers() []string {
 	return result
 }
 
+// WriteThroughEnabled reports whether owner write-through is active.
+func (pc *PeerCache) WriteThroughEnabled() bool {
+	return pc != nil && pc.writeThrough
+}
+
 // Close stops the discovery loop.
 func (pc *PeerCache) Close() {
 	select {

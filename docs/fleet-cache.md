@@ -2,7 +2,7 @@
 
 ## Overview
 
-The fleet cache enables multiple Loki-VL-proxy replicas to share cached data with minimal network overhead. Each key lives on exactly one peer (the **owner**, determined by consistent hashing). Non-owner peers fetch from the owner on local miss and keep short-lived **shadow copies**.
+The fleet cache enables multiple Loki-VL-proxy replicas to share cached data with minimal network overhead. Each key lives on exactly one peer (the **owner**, determined by consistent hashing). Non-owner peers fetch from the owner on local miss and keep short-lived **shadow copies**. With owner write-through enabled (default), non-owner pods also push eligible long-TTL writes to the owner shard so hot traffic pinned to one pod still warms the full fleet.
 
 ```mermaid
 flowchart TD
@@ -97,6 +97,27 @@ sequenceDiagram
     A->>VL: fetch
     VL-->>A: response
     A->>A: store in L1 (default TTL)
+    A-->>C: response
+```
+
+### Non-Owner Miss + Owner Write-Through (default)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant LB as Load Balancer
+    participant A as Proxy A (non-owner)
+    participant B as Proxy B (owner)
+    participant VL as VictoriaLogs
+
+    C->>LB: query
+    LB->>A: (random routing)
+    A->>A: L1 miss, L2 miss, L3 miss
+    A->>VL: fetch
+    VL-->>A: response
+    A->>A: store short-lived shadow (<=30s)
+    A->>B: POST /_cache/set (TTL>=threshold)
+    B->>B: store owner copy (full TTL)
     A-->>C: response
 ```
 
@@ -207,7 +228,7 @@ When you use the Helm chart, prefer `peerCache.enabled=true` and let the chart w
 | L2 latency | ~1ms |
 | L3 latency (peer) | ~1-5ms |
 | VL latency | ~10-100ms |
-| Background traffic | Zero |
+| Background traffic | Near zero; only request-path peer fetches and write-through pushes |
 | Max VL calls per key | 1 (per owner) |
 | Shadow copy overhead | ~0 (uses owner's remaining TTL) |
 | Hash ring lookup | O(log N) |
@@ -216,7 +237,8 @@ When you use the Helm chart, prefer `peerCache.enabled=true` and let the chart w
 Peer fetch behavior details:
 
 - larger `/_cache/get` payloads are compressed when peers request `Accept-Encoding`, preferring `zstd` and falling back to `gzip`
-- when `-peer-auth-token` is set, peer fetches must carry the shared token or the endpoint fails closed
+- when `-peer-write-through=true`, non-owner writes above `-peer-write-through-min-ttl` are pushed to owners via `/_cache/set`
+- when `-peer-auth-token` is set, both peer fetch and peer write-through calls must carry the shared token or endpoints fail closed
 
 ## Fleet Metrics
 
@@ -228,6 +250,8 @@ loki_vl_proxy_peer_cache_cluster_members       # total ring members, including s
 loki_vl_proxy_peer_cache_hits_total            # successful peer fetches
 loki_vl_proxy_peer_cache_misses_total          # owner returned miss / near-expiry miss
 loki_vl_proxy_peer_cache_errors_total          # peer fetch failures
+loki_vl_proxy_peer_cache_write_through_pushes_total   # successful owner write-through pushes
+loki_vl_proxy_peer_cache_write_through_errors_total   # failed owner write-through pushes
 ```
 
 Use these together with the normal client metrics to tell apart:
@@ -240,7 +264,7 @@ Use these together with the normal client metrics to tell apart:
 | Decision | Why |
 |----------|-----|
 | Consistent hashing (not gossip) | Zero background traffic, deterministic routing |
-| Shadow copies (not write-through) | Non-owner fetches on demand, no push overhead |
+| Owner write-through + shadow copies | Preserve owner-centric cache warmth under skewed traffic while keeping non-owner shadows short-lived |
 | TTL preservation (not extension) | Never serve stale data beyond original intent |
 | MinUsableTTL=5s (force refresh) | Don't transfer data that expires in transit |
 | Singleflight per key | Prevent cache stampede on L3 misses |

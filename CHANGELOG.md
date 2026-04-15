@@ -11,11 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - peer cache: add optional owner write-through replication (`/_cache/set`) so non-owner replicas can proactively warm ring owners under skewed client traffic, with bounded TTL gating (`peer-write-through`, `peer-write-through-min-ttl`) and peer token support on both peer endpoints.
 - metrics: expose peer write-through counters (`loki_vl_proxy_peer_cache_write_through_pushes_total`, `loki_vl_proxy_peer_cache_write_through_errors_total`) for fleet-cache redistribution observability.
+- peer cache: enable owner write-through by default (`peer-write-through=true`) so skewed client traffic warms owner shards without extra rollout tuning.
 
 ### Bug Fixes
 
 - cache persistence: skip duplicate L2 disk writes for `patterns:*` keys because patterns already use dedicated snapshot persistence, reducing avoidable local disk write pressure.
 - e2e dense patterns harness: fix synthetic timestamp generation overflow for large ranges/high line counts so 7d dense repro runs generate valid evenly distributed data instead of corrupted short-tail timestamps.
+- cache write path: clamp non-owner local shadow TTL and skip non-owner L2 disk writes when write-through is enabled, reducing hot-pod disk amplification while preserving owner cache warmth.
+
+### Documentation
+
+- fleet-cache/config docs and Helm defaults: document default owner write-through behavior, `peer-write-through*` flags, and peer token requirements on both `/_cache/get` and `/_cache/set`.
 
 ## [1.0.24] - 2026-04-15
 

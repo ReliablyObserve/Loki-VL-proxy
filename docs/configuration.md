@@ -568,12 +568,15 @@ Treat these as current implementation defaults, not stable configuration API. If
 | `-peer-discovery` | — | — | Peer discovery mode: `dns` or `static` |
 | `-peer-dns` | — | — | Headless service DNS name used when `-peer-discovery=dns` |
 | `-peer-static` | — | — | Comma-separated peer list used when `-peer-discovery=static` |
-| `-peer-auth-token` | — | — | Shared token required on `/_cache/get` peer-cache requests when set |
+| `-peer-auth-token` | — | — | Shared token required on `/_cache/get` and `/_cache/set` peer-cache requests when set |
+| `-peer-write-through` | — | `true` | Push eligible non-owner cache writes to the owner peer (`/_cache/set`) to keep owner shards warm under skewed traffic |
+| `-peer-write-through-min-ttl` | — | `30s` | Minimum TTL required to push a write-through copy to the owner peer |
 
 Peer-cache notes:
 
 - the Helm chart manages `-peer-self`, `-peer-discovery`, and `-peer-dns` automatically when `peerCache.enabled=true`
 - peer-cache fetches preserve owner TTL and can compress larger `/_cache/get` responses with `zstd` or `gzip`
+- with `-peer-write-through=true` (default), non-owner writes with TTL above threshold are pushed to owners and stored locally as short-lived shadows to reduce hot-pod disk skew
 - when `-peer-auth-token` is set, all peers must share the same token or peer-cache reuse will fail closed
 
 ## Grafana Datasource Mapping

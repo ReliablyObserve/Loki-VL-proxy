@@ -101,6 +101,8 @@ extraArgs:
   backend-min-version: "v1.30.0"
   backend-allow-unsupported-version: "false"
   backend-version-check-timeout: "5s"
+  peer-write-through: "true"
+  peer-write-through-min-ttl: "30s"
   log-level: "info"
   # Hardening
   http-read-timeout: "30s"
@@ -203,7 +205,9 @@ extraArgs:
   # ruler-backend: ""                           # optional /rules passthrough backend
   # alerts-backend: ""                          # optional /alerts passthrough backend
   # extra-label-fields: "service.name,host.name"
-  # peer-auth-token: ""                         # token required for /_cache/get peer calls
+  # peer-auth-token: ""                         # token required for /_cache/get and /_cache/set peer calls
+  # peer-write-through: "true"                  # push eligible non-owner writes to owner peer
+  # peer-write-through-min-ttl: "30s"           # only TTL >= threshold is pushed to owner peer
   # peer-discovery: "dns"                       # chart-managed via peerCache.* values
   # peer-dns: ""                                # chart-managed when peerCache.enabled=true
   # peer-self: ""                               # chart-managed when peerCache.enabled=true
@@ -576,6 +580,8 @@ httpRoute:
 # Enable this when you run multiple replicas and want cache sharing across pods.
 # With discovery=dns, the chart creates a headless service and injects the
 # peer-discovery flags automatically. This is the preferred mode for HPA.
+# When enabled, owner write-through is on by default (`peer-write-through=true`),
+# so non-owner pods can warm owner shards under skewed traffic.
 peerCache:
   enabled: false
   # Discovery: "dns" (headless service, recommended) or "static" (explicit peers list)
