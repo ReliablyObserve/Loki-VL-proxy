@@ -549,13 +549,7 @@ func (pc *PeerCache) serveHotIndex(w http.ResponseWriter, r *http.Request, local
 		Entries: make([]hotIndexEntry, 0, len(entries)),
 	}
 	for _, e := range entries {
-		resp.Entries = append(resp.Entries, hotIndexEntry{
-			Key:            e.Key,
-			Tenant:         e.Tenant,
-			Score:          e.Score,
-			SizeBytes:      e.SizeBytes,
-			RemainingTTLMS: e.RemainingTTLMS,
-		})
+		resp.Entries = append(resp.Entries, hotIndexEntry(e))
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {

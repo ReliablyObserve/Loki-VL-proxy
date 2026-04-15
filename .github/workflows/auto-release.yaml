@@ -80,6 +80,13 @@ jobs:
           fi
 
           BUMP="none"
+          PR_LABELS=""
+          PR_LABELS_LOWER=""
+          PR_TITLE=""
+          PR_CHANGED_FILES=0
+          PR_ADDITIONS=0
+          PR_DELETIONS=0
+          PR_TOTAL_CHURN=0
           PR_NUMBER="$(echo "${HEAD_COMMIT_MSG:-}" | grep -oE '#[0-9]+' | tail -1 | tr -d '#' || true)"
 
           if [ -n "${PR_NUMBER}" ]; then
@@ -89,26 +96,61 @@ jobs:
               "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}" || true)"
             if [ -n "$PR_JSON" ]; then
               PR_LABELS="$(echo "$PR_JSON" | jq -r '.labels[]?.name' || true)"
+              PR_LABELS_LOWER="$(echo "$PR_LABELS" | tr '[:upper:]' '[:lower:]')"
+              PR_TITLE="$(echo "$PR_JSON" | jq -r '.title // ""' || true)"
+              PR_CHANGED_FILES="$(echo "$PR_JSON" | jq -r '.changed_files // 0' || echo 0)"
+              PR_ADDITIONS="$(echo "$PR_JSON" | jq -r '.additions // 0' || echo 0)"
+              PR_DELETIONS="$(echo "$PR_JSON" | jq -r '.deletions // 0' || echo 0)"
+              PR_TOTAL_CHURN=$((PR_ADDITIONS + PR_DELETIONS))
               echo "PR #${PR_NUMBER} labels: ${PR_LABELS:-<none>}"
+              echo "PR #${PR_NUMBER} title: ${PR_TITLE:-<none>}"
+              echo "PR #${PR_NUMBER} changed_files=${PR_CHANGED_FILES} additions=${PR_ADDITIONS} deletions=${PR_DELETIONS} churn=${PR_TOTAL_CHURN}"
 
-              if echo "$PR_LABELS" | grep -qE '^no-release$'; then
+              if echo "$PR_LABELS_LOWER" | grep -qE '^no-release$'; then
                 echo "should_release=false" >> "$GITHUB_OUTPUT"
                 echo "PR has no-release label; skipping release"
                 exit 0
               fi
 
-              if echo "$PR_LABELS" | grep -qE '^release:major$'; then
+              if echo "$PR_LABELS_LOWER" | grep -qE '^release:major$'; then
                 BUMP="major"
-              elif echo "$PR_LABELS" | grep -qE '^release:minor$'; then
+              elif echo "$PR_LABELS_LOWER" | grep -qE '^release:minor$'; then
                 BUMP="minor"
-              elif echo "$PR_LABELS" | grep -qE '^release:patch$'; then
+              elif echo "$PR_LABELS_LOWER" | grep -qE '^release:patch$'; then
                 BUMP="patch"
-              elif echo "$PR_LABELS" | grep -qE '^(breaking-change)$'; then
+              elif echo "$PR_LABELS_LOWER" | grep -qE '^(breaking-change)$'; then
                 BUMP="major"
-              elif echo "$PR_LABELS" | grep -qE '^(feature)$'; then
+              elif echo "$PR_LABELS_LOWER" | grep -qE '^(feature)$'; then
                 BUMP="minor"
-              elif echo "$PR_LABELS" | grep -qE '^(bugfix|performance)$'; then
+              elif echo "$PR_LABELS_LOWER" | grep -qE '^(bugfix|performance)$'; then
                 BUMP="patch"
+              fi
+
+              # Size- and scope-aware automatic promotion:
+              # large runtime-impacting PRs should bump at least minor.
+              if [ "$BUMP" != "major" ]; then
+                XL_SIZE="false"
+                RUNTIME_SCOPE="false"
+                LARGE_DIFF="false"
+
+                if echo "$PR_LABELS_LOWER" | grep -qE '^size/(xl|xxl)$'; then
+                  XL_SIZE="true"
+                fi
+
+                if echo "$PR_LABELS_LOWER" | grep -qE '^scope/(proxy|cache|translator|cli|helm|api)$'; then
+                  RUNTIME_SCOPE="true"
+                fi
+
+                if [ "${PR_CHANGED_FILES}" -ge 20 ] || [ "${PR_TOTAL_CHURN}" -ge 1200 ]; then
+                  LARGE_DIFF="true"
+                fi
+
+                if { [ "${XL_SIZE}" = "true" ] && [ "${RUNTIME_SCOPE}" = "true" ]; } || [ "${LARGE_DIFF}" = "true" ]; then
+                  if [ "$BUMP" = "none" ] || [ "$BUMP" = "patch" ]; then
+                    BUMP="minor"
+                    echo "Auto-promoted bump to minor based on PR size/scope heuristic"
+                  fi
+                fi
               fi
             fi
           fi

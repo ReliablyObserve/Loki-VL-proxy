@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ci: add `internal/cache` coverage guard (`>=79.0%`) in the main test workflow.
 - ci: add cache benchmark regression guard in CI for hot read-ahead and cache hot paths, with threshold checks and job summary output.
+- auto-release: add PR size/scope-aware version bump heuristics so large runtime-impacting PRs (for example `size/XL` with proxy/cache scopes) auto-promote from patch to minor when no explicit release label overrides are set.
 
 ## [1.0.24] - 2026-04-15
 
