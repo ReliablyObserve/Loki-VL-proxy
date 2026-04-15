@@ -108,6 +108,13 @@ extraArgs:
   http-read-timeout: "30s"
   http-write-timeout: "120s"
   http-idle-timeout: "120s"
+  # Downstream HTTP/1.x keepalive rotation to avoid one long-lived datasource
+  # connection pinning a single proxy pod indefinitely. These settings do not
+  # affect upstream proxy->VictoriaLogs pooling.
+  http-conn-max-age: "10m"
+  http-conn-max-age-jitter: "2m"
+  http-conn-max-requests: "256"
+  http-conn-overload-max-age: "90s"
   http-max-header-bytes: "1048576"
   http-max-body-bytes: "10485760"
   # Uncomment to enable features:

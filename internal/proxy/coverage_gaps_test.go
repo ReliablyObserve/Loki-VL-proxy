@@ -516,6 +516,18 @@ func TestPatterns_VLReturnsLines_ExtractsPatterns(t *testing.T) {
 	}
 }
 
+func TestPatterns_BackendLimitScalesWithRequestedWindow(t *testing.T) {
+	limit := patternBackendQueryLimit("2026-04-04T00:00:00Z", "2026-04-05T00:00:00Z", "1h", 50)
+	if limit <= 1000 {
+		t.Fatalf("expected widened backend limit for wide range, got %d", limit)
+	}
+
+	narrowLimit := patternBackendQueryLimit("2026-04-04T00:00:00Z", "2026-04-04T00:05:00Z", "1m", 50)
+	if narrowLimit != 1000 {
+		t.Fatalf("expected narrow range to clamp at minimum backend limit, got %d", narrowLimit)
+	}
+}
+
 // =============================================================================
 // Priority 2: applyBackendHeaders and forwardHeaders
 // =============================================================================

@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,6 +72,18 @@ func TestMetrics_Handler_Output(t *testing.T) {
 	if !strings.Contains(body, "loki_vl_proxy_uptime_seconds") {
 		t.Error("missing uptime metric")
 	}
+	if !strings.Contains(body, "loki_vl_proxy_active_requests 0") {
+		t.Error("missing active requests gauge")
+	}
+	if !strings.Contains(body, `loki_vl_proxy_http_connections{state="active"} 0`) {
+		t.Error("missing HTTP connection gauge")
+	}
+	if !strings.Contains(body, `loki_vl_proxy_http_connection_transitions_total{state="closed"} 0`) {
+		t.Error("missing HTTP connection transition counter")
+	}
+	if !strings.Contains(body, `loki_vl_proxy_http_connection_rotations_total{reason="age"} 0`) {
+		t.Error("missing HTTP connection rotation counter")
+	}
 	if !strings.Contains(body, "loki_vl_proxy_go_goroutines") {
 		t.Error("missing prefixed go runtime metric")
 	}
@@ -99,6 +112,10 @@ func TestMetrics_Handler_EmptyState(t *testing.T) {
 		`loki_vl_proxy_tenant_requests_total{system="loki",direction="downstream",tenant="__none__",endpoint="query_range",route="/loki/api/v1/query_range",status="200"} 0`,
 		`loki_vl_proxy_client_requests_total{system="loki",direction="downstream",client="__none__",endpoint="query_range",route="/loki/api/v1/query_range"} 0`,
 		`loki_vl_proxy_client_status_total{system="loki",direction="downstream",client="__none__",endpoint="query_range",route="/loki/api/v1/query_range",status="200"} 0`,
+		`loki_vl_proxy_active_requests 0`,
+		`loki_vl_proxy_http_connections{state="idle"} 0`,
+		`loki_vl_proxy_http_connection_transitions_total{state="new"} 0`,
+		`loki_vl_proxy_http_connection_rotations_total{reason="request_limit"} 0`,
 		`loki_vl_proxy_circuit_breaker_state 0`,
 	} {
 		if !strings.Contains(body, needle) {
@@ -231,6 +248,40 @@ func TestMetrics_Handler_ExportsClientCentricBreakdowns(t *testing.T) {
 	}
 	if !strings.Contains(body, `status="429"`) {
 		t.Fatal("expected per-client status metric for 429")
+	}
+}
+
+func TestMetrics_Handler_ExportsConnectionVisibility(t *testing.T) {
+	m := NewMetrics()
+	m.RecordActiveRequest(2)
+	m.RecordHTTPConnectionRotation("overload")
+	connA, connB := net.Pipe()
+	defer func() { _ = connA.Close() }()
+	defer func() { _ = connB.Close() }()
+
+	hook := m.ConnStateHook()
+	hook(connA, http.StateNew)
+	hook(connA, http.StateActive)
+	hook(connA, http.StateIdle)
+	hook(connA, http.StateClosed)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	m.Handler(w, r)
+
+	body := w.Body.String()
+	for _, needle := range []string{
+		`loki_vl_proxy_active_requests 2`,
+		`loki_vl_proxy_http_connections{state="idle"} 0`,
+		`loki_vl_proxy_http_connection_transitions_total{state="new"} 1`,
+		`loki_vl_proxy_http_connection_transitions_total{state="active"} 1`,
+		`loki_vl_proxy_http_connection_transitions_total{state="idle"} 1`,
+		`loki_vl_proxy_http_connection_transitions_total{state="closed"} 1`,
+		`loki_vl_proxy_http_connection_rotations_total{reason="overload"} 1`,
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("expected %q in metrics output\nbody:\n%s", needle, body)
+		}
 	}
 }
 

@@ -420,6 +420,8 @@ const (
 	maxQueryLength = 65536 // 64KB
 	// maxLimitValue caps the number of results per query.
 	maxLimitValue                     = 10000
+	maxZeroFillBuckets                = 10000
+	maxPatternBackendQueryLimit       = 20000
 	maxUserDrivenSlicePrealloc        = 512
 	tailWriteTimeout                  = 2 * time.Second
 	maxMultiTenantFanout              = 64
@@ -4296,7 +4298,7 @@ func (p *Proxy) computeVolumeRangeResult(ctx context.Context, query, start, end,
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	return p.hitsToVolumeMatrix(body), nil
+	return p.hitsToVolumeMatrix(body, start, end, step), nil
 }
 
 func (p *Proxy) refreshVolumeRangeCacheAsync(orgID, cacheKey, rawQuery, start, end, step, targetLabels string) {
@@ -4651,6 +4653,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		}
 		return entries, true
 	}
+	params.Set("limit", strconv.Itoa(patternBackendQueryLimit(startParam, endParam, stepParam, patternLimit)))
 
 	// Use /query with stratified windowing to preserve full selected-range buckets.
 	entries, _ := fetchPatterns("/select/logsql/query")
@@ -8102,28 +8105,176 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 type vlHitsResponse struct {
 	Hits []struct {
 		Fields     map[string]string `json:"fields"`
-		Timestamps []string          `json:"timestamps"` // VL v1.49+: RFC3339 strings
+		Timestamps []vlTimestamp     `json:"timestamps"`
 		Values     []int             `json:"values"`
 	} `json:"hits"`
 }
 
+type vlTimestamp string
+
+func (t *vlTimestamp) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*t = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = vlTimestamp(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*t = vlTimestamp(n.String())
+	return nil
+}
+
 // parseTimestampToUnix converts a VL timestamp (RFC3339 string or numeric) to Unix seconds.
 func parseTimestampToUnix(ts string) float64 {
-	t, err := time.Parse(time.RFC3339, ts)
-	if err == nil {
-		return float64(t.Unix())
-	}
-	// Try numeric fallback
-	if f, err := strconv.ParseFloat(ts, 64); err == nil {
-		return f
+	if parsed, ok := parseFlexibleUnixSeconds(ts); ok {
+		return float64(parsed)
 	}
 	return float64(time.Now().Unix())
 }
 
 func parseHits(body []byte) vlHitsResponse {
 	var resp vlHitsResponse
-	json.Unmarshal(body, &resp)
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return vlHitsResponse{}
+	}
 	return resp
+}
+
+type requestedBucketRange struct {
+	start int64
+	end   int64
+	step  int64
+	count int
+}
+
+func parseFlexibleUnixSeconds(raw string) (int64, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.Unix(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.Unix(), true
+	}
+	if integer, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return normalizeUnixSeconds(integer), true
+	}
+	if floating, err := strconv.ParseFloat(value, 64); err == nil {
+		abs := math.Abs(floating)
+		switch {
+		case abs >= 1_000_000_000_000_000_000:
+			return int64(floating / 1_000_000_000), true
+		case abs >= 1_000_000_000_000_000:
+			return int64(floating / 1_000_000), true
+		case abs >= 1_000_000_000_000:
+			return int64(floating / 1_000), true
+		default:
+			return int64(floating), true
+		}
+	}
+	return 0, false
+}
+
+func normalizeUnixSeconds(v int64) int64 {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs >= 1_000_000_000_000_000_000:
+		return v / 1_000_000_000
+	case abs >= 1_000_000_000_000_000:
+		return v / 1_000_000
+	case abs >= 1_000_000_000_000:
+		return v / 1_000
+	default:
+		return v
+	}
+}
+
+func parseStepSeconds(step string) (int64, bool) {
+	value := strings.TrimSpace(step)
+	if value == "" {
+		return 0, false
+	}
+	if d, err := time.ParseDuration(value); err == nil && d > 0 {
+		return int64(d / time.Second), true
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return int64(seconds), true
+	}
+	return 0, false
+}
+
+func parseRequestedBucketRange(start, end, step string) (requestedBucketRange, bool) {
+	startSeconds, ok := parseFlexibleUnixSeconds(start)
+	if !ok {
+		return requestedBucketRange{}, false
+	}
+	endSeconds, ok := parseFlexibleUnixSeconds(end)
+	if !ok || endSeconds < startSeconds {
+		return requestedBucketRange{}, false
+	}
+	stepSeconds, ok := parseStepSeconds(step)
+	if !ok || stepSeconds <= 0 {
+		return requestedBucketRange{}, false
+	}
+	count := int(((endSeconds - startSeconds) / stepSeconds) + 1)
+	if count <= 0 || count > maxZeroFillBuckets {
+		return requestedBucketRange{}, false
+	}
+	return requestedBucketRange{
+		start: startSeconds,
+		end:   endSeconds,
+		step:  stepSeconds,
+		count: count,
+	}, true
+}
+
+func (br requestedBucketRange) bucketFor(ts int64) (int64, bool) {
+	if ts < br.start || ts > br.end {
+		return 0, false
+	}
+	offset := ts - br.start
+	return br.start + ((offset / br.step) * br.step), true
+}
+
+func patternBackendQueryLimit(start, end, step string, patternLimit int) int {
+	if patternLimit <= 0 {
+		patternLimit = 50
+	}
+	if patternLimit > maxPatternResponseLimit {
+		patternLimit = maxPatternResponseLimit
+	}
+	factor := 20
+	if bucketRange, ok := parseRequestedBucketRange(start, end, step); ok {
+		factor = bucketRange.count
+		if factor < 20 {
+			factor = 20
+		}
+		if factor > 200 {
+			factor = 200
+		}
+	}
+	limit := patternLimit * factor
+	if limit < 1000 {
+		limit = 1000
+	}
+	if limit > maxPatternBackendQueryLimit {
+		limit = maxPatternBackendQueryLimit
+	}
+	return limit
 }
 
 func sumHitsValues(body []byte) int {
@@ -8161,7 +8312,7 @@ func (p *Proxy) hitsToVolumeVector(body []byte) map[string]interface{} {
 		for i, v := range h.Values {
 			total += v
 			if i < len(h.Timestamps) {
-				lastTS = parseTimestampToUnix(h.Timestamps[i])
+				lastTS = parseTimestampToUnix(string(h.Timestamps[i]))
 			}
 		}
 		result = append(result, map[string]interface{}{
@@ -8178,17 +8329,53 @@ func (p *Proxy) hitsToVolumeVector(body []byte) map[string]interface{} {
 	}
 }
 
-func (p *Proxy) hitsToVolumeMatrix(body []byte) map[string]interface{} {
+func (p *Proxy) hitsToVolumeMatrix(body []byte, start, end, step string) map[string]interface{} {
 	hits := parseHits(body)
+	bucketRange, fillMissing := parseRequestedBucketRange(start, end, step)
 	result := make([]map[string]interface{}, 0, len(hits.Hits))
 	for _, h := range hits.Hits {
+		seriesFill := fillMissing
+		if seriesFill {
+			counts := make(map[int64]int, len(h.Timestamps))
+			mappedSamples := 0
+			for i, ts := range h.Timestamps {
+				if i >= len(h.Values) {
+					continue
+				}
+				parsedTS, ok := parseFlexibleUnixSeconds(string(ts))
+				if !ok {
+					continue
+				}
+				bucket, ok := bucketRange.bucketFor(parsedTS)
+				if !ok {
+					continue
+				}
+				counts[bucket] += h.Values[i]
+				mappedSamples++
+			}
+			if mappedSamples == 0 && len(h.Timestamps) > 0 {
+				seriesFill = false
+			}
+			if seriesFill {
+				values := make([][]interface{}, 0, bucketRange.count)
+				for ts := bucketRange.start; ts <= bucketRange.end; ts += bucketRange.step {
+					values = append(values, []interface{}{float64(ts), strconv.Itoa(counts[ts])})
+				}
+				result = append(result, map[string]interface{}{
+					"metric": p.translateVolumeMetric(h.Fields),
+					"values": values,
+				})
+				continue
+			}
+		}
+
 		values := make([][]interface{}, 0, len(h.Timestamps))
 		for i, ts := range h.Timestamps {
 			val := 0
 			if i < len(h.Values) {
 				val = h.Values[i]
 			}
-			values = append(values, []interface{}{parseTimestampToUnix(ts), strconv.Itoa(val)})
+			values = append(values, []interface{}{parseTimestampToUnix(string(ts)), strconv.Itoa(val)})
 		}
 		result = append(result, map[string]interface{}{
 			"metric": p.translateVolumeMetric(h.Fields),

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -175,6 +176,8 @@ type serverRuntimeOptions struct {
 	maxHeaderBytes       int
 	tlsClientCAFile      string
 	tlsRequireClientCert bool
+	connContext          func(context.Context, net.Conn) context.Context
+	connRotation         httpConnRotationConfig
 }
 
 type httpServer interface {
@@ -340,6 +343,10 @@ func run(
 	idleTimeout := fs.Duration("http-idle-timeout", 120*time.Second, "HTTP server idle timeout")
 	maxHeaderBytes := fs.Int("http-max-header-bytes", 1<<20, "HTTP max header size (default: 1MB)")
 	maxBodyBytes := fs.Int64("http-max-body-bytes", 10<<20, "HTTP max request body size (default: 10MB)")
+	httpConnMaxAge := fs.Duration("http-conn-max-age", 10*time.Minute, "Maximum lifetime for downstream HTTP/1.x keepalive connections before responding with Connection: close (0 disables)")
+	httpConnMaxAgeJitter := fs.Duration("http-conn-max-age-jitter", 2*time.Minute, "Jitter applied to downstream HTTP/1.x connection age rotation to avoid synchronized reconnects")
+	httpConnMaxRequests := fs.Int("http-conn-max-requests", 256, "Maximum downstream HTTP/1.x requests served on one keepalive connection before responding with Connection: close (0 disables)")
+	httpConnOverloadMaxAge := fs.Duration("http-conn-overload-max-age", 90*time.Second, "Shorter downstream HTTP/1.x connection lifetime applied while query_range backpressure is active (0 disables overload shedding)")
 
 	// TLS server
 	tlsCertFile := fs.String("tls-cert-file", "", "TLS certificate file for HTTPS server")
@@ -641,6 +648,12 @@ func run(
 			maxHeaderBytes:       *maxHeaderBytes,
 			tlsClientCAFile:      *tlsClientCAFile,
 			tlsRequireClientCert: *tlsRequireClientCert,
+			connRotation: httpConnRotationConfig{
+				maxAge:         *httpConnMaxAge,
+				maxAgeJitter:   *httpConnMaxAgeJitter,
+				maxRequests:    int64(*httpConnMaxRequests),
+				overloadMaxAge: *httpConnOverloadMaxAge,
+			},
 		},
 	}, logger, notify, newPusher)
 	if err != nil {
@@ -768,7 +781,12 @@ func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifie
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 	serverOpts := opts.serverOpts
-	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.responseCompression)
+	rotator := newHTTPConnRotator(serverOpts.connRotation, p.GetMetrics(), p.DownstreamConnectionPressure)
+	serverOpts.connContext = nil
+	if rotator != nil {
+		serverOpts.connContext = rotator.ConnContextHook()
+	}
+	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.responseCompression, rotator, p.GetMetrics())
 	srv, err := buildHTTPServer(serverOpts)
 	if err != nil {
 		stopOTLP()
@@ -776,6 +794,8 @@ func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifie
 		compatCleanup()
 		return nil, fmt.Errorf("build http server: %w", err)
 	}
+	srv.ConnState = p.GetMetrics().ConnStateHook()
+	srv.ConnState = p.GetMetrics().ConnStateHook()
 
 	reloadCh, shutdownCh := buildSignalChannels(notify)
 	return &runtimeState{
@@ -842,9 +862,20 @@ func maxBodyHandler(maxBytes int64, next http.Handler) http.Handler {
 	})
 }
 
-func wrapHandler(next http.Handler, maxBodyBytes int64, responseCompression string) http.Handler {
+func wrapHandler(next http.Handler, maxBodyBytes int64, responseCompression string, rotator *httpConnRotator, mm ...*metrics.Metrics) http.Handler {
 	handler := maxBodyHandler(maxBodyBytes, next)
-	return mw.CompressionHandler(handler, responseCompression)
+	handler = mw.CompressionHandler(handler, responseCompression)
+	if rotator != nil {
+		handler = rotator.Wrap(handler)
+	}
+	var m *metrics.Metrics
+	if len(mm) > 0 {
+		m = mm[0]
+	}
+	if m != nil {
+		handler = m.WrapHandler(handler)
+	}
+	return handler
 }
 
 func resolveResponseCompression(explicit string, legacyEnabled bool) (string, error) {
@@ -1374,6 +1405,7 @@ func buildHTTPServer(opts serverRuntimeOptions) (*http.Server, error) {
 		WriteTimeout:   opts.writeTimeout,
 		IdleTimeout:    opts.idleTimeout,
 		MaxHeaderBytes: opts.maxHeaderBytes,
+		ConnContext:    opts.connContext,
 	}
 	if opts.tlsClientCAFile != "" || opts.tlsRequireClientCert {
 		tlsCfg, err := buildServerTLSConfig(opts.tlsClientCAFile, opts.tlsRequireClientCert)

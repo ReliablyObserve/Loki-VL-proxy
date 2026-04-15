@@ -1283,6 +1283,38 @@ func TestQueryRangeWindow_ForceAdaptiveBackoff(t *testing.T) {
 	}
 }
 
+func TestQueryRangeWindow_DownstreamConnectionPressure(t *testing.T) {
+	p := &Proxy{
+		queryRangeAdaptiveParallel:      true,
+		queryRangeParallelMin:           2,
+		queryRangeParallelCurrent:       2,
+		queryRangeLatencyTarget:         100 * time.Millisecond,
+		queryRangeLatencyBackoff:        300 * time.Millisecond,
+		queryRangeErrorBackoffThreshold: 0.2,
+		queryRangeLatencyEWMA:           350 * time.Millisecond,
+	}
+	if !p.DownstreamConnectionPressure() {
+		t.Fatal("expected latency backoff to activate downstream connection pressure")
+	}
+
+	p.queryRangeLatencyEWMA = 50 * time.Millisecond
+	p.queryRangeErrorEWMA = 0.25
+	if !p.DownstreamConnectionPressure() {
+		t.Fatal("expected error EWMA backoff to activate downstream connection pressure")
+	}
+
+	p.queryRangeErrorEWMA = 0
+	p.queryRangeLatencyEWMA = 120 * time.Millisecond
+	if !p.DownstreamConnectionPressure() {
+		t.Fatal("expected min-parallel latency pressure to activate downstream shedding")
+	}
+
+	p.queryRangeAdaptiveParallel = false
+	if p.DownstreamConnectionPressure() {
+		t.Fatal("expected disabled adaptive mode to suppress downstream pressure")
+	}
+}
+
 type timeoutNetErr struct{}
 
 func (timeoutNetErr) Error() string   { return "timeout" }

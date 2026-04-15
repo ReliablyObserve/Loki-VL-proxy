@@ -194,6 +194,41 @@ func TestGap_VolumeRange_QueriesVLHits(t *testing.T) {
 	}
 }
 
+func TestGap_VolumeRange_FillsMissingBucketsAcrossRequestedRange(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"hits": []map[string]interface{}{
+				{
+					"fields":     map[string]string{"app": "nginx"},
+					"timestamps": []string{"2024-01-15T10:30:00Z", "2024-01-15T10:32:00Z"},
+					"values":     []int{100, 80},
+				},
+			},
+		})
+	}))
+	defer vlBackend.Close()
+
+	p := newGapTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/index/volume_range?query=%7B%7D&start=2024-01-15T10:30:00Z&end=2024-01-15T10:33:00Z&step=60", nil)
+	p.handleVolumeRange(w, r)
+
+	var resp map[string]interface{}
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	result := data["result"].([]interface{})
+	entry := result[0].(map[string]interface{})
+	values := entry["values"].([]interface{})
+	if len(values) != 4 {
+		t.Fatalf("expected 4 filled buckets, got %d", len(values))
+	}
+	second := values[1].([]interface{})
+	fourth := values[3].([]interface{})
+	if second[1] != "0" || fourth[1] != "0" {
+		t.Fatalf("expected zero-filled missing buckets, got values=%v", values)
+	}
+}
+
 // =============================================================================
 // Gap #4: /loki/api/v1/detected_field/{name}/values — missing endpoint
 // Loki response: {"values":["debug","info","warn","error"],"limit":1000}
