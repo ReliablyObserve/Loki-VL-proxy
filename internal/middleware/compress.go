@@ -56,7 +56,7 @@ func (w *compressedResponseWriter) Write(b []byte) (int, error) {
 	ensureSafeResponseHeaders(w.ResponseWriter, "text/plain; charset=utf-8")
 	if w.started {
 		if w.bypass {
-			header := w.ResponseWriter.Header()
+			header := w.Header()
 			if strings.TrimSpace(header.Get("Content-Type")) == "" {
 				header.Set("Content-Type", "text/plain; charset=utf-8")
 			}
@@ -74,7 +74,7 @@ func (w *compressedResponseWriter) Write(b []byte) (int, error) {
 		if err := w.startBypass(); err != nil {
 			return 0, err
 		}
-		header := w.ResponseWriter.Header()
+		header := w.Header()
 		if strings.TrimSpace(header.Get("Content-Type")) == "" {
 			header.Set("Content-Type", "text/plain; charset=utf-8")
 		}
