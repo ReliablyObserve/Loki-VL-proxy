@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- security/runtime: require explicit `tenant.allow-global` for wildcard tenant bypass, add bounded peer/backend body reads plus `ReadHeaderTimeout`, hide sensitive metrics labels by default, and harden admin/debug surfaces.
+
+### Documentation
+
+- security/docs: document explicit wildcard-tenant opt-in, low-cardinality default metrics export, `/metrics` concurrency bounds, and the Go `1.26.2` baseline.
+
+### Tests
+
+- security/metrics: add coverage for wildcard-tenant rejection, admin exposure validation, `ReadHeaderTimeout`, and sensitive-metrics export opt-in.
+
+### CI
+
+- toolchain/security: bump repo and workflow Go version to `1.26.2`, add `govulncheck` to CI, and override the docs-site `serialize-javascript` dependency to the non-vulnerable line.
+
 ## [1.2.0] - 2026-04-15
 
 ### Features
