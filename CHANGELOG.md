@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.24] - 2026-04-15
+
 ### Bug Fixes
 
 - backend detection: add startup fallback version sensing from `/metrics` (`vm_app_version`/`victorialogs_build_info`) when upstream proxies strip version headers, and infer conservative capability profiles from runtime endpoint probes when explicit semver is unavailable.
