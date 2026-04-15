@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - fleet-cache/config docs and Helm defaults: document default owner write-through behavior, `peer-write-through*` flags, and peer token requirements on both `/_cache/get` and `/_cache/set`.
 - fleet cache docs: add explicit collapse-forwarding status and a bounded hot-read-ahead design proposal (budgets, jitter, anti-storm guardrails, and validation plan).
+- docs: extend bounded hot-read-ahead proposal with planned flag surface, phased rollout plan, and proposed observability metrics for future regression gates.
 
 ## [1.0.24] - 2026-04-15
 

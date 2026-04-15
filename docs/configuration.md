@@ -594,6 +594,22 @@ A bounded peer hot-read-ahead mode is planned to periodically prefetch only top 
 It will be budgeted by keys, bytes, and concurrency to prevent peer traffic storms.
 See [Fleet Cache Architecture](fleet-cache.md#proposed-hot-read-ahead-bounded).
 
+Planned runtime flags (names reserved, not yet active):
+
+- `-peer-hot-read-ahead-enabled`
+- `-peer-hot-read-ahead-interval`
+- `-peer-hot-read-ahead-jitter`
+- `-peer-hot-read-ahead-top-n`
+- `-peer-hot-read-ahead-max-keys-per-interval`
+- `-peer-hot-read-ahead-max-bytes-per-interval`
+- `-peer-hot-read-ahead-max-concurrency`
+- `-peer-hot-read-ahead-min-ttl`
+- `-peer-hot-read-ahead-max-object-bytes`
+- `-peer-hot-read-ahead-tenant-fair-share`
+- `-peer-hot-read-ahead-error-backoff`
+
+These are documented to make rollout intent explicit for operators and CI contracts.
+
 ## Grafana Datasource Mapping
 
 These Grafana Loki datasource settings now have a direct proxy-side mapping:

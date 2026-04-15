@@ -301,6 +301,26 @@ Anti-storm guardrails (required):
 - Backoff on peer errors and circuit-breaker open states.
 - Tenant-aware fairness in hot-key selection.
 
+Proposed rollout phases:
+
+1. Phase 1: expose owner hot index endpoint and bounded pull loop (disabled by default).
+2. Phase 2: enable prefetch writes into local shadow cache with strict key/byte budgets.
+3. Phase 3: tune tenant fairness and adaptive backoff from live metrics.
+
+Planned read-ahead observability (metrics):
+
+```text
+loki_vl_proxy_peer_cache_hot_index_requests_total
+loki_vl_proxy_peer_cache_hot_index_errors_total
+loki_vl_proxy_peer_cache_read_ahead_prefetches_total
+loki_vl_proxy_peer_cache_read_ahead_prefetch_errors_total
+loki_vl_proxy_peer_cache_read_ahead_prefetch_bytes_total
+loki_vl_proxy_peer_cache_read_ahead_budget_drops_total
+loki_vl_proxy_peer_cache_read_ahead_tenant_skips_total
+```
+
+These are additive to existing peer cache metrics and intended to keep regression detection straightforward in dashboards and CI benchmark gates.
+
 Expected effect:
 
 - Lower VictoriaLogs fetch rate for repeatedly accessed hot keys.
