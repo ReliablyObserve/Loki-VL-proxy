@@ -274,6 +274,7 @@ func (p *OTLPPusher) buildPayload() map[string]interface{} {
 	metrics = append(metrics, p.systemMetrics(now)...)
 
 	p.metrics.mu.RLock()
+	metrics = append(metrics, p.connectionMetrics(now)...)
 	metrics = append(metrics, p.requestMetrics(now)...)
 	metrics = append(metrics, p.tenantMetrics(now)...)
 	metrics = append(metrics, p.clientErrorMetrics(now)...)
@@ -299,6 +300,37 @@ func (p *OTLPPusher) buildPayload() map[string]interface{} {
 				},
 			},
 		},
+	}
+}
+
+func (p *OTLPPusher) connectionMetrics(now int64) []map[string]interface{} {
+	gaugeKeys := make([]string, 0, len(p.metrics.connectionStates))
+	for state := range p.metrics.connectionStates {
+		gaugeKeys = append(gaugeKeys, state)
+	}
+	sort.Strings(gaugeKeys)
+	gaugePoints := make([]map[string]interface{}, 0, len(gaugeKeys))
+	for _, state := range gaugeKeys {
+		gaugePoints = append(gaugePoints,
+			p.gaugeDP("loki_vl_proxy_http_connections", float64(p.metrics.connectionStates[state].Load()), now, attr("state", state)),
+		)
+	}
+
+	transitionKeys := make([]string, 0, len(p.metrics.connectionTransitions))
+	for state := range p.metrics.connectionTransitions {
+		transitionKeys = append(transitionKeys, state)
+	}
+	sort.Strings(transitionKeys)
+	transitionPoints := make([]map[string]interface{}, 0, len(transitionKeys))
+	for _, state := range transitionKeys {
+		transitionPoints = append(transitionPoints,
+			p.counterDP("loki_vl_proxy_http_connection_transitions_total", p.metrics.connectionTransitions[state].Load(), now, attr("state", state)),
+		)
+	}
+
+	return []map[string]interface{}{
+		p.gaugeMetric("loki_vl_proxy_http_connections", "Current HTTP server connections by state.", "{connection}", gaugePoints...),
+		p.sumMetric("loki_vl_proxy_http_connection_transitions_total", "HTTP server connection state transitions.", "", transitionPoints...),
 	}
 }
 
@@ -722,6 +754,14 @@ func (p *OTLPPusher) clientMetrics(now int64) []map[string]interface{} {
 	}
 	if len(inflightPoints) > 0 {
 		metrics = append(metrics, p.gaugeMetric("loki_vl_proxy_client_inflight_requests", "In-flight requests by client identity.", "{request}", inflightPoints...))
+	}
+	rotationKeys := sortedKeys(mapsFromCounters(p.metrics.connectionRotations))
+	rotationPoints := make([]map[string]interface{}, 0, len(rotationKeys))
+	for _, reason := range rotationKeys {
+		rotationPoints = append(rotationPoints, p.counterDP("loki_vl_proxy_http_connection_rotations_total", p.metrics.connectionRotations[reason].Load(), now, attr("reason", reason)))
+	}
+	if len(rotationPoints) > 0 {
+		metrics = append(metrics, p.sumMetric("loki_vl_proxy_http_connection_rotations_total", "Downstream HTTP/1.x connection rotations triggered by the proxy.", "", rotationPoints...))
 	}
 	durationKeys := sortedKeys(mapsFromHists(p.metrics.clientDurations))
 	durationPoints := make([]map[string]interface{}, 0, len(durationKeys))

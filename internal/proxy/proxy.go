@@ -42,6 +42,14 @@ import (
 // Capped at 64KB before returning to prevent pool bloat from large responses.
 const maxPooledBufSize = 64 * 1024
 
+// compat cache capture buffers are pooled separately because large query_range
+// misses can otherwise spend most heap growth on append churn before the entry
+// is even admitted to cache.
+const (
+	maxPooledCompatCaptureBufSize = 64 * 1024
+	defaultCompatCaptureBufSize   = 32 * 1024
+)
+
 const (
 	patternDedupSourceMemory = "mem"
 	patternDedupSourceDisk   = "disk"
@@ -51,6 +59,16 @@ const (
 var jsonBufPool = sync.Pool{
 	New: func() interface{} {
 		return bytes.NewBuffer(make([]byte, 0, 4096))
+	},
+}
+
+type pooledCompatCaptureBuf struct {
+	data []byte
+}
+
+var compatCaptureBufPool = sync.Pool{
+	New: func() interface{} {
+		return &pooledCompatCaptureBuf{data: make([]byte, 0, defaultCompatCaptureBufSize)}
 	},
 }
 
@@ -275,8 +293,14 @@ type Config struct {
 	BackendHeaders     map[string]string // static headers to add to all VL requests
 	BackendBasicAuth   string            // "user:password" for VL backend basic auth
 	BackendCompression string            // upstream HTTP compression preference: auto, gzip, zstd, none
-	BackendTimeout     time.Duration     // bounded timeout for non-streaming backend requests
-	BackendTLSSkip     bool              // skip TLS verification for VL backend
+	// ClientResponseCompression controls downstream client-facing response
+	// compression policy used by the compatibility cache hit path.
+	ClientResponseCompression string
+	// ClientResponseCompressionMinBytes is the downstream compression threshold
+	// before the proxy spends CPU compressing a response.
+	ClientResponseCompressionMinBytes int
+	BackendTimeout                    time.Duration // bounded timeout for non-streaming backend requests
+	BackendTLSSkip                    bool          // skip TLS verification for VL backend
 	// BackendMinVersion defines the minimum VictoriaLogs version considered
 	// fully supported at startup compatibility check time.
 	BackendMinVersion string
@@ -420,6 +444,8 @@ const (
 	maxQueryLength = 65536 // 64KB
 	// maxLimitValue caps the number of results per query.
 	maxLimitValue                     = 10000
+	maxZeroFillBuckets                = 10000
+	maxPatternBackendQueryLimit       = 20000
 	maxUserDrivenSlicePrealloc        = 512
 	tailWriteTimeout                  = 2 * time.Second
 	maxMultiTenantFanout              = 64
@@ -472,6 +498,8 @@ type Proxy struct {
 	forwardCookies                        map[string]bool   // cookie names to copy from client request to VL
 	backendHeaders                        map[string]string // static headers on all VL requests
 	backendCompression                    string
+	clientResponseCompression             string
+	clientResponseCompressionMinBytes     int
 	backendMinVersion                     string
 	backendAllowUnsupportedVersion        bool
 	backendVersionCheckTimeout            time.Duration
@@ -718,16 +746,16 @@ func New(cfg Config) (*Proxy, error) {
 	})).With("component", "proxy")
 
 	maxConcurrent := cfg.MaxConcurrent
-	if maxConcurrent == 0 {
-		maxConcurrent = 100 // sensible default
+	if maxConcurrent < 0 {
+		maxConcurrent = 0
 	}
 	ratePerSec := cfg.RatePerSecond
-	if ratePerSec == 0 {
-		ratePerSec = 50 // 50 req/s per client default
+	if ratePerSec < 0 {
+		ratePerSec = 0
 	}
 	rateBurst := cfg.RateBurst
-	if rateBurst == 0 {
-		rateBurst = 100
+	if rateBurst < 0 {
+		rateBurst = 0
 	}
 	cbFail := cfg.CBFailThreshold
 	if cbFail == 0 {
@@ -979,6 +1007,8 @@ func New(cfg Config) (*Proxy, error) {
 		forwardCookies:                        forwardCookies,
 		backendHeaders:                        backendHeaders,
 		backendCompression:                    normalizeBackendCompression(cfg.BackendCompression),
+		clientResponseCompression:             cfg.ClientResponseCompression,
+		clientResponseCompressionMinBytes:     cfg.ClientResponseCompressionMinBytes,
 		backendMinVersion:                     backendMinVersion,
 		backendAllowUnsupportedVersion:        cfg.BackendAllowUnsupportedVersion,
 		backendVersionCheckTimeout:            backendVersionCheckTimeout,
@@ -1489,6 +1519,33 @@ func (p *Proxy) compatCacheKey(endpoint string, r *http.Request) (string, bool) 
 	return "compat:v1:" + endpoint + ":" + r.Header.Get("X-Scope-OrgID") + ":" + r.URL.Path + "?" + r.URL.RawQuery, true
 }
 
+func compatCacheVariantKey(baseKey, encoding string) string {
+	return baseKey + ":enc:" + encoding
+}
+
+func (p *Proxy) compatCacheResponseEncoding(r *http.Request) (string, int) {
+	return mw.PlanResponseCompression(r, mw.CompressionOptions{
+		Mode:     p.clientResponseCompression,
+		MinBytes: p.clientResponseCompressionMinBytes,
+	})
+}
+
+func (p *Proxy) compatCacheEncodedVariant(cacheKey string, body []byte, ttl time.Duration, encoding string, minBytes int) ([]byte, string, bool) {
+	if encoding == "" || len(body) == 0 || len(body) < minBytes {
+		return body, "", true
+	}
+	variantKey := compatCacheVariantKey(cacheKey, encoding)
+	if cachedVariant, ok := p.compatCache.Get(variantKey); ok {
+		return cachedVariant, encoding, true
+	}
+	encoded, err := mw.EncodeResponseBody(encoding, body)
+	if err != nil || len(encoded) >= len(body) {
+		return body, "", false
+	}
+	p.compatCache.SetWithTTL(variantKey, encoded, ttl)
+	return encoded, encoding, true
+}
+
 func compatCacheResponseAllowed(rec *httptest.ResponseRecorder) bool {
 	if rec == nil || rec.Code != http.StatusOK || rec.Flushed {
 		return false
@@ -1497,6 +1554,125 @@ func compatCacheResponseAllowed(rec *httptest.ResponseRecorder) bool {
 		return false
 	}
 	contentType := strings.ToLower(strings.TrimSpace(rec.Header().Get("Content-Type")))
+	return contentType == "" || strings.Contains(contentType, "application/json")
+}
+
+type compatCacheCaptureWriter struct {
+	http.ResponseWriter
+	body       []byte
+	bufHolder  *pooledCompatCaptureBuf
+	code       int
+	flushed    bool
+	limit      int
+	overflowed bool
+}
+
+func newCompatCacheCaptureWriter(w http.ResponseWriter, limit int) *compatCacheCaptureWriter {
+	body, holder := acquireCompatCaptureBuf(limit)
+	return &compatCacheCaptureWriter{
+		ResponseWriter: w,
+		body:           body,
+		bufHolder:      holder,
+		limit:          limit,
+	}
+}
+
+func (w *compatCacheCaptureWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *compatCacheCaptureWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	if strings.TrimSpace(w.Header().Get("Content-Type")) == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	if strings.TrimSpace(w.Header().Get("X-Content-Type-Options")) == "" {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+	}
+	w.capture(b)
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *compatCacheCaptureWriter) Flush() {
+	w.flushed = true
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *compatCacheCaptureWriter) capture(b []byte) {
+	if w.overflowed || len(b) == 0 {
+		return
+	}
+	if w.limit > 0 && len(w.body)+len(b) > w.limit {
+		w.overflow()
+		return
+	}
+	w.body = append(w.body, b...)
+}
+
+func (w *compatCacheCaptureWriter) overflow() {
+	if w.overflowed {
+		return
+	}
+	w.overflowed = true
+	releaseCompatCaptureBuf(w.body, w.bufHolder)
+	w.body = nil
+	w.bufHolder = nil
+}
+
+func (w *compatCacheCaptureWriter) CapturedBody() []byte {
+	if w.overflowed {
+		return nil
+	}
+	return w.body
+}
+
+func (w *compatCacheCaptureWriter) Release() {
+	releaseCompatCaptureBuf(w.body, w.bufHolder)
+	w.body = nil
+	w.bufHolder = nil
+}
+
+func acquireCompatCaptureBuf(limit int) ([]byte, *pooledCompatCaptureBuf) {
+	size := defaultCompatCaptureBufSize
+	if limit > 0 {
+		size = min(size, limit)
+	}
+	holder := compatCaptureBufPool.Get().(*pooledCompatCaptureBuf)
+	if cap(holder.data) < size {
+		holder.data = make([]byte, 0, size)
+	}
+	holder.data = holder.data[:0]
+	return holder.data, holder
+}
+
+func releaseCompatCaptureBuf(buf []byte, holder *pooledCompatCaptureBuf) {
+	if holder == nil {
+		return
+	}
+	if buf != nil && cap(buf) <= maxPooledCompatCaptureBufSize {
+		holder.data = buf[:0]
+	} else {
+		holder.data = make([]byte, 0, defaultCompatCaptureBufSize)
+	}
+	compatCaptureBufPool.Put(holder)
+}
+
+func compatCacheCaptureAllowed(code int, flushed bool, header http.Header) bool {
+	if code == 0 {
+		code = http.StatusOK
+	}
+	if code != http.StatusOK || flushed {
+		return false
+	}
+	if len(header.Values("Set-Cookie")) > 0 {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(header.Get("Content-Type")))
 	return contentType == "" || strings.Contains(contentType, "application/json")
 }
 
@@ -1528,10 +1704,18 @@ func (p *Proxy) compatCacheMiddleware(endpoint, route string, next http.HandlerF
 			next(w, r)
 			return
 		}
-		if cached, ok := p.compatCache.Get(cacheKey); ok {
+		if cached, remainingTTL, ok := p.compatCache.GetWithTTL(cacheKey); ok {
 			setCacheResult(r.Context(), "hit")
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(cached)
+			body := cached
+			if encoding, minBytes := p.compatCacheResponseEncoding(r); encoding != "" {
+				if encodedBody, encodedAs, ok := p.compatCacheEncodedVariant(cacheKey, cached, remainingTTL, encoding, minBytes); ok && encodedAs != "" {
+					w.Header().Set("Content-Encoding", encodedAs)
+					w.Header().Set("Vary", "Accept-Encoding")
+					body = encodedBody
+				}
+			}
+			_, _ = w.Write(body)
 			elapsed := time.Since(start)
 			p.metrics.RecordRequestWithRoute(endpoint, route, http.StatusOK, elapsed)
 			p.metrics.RecordCacheHit()
@@ -1542,26 +1726,41 @@ func (p *Proxy) compatCacheMiddleware(endpoint, route string, next http.HandlerF
 		}
 
 		setCacheResult(r.Context(), "miss")
-		rec := httptest.NewRecorder()
-		next(rec, r)
-		copyHeaders(w.Header(), rec.Header())
-		if rec.Code != http.StatusOK {
-			w.WriteHeader(rec.Code)
-			_, _ = w.Write(rec.Body.Bytes())
-			return
+		var (
+			capture            *compatCacheCaptureWriter
+			captureAllowed     bool
+			capturePatternsNil bool
+			captureBodyLen     int
+		)
+		if encoding, _ := p.compatCacheResponseEncoding(r); encoding != "" {
+			_ = mw.RegisterEncodedResponseCapture(w, encoding, func(encodedAs string, encoded []byte) {
+				if !captureAllowed || capturePatternsNil || captureBodyLen == 0 {
+					return
+				}
+				if len(encoded) == 0 || len(encoded) >= captureBodyLen {
+					return
+				}
+				p.compatCache.SetWithTTL(compatCacheVariantKey(cacheKey, encodedAs), encoded, ttl)
+			})
 		}
-
-		body := rec.Body.Bytes()
-		if w.Header().Get("Content-Type") == "" {
-			w.Header().Set("Content-Type", "application/json")
-		}
-		_, _ = w.Write(body)
-		if compatCacheResponseAllowed(rec) {
-			if endpoint == "patterns" && patternsPayloadEmpty(body) {
-				return
+		capture = newCompatCacheCaptureWriter(w, p.compatCache.MaxEntrySizeBytes())
+		next(capture, r)
+		if compatCacheCaptureAllowed(capture.code, capture.flushed, w.Header()) {
+			body := capture.CapturedBody()
+			captureBodyLen = len(body)
+			captureAllowed = captureBodyLen > 0
+			if endpoint == "patterns" && captureAllowed {
+				capturePatternsNil = patternsPayloadEmpty(body)
+				if capturePatternsNil {
+					capture.Release()
+					return
+				}
 			}
-			p.compatCache.SetWithTTL(cacheKey, append([]byte(nil), body...), ttl)
+			if captureAllowed {
+				p.compatCache.SetWithTTL(cacheKey, append([]byte(nil), body...), ttl)
+			}
 		}
+		capture.Release()
 	}
 }
 
@@ -1780,11 +1979,14 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	var (
 		sc       = &statusCapture{ResponseWriter: w, code: 200}
 		capture  *bufferedResponseWriter
-		cacheOut []byte
+		cacheTap *compatCacheCaptureWriter
 	)
-	if len(withoutLabels) > 0 || cacheable {
+	if len(withoutLabels) > 0 {
 		capture = &bufferedResponseWriter{header: make(http.Header)}
 		sc = &statusCapture{ResponseWriter: capture, code: 200}
+	} else if cacheable {
+		cacheTap = newCompatCacheCaptureWriter(w, p.cache.MaxEntrySizeBytes())
+		sc = &statusCapture{ResponseWriter: cacheTap, code: 200}
 	}
 
 	// Check for subquery expression (e.g., max_over_time(rate(...)[1h:5m]))
@@ -1802,7 +2004,7 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if capture != nil {
-		cacheOut = append([]byte(nil), capture.body...)
+		cacheOut := capture.body
 		if len(withoutLabels) > 0 {
 			cacheOut = applyWithoutGrouping(cacheOut, withoutLabels)
 		}
@@ -1815,8 +2017,15 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write(cacheOut)
 		if cacheable && sc.code == http.StatusOK {
-			p.cache.SetWithTTL(cacheKey, cacheOut, CacheTTLs["query_range"])
+			p.cache.SetWithTTL(cacheKey, append([]byte(nil), cacheOut...), CacheTTLs["query_range"])
 		}
+	} else if cacheTap != nil {
+		if cacheable && sc.code == http.StatusOK {
+			if body := cacheTap.CapturedBody(); len(body) > 0 {
+				p.cache.SetWithTTL(cacheKey, append([]byte(nil), body...), CacheTTLs["query_range"])
+			}
+		}
+		cacheTap.Release()
 	}
 
 	elapsed := time.Since(start)
@@ -2557,9 +2766,6 @@ func patternSnapshotIdentityFromCacheKey(cacheKey string) string {
 		return ""
 	}
 	orgID := strings.TrimSpace(parts[1])
-	if orgID == "" {
-		return ""
-	}
 	params, err := url.ParseQuery(parts[2])
 	if err != nil {
 		return ""
@@ -2583,6 +2789,40 @@ func betterPatternSnapshotEntry(current, incoming patternSnapshotEntry, currentK
 	}
 	// Deterministic tie-breaker.
 	return incomingKey > currentKey
+}
+
+func (p *Proxy) latestPatternSnapshotPayload(cacheKey string) ([]byte, bool) {
+	if p == nil || !p.patternsEnabled || strings.TrimSpace(p.patternsPersistPath) == "" {
+		return nil, false
+	}
+	identity := patternSnapshotIdentityFromCacheKey(cacheKey)
+	if identity == "" {
+		return nil, false
+	}
+
+	p.patternsSnapshotMu.RLock()
+	defer p.patternsSnapshotMu.RUnlock()
+
+	var (
+		bestKey   string
+		bestEntry patternSnapshotEntry
+	)
+	for key, entry := range p.patternsSnapshotEntries {
+		if patternSnapshotIdentityFromCacheKey(key) != identity {
+			continue
+		}
+		if entry.PatternCount <= 0 || len(entry.Value) == 0 {
+			continue
+		}
+		if bestKey == "" || betterPatternSnapshotEntry(bestEntry, entry, bestKey, key) {
+			bestKey = key
+			bestEntry = entry
+		}
+	}
+	if bestKey == "" {
+		return nil, false
+	}
+	return append([]byte(nil), bestEntry.Value...), true
 }
 
 func (p *Proxy) compactPatternSnapshotEntriesLocked() (int, int) {
@@ -4296,7 +4536,7 @@ func (p *Proxy) computeVolumeRangeResult(ctx context.Context, query, start, end,
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	return p.hitsToVolumeMatrix(body), nil
+	return p.hitsToVolumeMatrix(body, start, end, step), nil
 }
 
 func (p *Proxy) refreshVolumeRangeCacheAsync(orgID, cacheKey, rawQuery, start, end, step, targetLabels string) {
@@ -4651,9 +4891,19 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		}
 		return entries, true
 	}
+	params.Set("limit", strconv.Itoa(patternBackendQueryLimit(startParam, endParam, stepParam, patternLimit)))
 
 	// Use /query with stratified windowing to preserve full selected-range buckets.
 	entries, _ := fetchPatterns("/select/logsql/query")
+	if len(entries) == 0 {
+		if fallbackPayload, ok := p.latestPatternSnapshotPayload(cacheWriteKey); ok {
+			resultBody := p.applyCustomPatternsToPayload(fallbackPayload, startParam, endParam, stepParam, patternLimit)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(resultBody)
+			p.metrics.RecordRequest("patterns", http.StatusOK, time.Since(start))
+			return
+		}
+	}
 	if entries == nil {
 		entries = []patternResultEntry{}
 	}
@@ -5347,16 +5597,12 @@ func normalizePatternCacheStep(step string) string {
 	return dur.String()
 }
 
-func (p *Proxy) maybeAutodetectPatternsFromNDJSON(orgID, query, start, end, step string, body []byte) {
-	if !p.patternsEnabled || !p.patternsAutodetectFromQueries || len(body) == 0 {
+func (p *Proxy) storeAutodetectedPatterns(orgID, query, start, end, step string, patterns []map[string]interface{}) {
+	if !p.patternsEnabled || !p.patternsAutodetectFromQueries || len(patterns) == 0 {
 		return
 	}
 	cacheKey := p.patternsAutodetectCacheKey(orgID, query, start, end, step)
 	if cacheKey == "" {
-		return
-	}
-	patterns := extractLogPatterns(body, step, maxPatternResponseLimit)
-	if len(patterns) == 0 {
 		return
 	}
 	p.metrics.RecordPatternsDetected(len(patterns))
@@ -5376,25 +5622,8 @@ func (p *Proxy) maybeAutodetectPatternsFromWindowEntries(orgID, query, start, en
 	if !p.patternsEnabled || !p.patternsAutodetectFromQueries || len(entries) == 0 {
 		return
 	}
-	cacheKey := p.patternsAutodetectCacheKey(orgID, query, start, end, step)
-	if cacheKey == "" {
-		return
-	}
 	patterns := extractLogPatternsFromWindowEntries(entries, step, maxPatternResponseLimit)
-	if len(patterns) == 0 {
-		return
-	}
-	p.metrics.RecordPatternsDetected(len(patterns))
-	resultBody, err := json.Marshal(map[string]interface{}{
-		"status": "success",
-		"data":   patterns,
-	})
-	if err != nil {
-		return
-	}
-	now := time.Now().UTC()
-	p.cache.SetWithTTL(cacheKey, resultBody, patternsCacheRetention)
-	p.recordPatternSnapshotEntry(cacheKey, resultBody, now)
+	p.storeAutodetectedPatterns(orgID, query, start, end, step, patterns)
 }
 
 // handleFormatQuery returns the query as-is (pretty-printing is client-side for LogQL).
@@ -7512,19 +7741,27 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 		return
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	p.maybeAutodetectPatternsFromNDJSON(
+	collectPatterns := p.patternsEnabled && p.patternsAutodetectFromQueries
+	streams, patterns, err := p.vlReaderToLokiStreams(
+		resp.Body,
+		r.FormValue("query"),
+		r.FormValue("step"),
+		categorizedLabels,
+		emitStructuredMetadata,
+		collectPatterns,
+	)
+	if err != nil {
+		p.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	p.storeAutodetectedPatterns(
 		r.Header.Get("X-Scope-OrgID"),
 		r.FormValue("query"),
 		r.FormValue("start"),
 		r.FormValue("end"),
 		r.FormValue("step"),
-		body,
+		patterns,
 	)
-
-	// VL returns newline-delimited JSON, each line is a log entry.
-	// Loki expects: {"status":"success","data":{"resultType":"streams","result":[...]}}
-	streams := p.vlLogsToLokiStreams(body, r.FormValue("query"), categorizedLabels, emitStructuredMetadata)
 
 	// Apply derived fields (extract trace_id etc. from log lines)
 	if len(p.derivedFields) > 0 {
@@ -7545,7 +7782,7 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 		applyLineFormatTemplate(streams, tmpl)
 	}
 
-	result, _ := json.Marshal(map[string]interface{}{
+	p.writeJSON(w, map[string]interface{}{
 		"status": "success",
 		"data": func() map[string]interface{} {
 			data := map[string]interface{}{
@@ -7559,8 +7796,6 @@ func (p *Proxy) proxyLogQuery(w http.ResponseWriter, r *http.Request, logsqlQuer
 			return data
 		}(),
 	})
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(result)
 }
 
 // streamLogQuery streams VL NDJSON response as chunked Loki-compatible JSON.
@@ -7810,21 +8045,39 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 	return result
 }
 
-func (p *Proxy) vlLogsToLokiStreams(body []byte, originalQuery string, categorizedLabels bool, emitStructuredMetadata bool) []map[string]interface{} {
+type cachedLogQueryStreamDescriptor struct {
+	key              string
+	rawLabels        map[string]string
+	translatedLabels map[string]string
+}
+
+func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, categorizedLabels bool, emitStructuredMetadata bool, collectPatterns bool) ([]map[string]interface{}, []map[string]interface{}, error) {
 	type streamEntry struct {
 		Labels map[string]string
 		Values []interface{}
 	}
 
-	streamMap := make(map[string]*streamEntry, len(body)/256+1)
-	start := 0
-	for i := 0; i <= len(body); i++ {
-		if i < len(body) && body[i] != '\n' {
-			continue
-		}
-		line := body[start:i]
-		start = i + 1
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
+	streamMap := make(map[string]*streamEntry, 32)
+	streamDescriptorCache := make(map[string]cachedLogQueryStreamDescriptor, 16)
+	streamLabelCache := make(map[string]map[string]string, 16)
+	exposureCache := make(map[string][]metadataFieldExposure, 16)
+	classifyAsParsed := hasParserStage(originalQuery, "json") || hasParserStage(originalQuery, "logfmt")
+
+	var (
+		miner        *patternMiner
+		stepSeconds  int64
+		patternCount int
+	)
+	if collectPatterns {
+		miner = newPatternMiner()
+		stepSeconds = parsePatternStepSeconds(step)
+	}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
 		for len(line) > 0 && (line[0] == ' ' || line[0] == '\t' || line[0] == '\r') {
 			line = line[1:]
 		}
@@ -7855,26 +8108,40 @@ func (p *Proxy) vlLogsToLokiStreams(body []byte, originalQuery string, categoriz
 			continue
 		}
 		msg, _ := stringifyEntryValue(entry["_msg"])
+		rawStream := asString(entry["_stream"])
+		level, _ := stringifyEntryValue(entry["level"])
 
-		labels, structuredMetadata, parsedFields := p.classifyEntryFields(entry, originalQuery)
-		streamKey := canonicalLabelsKey(labels)
-		se, ok := streamMap[streamKey]
+		desc := p.logQueryStreamDescriptor(rawStream, level, streamLabelCache, streamDescriptorCache)
+		structuredMetadata, parsedFields := p.classifyEntryMetadataFields(entry, desc.rawLabels, classifyAsParsed, exposureCache)
+		se, ok := streamMap[desc.key]
 		if !ok {
-			translatedLabels := labels
-			if !p.labelTranslator.IsPassthrough() {
-				translatedLabels = p.labelTranslator.TranslateLabelsMap(labels)
-			}
-			ensureDetectedLevel(translatedLabels)
-			ensureSyntheticServiceName(translatedLabels)
-
 			se = &streamEntry{
-				Labels: translatedLabels,
+				Labels: desc.translatedLabels,
 				Values: make([]interface{}, 0, 8),
 			}
-			streamMap[streamKey] = se
+			streamMap[desc.key] = se
 		}
 		se.Values = append(se.Values, buildStreamValue(tsNanos, msg, structuredMetadata, parsedFields, emitStructuredMetadata, categorizedLabels))
+
+		if miner != nil {
+			levelValue := strings.TrimSpace(desc.rawLabels["detected_level"])
+			if levelValue == "" {
+				levelValue = strings.TrimSpace(desc.rawLabels["level"])
+			}
+			if unixSeconds, ok := parseFlexibleUnixSeconds(timeStr); ok {
+				bucket := unixSeconds
+				if stepSeconds > 0 {
+					bucket = (bucket / stepSeconds) * stepSeconds
+				}
+				miner.Observe(levelValue, msg, bucket)
+				patternCount++
+			}
+		}
+
 		vlEntryPool.Put(entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
 	}
 
 	result := make([]map[string]interface{}, 0, len(streamMap))
@@ -7884,7 +8151,109 @@ func (p *Proxy) vlLogsToLokiStreams(body []byte, originalQuery string, categoriz
 			"values": se.Values,
 		})
 	}
-	return result
+
+	var patterns []map[string]interface{}
+	if miner != nil && patternCount > 0 {
+		patterns = buildPatternResponse(miner, maxPatternResponseLimit)
+	}
+	return result, patterns, nil
+}
+
+func (p *Proxy) logQueryStreamDescriptor(rawStream, level string, streamLabelCache map[string]map[string]string, descriptorCache map[string]cachedLogQueryStreamDescriptor) cachedLogQueryStreamDescriptor {
+	cacheKey := rawStream + "\x00" + strings.TrimSpace(level)
+	if desc, ok := descriptorCache[cacheKey]; ok {
+		return desc
+	}
+
+	baseLabels, ok := streamLabelCache[rawStream]
+	if !ok {
+		baseLabels = parseStreamLabels(rawStream)
+		streamLabelCache[rawStream] = baseLabels
+	}
+
+	rawLabels := cloneStringMap(baseLabels)
+	if trimmed := strings.TrimSpace(level); trimmed != "" {
+		rawLabels["level"] = trimmed
+	}
+	ensureDetectedLevel(rawLabels)
+	ensureSyntheticServiceName(rawLabels)
+
+	translatedLabels := rawLabels
+	if p != nil && p.labelTranslator != nil && !p.labelTranslator.IsPassthrough() {
+		translatedLabels = p.labelTranslator.TranslateLabelsMap(rawLabels)
+		ensureDetectedLevel(translatedLabels)
+		ensureSyntheticServiceName(translatedLabels)
+	}
+
+	desc := cachedLogQueryStreamDescriptor{
+		key:              canonicalLabelsKey(rawLabels),
+		rawLabels:        rawLabels,
+		translatedLabels: translatedLabels,
+	}
+	descriptorCache[cacheKey] = desc
+	return desc
+}
+
+func (p *Proxy) classifyEntryMetadataFields(entry map[string]interface{}, streamLabels map[string]string, classifyAsParsed bool, exposureCache map[string][]metadataFieldExposure) (map[string]string, map[string]string) {
+	var (
+		parsedFields             map[string]string
+		structuredMetadataFields map[string]string
+	)
+
+	for key, value := range entry {
+		if isVLInternalField(key) || key == "_stream_id" || key == "level" {
+			continue
+		}
+		if _, exists := streamLabels[key]; exists {
+			continue
+		}
+		stringValue, ok := stringifyEntryValue(value)
+		if !ok || strings.TrimSpace(stringValue) == "" {
+			continue
+		}
+		exposures := p.metadataFieldExposuresCached(key, exposureCache)
+		for _, exposure := range exposures {
+			if _, exists := streamLabels[exposure.name]; exists && !exposure.isAlias {
+				continue
+			}
+			if classifyAsParsed {
+				if parsedFields == nil {
+					parsedFields = make(map[string]string, 4)
+				}
+				parsedFields[exposure.name] = stringValue
+				continue
+			}
+			if structuredMetadataFields == nil {
+				structuredMetadataFields = make(map[string]string, 4)
+			}
+			structuredMetadataFields[exposure.name] = stringValue
+		}
+	}
+
+	return structuredMetadataFields, parsedFields
+}
+
+func (p *Proxy) metadataFieldExposuresCached(vlField string, exposureCache map[string][]metadataFieldExposure) []metadataFieldExposure {
+	if len(exposureCache) == 0 {
+		return p.metadataFieldExposures(vlField)
+	}
+	if exposures, ok := exposureCache[vlField]; ok {
+		return exposures
+	}
+	exposures := p.metadataFieldExposures(vlField)
+	exposureCache[vlField] = exposures
+	return exposures
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func stringifyEntryValue(value interface{}) (string, bool) {
@@ -7916,36 +8285,35 @@ func buildStreamValues(ts, msg string, structuredMetadata map[string]string, par
 	return []interface{}{buildStreamValue(ts, msg, structuredMetadata, parsedFields, emitStructuredMetadata, categorizedLabels)}
 }
 
+var emptyCategorizedMetadata = map[string]interface{}{}
+
 func buildStreamValue(ts, msg string, structuredMetadata map[string]string, parsedFields map[string]string, emitStructuredMetadata bool, categorizedLabels bool) interface{} {
 	if !categorizedLabels {
 		return []interface{}{ts, msg}
 	}
 
-	metadata := map[string]interface{}{}
 	if emitStructuredMetadata {
+		metadata := make(map[string]interface{}, 2)
 		if len(structuredMetadata) > 0 {
 			metadata["structuredMetadata"] = metadataFieldMap(structuredMetadata)
 		}
 		if len(parsedFields) > 0 {
 			metadata["parsed"] = metadataFieldMap(parsedFields)
 		}
+		if len(metadata) > 0 {
+			return []interface{}{ts, msg, metadata}
+		}
 	}
-	return []interface{}{ts, msg, metadata}
+	return []interface{}{ts, msg, emptyCategorizedMetadata}
 }
 
 func metadataFieldMap(fields map[string]string) map[string]string {
 	if len(fields) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	pairs := make(map[string]string, len(keys))
-	for _, key := range keys {
-		pairs[key] = fields[key]
+	pairs := make(map[string]string, len(fields))
+	for key, value := range fields {
+		pairs[key] = value
 	}
 	return pairs
 }
@@ -8102,28 +8470,176 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 type vlHitsResponse struct {
 	Hits []struct {
 		Fields     map[string]string `json:"fields"`
-		Timestamps []string          `json:"timestamps"` // VL v1.49+: RFC3339 strings
+		Timestamps []vlTimestamp     `json:"timestamps"`
 		Values     []int             `json:"values"`
 	} `json:"hits"`
 }
 
+type vlTimestamp string
+
+func (t *vlTimestamp) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*t = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*t = vlTimestamp(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*t = vlTimestamp(n.String())
+	return nil
+}
+
 // parseTimestampToUnix converts a VL timestamp (RFC3339 string or numeric) to Unix seconds.
 func parseTimestampToUnix(ts string) float64 {
-	t, err := time.Parse(time.RFC3339, ts)
-	if err == nil {
-		return float64(t.Unix())
-	}
-	// Try numeric fallback
-	if f, err := strconv.ParseFloat(ts, 64); err == nil {
-		return f
+	if parsed, ok := parseFlexibleUnixSeconds(ts); ok {
+		return float64(parsed)
 	}
 	return float64(time.Now().Unix())
 }
 
 func parseHits(body []byte) vlHitsResponse {
 	var resp vlHitsResponse
-	json.Unmarshal(body, &resp)
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return vlHitsResponse{}
+	}
 	return resp
+}
+
+type requestedBucketRange struct {
+	start int64
+	end   int64
+	step  int64
+	count int
+}
+
+func parseFlexibleUnixSeconds(raw string) (int64, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.Unix(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.Unix(), true
+	}
+	if integer, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return normalizeUnixSeconds(integer), true
+	}
+	if floating, err := strconv.ParseFloat(value, 64); err == nil {
+		abs := math.Abs(floating)
+		switch {
+		case abs >= 1_000_000_000_000_000_000:
+			return int64(floating / 1_000_000_000), true
+		case abs >= 1_000_000_000_000_000:
+			return int64(floating / 1_000_000), true
+		case abs >= 1_000_000_000_000:
+			return int64(floating / 1_000), true
+		default:
+			return int64(floating), true
+		}
+	}
+	return 0, false
+}
+
+func normalizeUnixSeconds(v int64) int64 {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs >= 1_000_000_000_000_000_000:
+		return v / 1_000_000_000
+	case abs >= 1_000_000_000_000_000:
+		return v / 1_000_000
+	case abs >= 1_000_000_000_000:
+		return v / 1_000
+	default:
+		return v
+	}
+}
+
+func parseStepSeconds(step string) (int64, bool) {
+	value := strings.TrimSpace(step)
+	if value == "" {
+		return 0, false
+	}
+	if d, err := time.ParseDuration(value); err == nil && d > 0 {
+		return int64(d / time.Second), true
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return int64(seconds), true
+	}
+	return 0, false
+}
+
+func parseRequestedBucketRange(start, end, step string) (requestedBucketRange, bool) {
+	startSeconds, ok := parseFlexibleUnixSeconds(start)
+	if !ok {
+		return requestedBucketRange{}, false
+	}
+	endSeconds, ok := parseFlexibleUnixSeconds(end)
+	if !ok || endSeconds < startSeconds {
+		return requestedBucketRange{}, false
+	}
+	stepSeconds, ok := parseStepSeconds(step)
+	if !ok || stepSeconds <= 0 {
+		return requestedBucketRange{}, false
+	}
+	count := int(((endSeconds - startSeconds) / stepSeconds) + 1)
+	if count <= 0 || count > maxZeroFillBuckets {
+		return requestedBucketRange{}, false
+	}
+	return requestedBucketRange{
+		start: startSeconds,
+		end:   endSeconds,
+		step:  stepSeconds,
+		count: count,
+	}, true
+}
+
+func (br requestedBucketRange) bucketFor(ts int64) (int64, bool) {
+	if ts < br.start || ts > br.end {
+		return 0, false
+	}
+	offset := ts - br.start
+	return br.start + ((offset / br.step) * br.step), true
+}
+
+func patternBackendQueryLimit(start, end, step string, patternLimit int) int {
+	if patternLimit <= 0 {
+		patternLimit = 50
+	}
+	if patternLimit > maxPatternResponseLimit {
+		patternLimit = maxPatternResponseLimit
+	}
+	factor := 20
+	if bucketRange, ok := parseRequestedBucketRange(start, end, step); ok {
+		factor = bucketRange.count
+		if factor < 20 {
+			factor = 20
+		}
+		if factor > 200 {
+			factor = 200
+		}
+	}
+	limit := patternLimit * factor
+	if limit < 1000 {
+		limit = 1000
+	}
+	if limit > maxPatternBackendQueryLimit {
+		limit = maxPatternBackendQueryLimit
+	}
+	return limit
 }
 
 func sumHitsValues(body []byte) int {
@@ -8161,7 +8677,7 @@ func (p *Proxy) hitsToVolumeVector(body []byte) map[string]interface{} {
 		for i, v := range h.Values {
 			total += v
 			if i < len(h.Timestamps) {
-				lastTS = parseTimestampToUnix(h.Timestamps[i])
+				lastTS = parseTimestampToUnix(string(h.Timestamps[i]))
 			}
 		}
 		result = append(result, map[string]interface{}{
@@ -8178,17 +8694,53 @@ func (p *Proxy) hitsToVolumeVector(body []byte) map[string]interface{} {
 	}
 }
 
-func (p *Proxy) hitsToVolumeMatrix(body []byte) map[string]interface{} {
+func (p *Proxy) hitsToVolumeMatrix(body []byte, start, end, step string) map[string]interface{} {
 	hits := parseHits(body)
+	bucketRange, fillMissing := parseRequestedBucketRange(start, end, step)
 	result := make([]map[string]interface{}, 0, len(hits.Hits))
 	for _, h := range hits.Hits {
+		seriesFill := fillMissing
+		if seriesFill {
+			counts := make(map[int64]int, len(h.Timestamps))
+			mappedSamples := 0
+			for i, ts := range h.Timestamps {
+				if i >= len(h.Values) {
+					continue
+				}
+				parsedTS, ok := parseFlexibleUnixSeconds(string(ts))
+				if !ok {
+					continue
+				}
+				bucket, ok := bucketRange.bucketFor(parsedTS)
+				if !ok {
+					continue
+				}
+				counts[bucket] += h.Values[i]
+				mappedSamples++
+			}
+			if mappedSamples == 0 && len(h.Timestamps) > 0 {
+				seriesFill = false
+			}
+			if seriesFill {
+				values := make([][]interface{}, 0, bucketRange.count)
+				for ts := bucketRange.start; ts <= bucketRange.end; ts += bucketRange.step {
+					values = append(values, []interface{}{float64(ts), strconv.Itoa(counts[ts])})
+				}
+				result = append(result, map[string]interface{}{
+					"metric": p.translateVolumeMetric(h.Fields),
+					"values": values,
+				})
+				continue
+			}
+		}
+
 		values := make([][]interface{}, 0, len(h.Timestamps))
 		for i, ts := range h.Timestamps {
 			val := 0
 			if i < len(h.Values) {
 				val = h.Values[i]
 			}
-			values = append(values, []interface{}{parseTimestampToUnix(ts), strconv.Itoa(val)})
+			values = append(values, []interface{}{parseTimestampToUnix(string(ts)), strconv.Itoa(val)})
 		}
 		result = append(result, map[string]interface{}{
 			"metric": p.translateVolumeMetric(h.Fields),
@@ -9778,6 +10330,10 @@ func (sc *statusCapture) Flush() {
 	if f, ok := sc.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
 }
 
 // Hijack implements http.Hijacker for WebSocket upgrade support.

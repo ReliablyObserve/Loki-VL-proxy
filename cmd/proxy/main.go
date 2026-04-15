@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -57,6 +58,9 @@ type proxyRuntimeConfig struct {
 	cache                               *cache.Cache
 	compatCache                         *cache.Cache
 	logLevel                            string
+	maxConcurrent                       int
+	ratePerSecond                       float64
+	rateBurst                           int
 	tenantMapJSON                       string
 	tenantLimitsAllowPublish            string
 	tenantDefaultLimitsJSON             string
@@ -68,6 +72,8 @@ type proxyRuntimeConfig struct {
 	backendVersionCheckTimeout          time.Duration
 	backendBasicAuth                    string
 	backendCompression                  string
+	clientResponseCompression           string
+	clientResponseCompressionMinBytes   int
 	backendTLSSkip                      bool
 	forwardHeaders                      string
 	forwardAuthorization                bool
@@ -175,6 +181,8 @@ type serverRuntimeOptions struct {
 	maxHeaderBytes       int
 	tlsClientCAFile      string
 	tlsRequireClientCert bool
+	connContext          func(context.Context, net.Conn) context.Context
+	connRotation         httpConnRotationConfig
 }
 
 type httpServer interface {
@@ -218,17 +226,18 @@ type shutdownHandlerFunc func(<-chan os.Signal, httpServer, time.Duration, *slog
 type exitFunc func(int)
 
 type runtimeOptions struct {
-	cacheTTL              time.Duration
-	cacheMax              int
-	cacheMaxBytes         int
-	compatCacheEnabled    bool
-	compatCacheMaxPercent int
-	diskCfg               cache.DiskCacheConfig
-	proxyCfg              proxyRuntimeConfig
-	otlpCfg               otlpRuntimeConfig
-	maxBodyBytes          int64
-	responseCompression   string
-	serverOpts            serverRuntimeOptions
+	cacheTTL                    time.Duration
+	cacheMax                    int
+	cacheMaxBytes               int
+	compatCacheEnabled          bool
+	compatCacheMaxPercent       int
+	diskCfg                     cache.DiskCacheConfig
+	proxyCfg                    proxyRuntimeConfig
+	otlpCfg                     otlpRuntimeConfig
+	maxBodyBytes                int64
+	responseCompression         string
+	responseCompressionMinBytes int
+	serverOpts                  serverRuntimeOptions
 }
 
 type runtimeState struct {
@@ -241,9 +250,10 @@ type runtimeState struct {
 }
 
 const (
-	defaultCacheMaxBytes      = 256 * 1024 * 1024
-	defaultCompatCachePercent = 10
-	maxCompatCachePercent     = 50
+	defaultCacheMaxBytes               = 256 * 1024 * 1024
+	defaultCompatCachePercent          = 10
+	maxCompatCachePercent              = 50
+	defaultResponseCompressionMinBytes = 1024
 )
 
 func main() {
@@ -340,6 +350,13 @@ func run(
 	idleTimeout := fs.Duration("http-idle-timeout", 120*time.Second, "HTTP server idle timeout")
 	maxHeaderBytes := fs.Int("http-max-header-bytes", 1<<20, "HTTP max header size (default: 1MB)")
 	maxBodyBytes := fs.Int64("http-max-body-bytes", 10<<20, "HTTP max request body size (default: 10MB)")
+	maxConcurrent := fs.Int("max-concurrent", 100, "Maximum concurrent requests allowed through the proxy (0 disables)")
+	rateLimitPerSecond := fs.Float64("rate-limit-per-second", 50, "Per-client request rate limit in requests per second (0 disables)")
+	rateLimitBurst := fs.Int("rate-limit-burst", 100, "Per-client burst size for request rate limiting (0 disables burst bucket)")
+	httpConnMaxAge := fs.Duration("http-conn-max-age", 10*time.Minute, "Maximum lifetime for downstream HTTP/1.x keepalive connections before responding with Connection: close (0 disables)")
+	httpConnMaxAgeJitter := fs.Duration("http-conn-max-age-jitter", 2*time.Minute, "Jitter applied to downstream HTTP/1.x connection age rotation to avoid synchronized reconnects")
+	httpConnMaxRequests := fs.Int("http-conn-max-requests", 256, "Maximum downstream HTTP/1.x requests served on one keepalive connection before responding with Connection: close (0 disables)")
+	httpConnOverloadMaxAge := fs.Duration("http-conn-overload-max-age", 90*time.Second, "Shorter downstream HTTP/1.x connection lifetime applied while query_range backpressure is active (0 disables overload shedding)")
 
 	// TLS server
 	tlsCertFile := fs.String("tls-cert-file", "", "TLS certificate file for HTTPS server")
@@ -349,7 +366,8 @@ func run(
 
 	// Response compression
 	enableGzip := fs.Bool("response-gzip", true, "Deprecated: enable compressed responses for clients that accept them; prefer -response-compression")
-	responseCompression := fs.String("response-compression", "", "Response compression codec: auto, gzip, zstd, none (default: auto)")
+	responseCompression := fs.String("response-compression", "", "Response compression codec: auto, gzip, none (default: auto)")
+	responseCompressionMinBytes := fs.Int("response-compression-min-bytes", defaultResponseCompressionMinBytes, "Minimum response size before frontend compression starts (0 compresses any size)")
 
 	// Grafana datasource compatibility
 	maxLines := fs.Int("max-lines", 1000, "Default max lines per query")
@@ -461,6 +479,9 @@ func run(
 	if err != nil {
 		return err
 	}
+	if *responseCompressionMinBytes < 0 {
+		return fmt.Errorf("invalid -response-compression-min-bytes: must be >= 0")
+	}
 	resolvedBackendCompression, err := normalizeCompressionSetting(*backendCompression)
 	if err != nil {
 		return fmt.Errorf("invalid -backend-compression: %w", err)
@@ -524,6 +545,9 @@ func run(
 			rulerBackendURL:                     envCfg.rulerBackendURL,
 			alertsBackendURL:                    envCfg.alertsBackendURL,
 			logLevel:                            *logLevel,
+			maxConcurrent:                       *maxConcurrent,
+			ratePerSecond:                       *rateLimitPerSecond,
+			rateBurst:                           *rateLimitBurst,
 			tenantMapJSON:                       envCfg.tenantMapJSON,
 			tenantLimitsAllowPublish:            envCfg.tenantLimitsAllow,
 			tenantDefaultLimitsJSON:             envCfg.tenantDefaultJSON,
@@ -535,6 +559,8 @@ func run(
 			backendVersionCheckTimeout:          *backendVersionCheckTimeout,
 			backendBasicAuth:                    *backendBasicAuth,
 			backendCompression:                  resolvedBackendCompression,
+			clientResponseCompression:           resolvedResponseCompression,
+			clientResponseCompressionMinBytes:   *responseCompressionMinBytes,
 			backendTLSSkip:                      *backendTLSSkip,
 			forwardHeaders:                      *forwardHeaders,
 			forwardAuthorization:                *forwardAuthorization,
@@ -631,8 +657,9 @@ func run(
 			serviceInstanceID:     envCfg.serviceInstanceID,
 			deploymentEnvironment: envCfg.deploymentEnv,
 		},
-		maxBodyBytes:        *maxBodyBytes,
-		responseCompression: resolvedResponseCompression,
+		maxBodyBytes:                *maxBodyBytes,
+		responseCompression:         resolvedResponseCompression,
+		responseCompressionMinBytes: *responseCompressionMinBytes,
 		serverOpts: serverRuntimeOptions{
 			listenAddr:           envCfg.listenAddr,
 			readTimeout:          *readTimeout,
@@ -641,6 +668,12 @@ func run(
 			maxHeaderBytes:       *maxHeaderBytes,
 			tlsClientCAFile:      *tlsClientCAFile,
 			tlsRequireClientCert: *tlsRequireClientCert,
+			connRotation: httpConnRotationConfig{
+				maxAge:         *httpConnMaxAge,
+				maxAgeJitter:   *httpConnMaxAgeJitter,
+				maxRequests:    int64(*httpConnMaxRequests),
+				overloadMaxAge: *httpConnOverloadMaxAge,
+			},
 		},
 	}, logger, notify, newPusher)
 	if err != nil {
@@ -768,7 +801,12 @@ func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifie
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 	serverOpts := opts.serverOpts
-	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.responseCompression)
+	rotator := newHTTPConnRotator(serverOpts.connRotation, p.GetMetrics(), p.DownstreamConnectionPressure)
+	serverOpts.connContext = nil
+	if rotator != nil {
+		serverOpts.connContext = rotator.ConnContextHook()
+	}
+	serverOpts.handler = wrapHandler(mux, opts.maxBodyBytes, opts.responseCompression, opts.responseCompressionMinBytes, rotator, p.GetMetrics())
 	srv, err := buildHTTPServer(serverOpts)
 	if err != nil {
 		stopOTLP()
@@ -776,6 +814,7 @@ func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifie
 		compatCleanup()
 		return nil, fmt.Errorf("build http server: %w", err)
 	}
+	srv.ConnState = p.GetMetrics().ConnStateHook()
 
 	reloadCh, shutdownCh := buildSignalChannels(notify)
 	return &runtimeState{
@@ -842,9 +881,23 @@ func maxBodyHandler(maxBytes int64, next http.Handler) http.Handler {
 	})
 }
 
-func wrapHandler(next http.Handler, maxBodyBytes int64, responseCompression string) http.Handler {
+func wrapHandler(next http.Handler, maxBodyBytes int64, responseCompression string, responseCompressionMinBytes int, rotator *httpConnRotator, mm ...*metrics.Metrics) http.Handler {
 	handler := maxBodyHandler(maxBodyBytes, next)
-	return mw.CompressionHandler(handler, responseCompression)
+	handler = mw.CompressionHandlerWithOptions(handler, mw.CompressionOptions{
+		Mode:     responseCompression,
+		MinBytes: responseCompressionMinBytes,
+	})
+	if rotator != nil {
+		handler = rotator.Wrap(handler)
+	}
+	var m *metrics.Metrics
+	if len(mm) > 0 {
+		m = mm[0]
+	}
+	if m != nil {
+		handler = m.WrapHandler(handler)
+	}
+	return handler
 }
 
 func resolveResponseCompression(explicit string, legacyEnabled bool) (string, error) {
@@ -854,11 +907,26 @@ func resolveResponseCompression(explicit string, legacyEnabled bool) (string, er
 		}
 		return "none", nil
 	}
-	mode, err := normalizeCompressionSetting(explicit)
+	mode, err := normalizeFrontendCompressionSetting(explicit)
 	if err != nil {
 		return "", fmt.Errorf("invalid -response-compression: %w", err)
 	}
 	return mode, nil
+}
+
+func normalizeFrontendCompressionSetting(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return "auto", nil
+	case "none", "gzip":
+		return strings.ToLower(strings.TrimSpace(mode)), nil
+	case "zstd":
+		// Keep older deployments starting cleanly, but collapse the public
+		// client-facing surface to the gzip path we actually support and tune.
+		return "gzip", nil
+	default:
+		return "", fmt.Errorf("%q (must be auto, gzip, or none)", mode)
+	}
 }
 
 func normalizeCompressionSetting(mode string) (string, error) {
@@ -1258,6 +1326,9 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		Cache:                              cfg.cache,
 		CompatCache:                        cfg.compatCache,
 		LogLevel:                           cfg.logLevel,
+		MaxConcurrent:                      cfg.maxConcurrent,
+		RatePerSecond:                      cfg.ratePerSecond,
+		RateBurst:                          cfg.rateBurst,
 		TenantMap:                          tenantMap,
 		TenantLimitsAllowPublish:           parseCSV(cfg.tenantLimitsAllowPublish),
 		TenantDefaultLimits:                tenantDefaultLimits,
@@ -1269,6 +1340,8 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		BackendVersionCheckTimeout:         cfg.backendVersionCheckTimeout,
 		BackendBasicAuth:                   cfg.backendBasicAuth,
 		BackendCompression:                 cfg.backendCompression,
+		ClientResponseCompression:          cfg.clientResponseCompression,
+		ClientResponseCompressionMinBytes:  cfg.clientResponseCompressionMinBytes,
 		BackendTLSSkip:                     cfg.backendTLSSkip,
 		ForwardHeaders:                     parseForwardHeaders(cfg.forwardHeaders, cfg.forwardAuthorization),
 		ForwardCookies:                     parseCSV(cfg.forwardCookies),
@@ -1374,6 +1447,7 @@ func buildHTTPServer(opts serverRuntimeOptions) (*http.Server, error) {
 		WriteTimeout:   opts.writeTimeout,
 		IdleTimeout:    opts.idleTimeout,
 		MaxHeaderBytes: opts.maxHeaderBytes,
+		ConnContext:    opts.connContext,
 	}
 	if opts.tlsClientCAFile != "" || opts.tlsRequireClientCert {
 		tlsCfg, err := buildServerTLSConfig(opts.tlsClientCAFile, opts.tlsRequireClientCert)

@@ -92,8 +92,12 @@ type Metrics struct {
 	clientInflight     map[string]*atomic.Int64 // "client" → in-flight requests
 	clientQueryLengths map[string]*histogram    // "client<sep>endpoint<sep>route" → query length histogram
 
-	// Active connections
-	activeRequests atomic.Int64
+	// Server-side request and connection visibility.
+	activeRequests            atomic.Int64
+	connectionStates          map[string]*atomic.Int64 // "state" -> current connections
+	connectionTransitions     map[string]*atomic.Int64 // "state" -> transition count
+	connectionRotations       map[string]*atomic.Int64 // "reason" -> rotation count
+	connectionLastStateByConn sync.Map                 // net.Conn -> state label
 
 	// Circuit breaker state function (injected)
 	cbStateFunc func() string
@@ -169,10 +173,13 @@ var (
 		{endpoint: "alerts_prom", route: "/api/prom/alerts"},
 		{endpoint: "alerts_prometheus", route: "/prometheus/api/v1/alerts"},
 	}
-	defaultMetricSeedStatuses = []int{200, 400, 429, 500, 502}
-	defaultClientErrorReasons = []string{"bad_request", "rate_limited", "not_found", "body_too_large", "timeout"}
-	defaultTupleModes         = []string{"default_2tuple", "categorize_labels_3tuple"}
-	defaultRouteByEndpoint    = map[string]string{
+	defaultMetricSeedStatuses  = []int{200, 400, 429, 500, 502}
+	defaultClientErrorReasons  = []string{"bad_request", "rate_limited", "not_found", "body_too_large", "timeout"}
+	defaultTupleModes          = []string{"default_2tuple", "categorize_labels_3tuple"}
+	defaultConnGaugeStates     = []string{"new", "active", "idle"}
+	defaultConnEventStates     = []string{"new", "active", "idle", "hijacked", "closed"}
+	defaultConnRotationReasons = []string{"age", "request_limit", "overload"}
+	defaultRouteByEndpoint     = map[string]string{
 		"query_range":           "/loki/api/v1/query_range",
 		"query":                 "/loki/api/v1/query",
 		"series":                "/loki/api/v1/series",
@@ -304,6 +311,9 @@ func NewMetricsWithLimits(maxTenantLabels, maxClientLabels int) *Metrics {
 		clientStatuses:          make(map[string]*atomic.Int64),
 		clientInflight:          make(map[string]*atomic.Int64),
 		clientQueryLengths:      make(map[string]*histogram),
+		connectionStates:        make(map[string]*atomic.Int64),
+		connectionTransitions:   make(map[string]*atomic.Int64),
+		connectionRotations:     make(map[string]*atomic.Int64),
 		windowFetch:             newHistogram(),
 		windowMerge:             newHistogram(),
 		windowCount:             newHistogram(),
@@ -381,6 +391,21 @@ func (m *Metrics) preRegisterZeroSeries() {
 	for _, mode := range defaultTupleModes {
 		if _, ok := m.tupleModes[mode]; !ok {
 			m.tupleModes[mode] = &atomic.Int64{}
+		}
+	}
+	for _, state := range defaultConnGaugeStates {
+		if _, ok := m.connectionStates[state]; !ok {
+			m.connectionStates[state] = &atomic.Int64{}
+		}
+	}
+	for _, state := range defaultConnEventStates {
+		if _, ok := m.connectionTransitions[state]; !ok {
+			m.connectionTransitions[state] = &atomic.Int64{}
+		}
+	}
+	for _, reason := range defaultConnRotationReasons {
+		if _, ok := m.connectionRotations[reason]; !ok {
+			m.connectionRotations[reason] = &atomic.Int64{}
 		}
 	}
 }
@@ -747,6 +772,143 @@ func (m *Metrics) RecordClientQueryLengthWithRoute(clientID, endpoint, route str
 		m.mu.Unlock()
 	}
 	hist.observe(float64(queryLength))
+}
+
+// RecordActiveRequest tracks the current number of in-flight HTTP requests.
+func (m *Metrics) RecordActiveRequest(delta int64) {
+	if m.activeRequests.Add(delta) < 0 {
+		m.activeRequests.Store(0)
+	}
+}
+
+// WrapHandler records in-flight HTTP requests around the provided handler.
+func (m *Metrics) WrapHandler(next http.Handler) http.Handler {
+	if m == nil || next == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.RecordActiveRequest(1)
+		defer m.RecordActiveRequest(-1)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ConnStateHook exposes an http.Server ConnState callback for low-cardinality
+// visibility into keepalive skew and reconnect churn.
+func (m *Metrics) ConnStateHook() func(net.Conn, http.ConnState) {
+	if m == nil {
+		return nil
+	}
+	return m.recordConnectionState
+}
+
+func (m *Metrics) recordConnectionState(conn net.Conn, state http.ConnState) {
+	stateLabel := connStateLabel(state)
+	m.connectionTransitionCounter(stateLabel).Add(1)
+
+	prevRaw, hadPrev := m.connectionLastStateByConn.Load(conn)
+	prevLabel, _ := prevRaw.(string)
+	if hadPrev && prevLabel != "" && prevLabel != stateLabel && isLiveConnState(prevLabel) {
+		if m.connectionStateGauge(prevLabel).Add(-1) < 0 {
+			m.connectionStateGauge(prevLabel).Store(0)
+		}
+	}
+
+	if !isLiveConnState(stateLabel) {
+		m.connectionLastStateByConn.Delete(conn)
+		return
+	}
+	if hadPrev && prevLabel == stateLabel {
+		return
+	}
+	m.connectionStateGauge(stateLabel).Add(1)
+	m.connectionLastStateByConn.Store(conn, stateLabel)
+}
+
+func (m *Metrics) connectionStateGauge(state string) *atomic.Int64 {
+	m.mu.RLock()
+	gauge, ok := m.connectionStates[state]
+	m.mu.RUnlock()
+	if ok {
+		return gauge
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	gauge, ok = m.connectionStates[state]
+	if !ok {
+		gauge = &atomic.Int64{}
+		m.connectionStates[state] = gauge
+	}
+	return gauge
+}
+
+func (m *Metrics) connectionTransitionCounter(state string) *atomic.Int64 {
+	m.mu.RLock()
+	counter, ok := m.connectionTransitions[state]
+	m.mu.RUnlock()
+	if ok {
+		return counter
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counter, ok = m.connectionTransitions[state]
+	if !ok {
+		counter = &atomic.Int64{}
+		m.connectionTransitions[state] = counter
+	}
+	return counter
+}
+
+func connStateLabel(state http.ConnState) string {
+	switch state {
+	case http.StateNew:
+		return "new"
+	case http.StateActive:
+		return "active"
+	case http.StateIdle:
+		return "idle"
+	case http.StateHijacked:
+		return "hijacked"
+	case http.StateClosed:
+		return "closed"
+	default:
+		return "unknown"
+	}
+}
+
+func isLiveConnState(state string) bool {
+	switch state {
+	case "new", "active", "idle":
+		return true
+	default:
+		return false
+	}
+}
+
+// RecordHTTPConnectionRotation records a downstream connection rotation decision.
+func (m *Metrics) RecordHTTPConnectionRotation(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	m.connectionRotationCounter(reason).Add(1)
+}
+
+func (m *Metrics) connectionRotationCounter(reason string) *atomic.Int64 {
+	m.mu.RLock()
+	counter, ok := m.connectionRotations[reason]
+	m.mu.RUnlock()
+	if ok {
+		return counter
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counter, ok = m.connectionRotations[reason]
+	if !ok {
+		counter = &atomic.Int64{}
+		m.connectionRotations[reason] = counter
+	}
+	return counter
 }
 
 func (m *Metrics) RecordCacheHit()         { m.cacheHits.Add(1) }
@@ -1135,6 +1297,43 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 	sb.WriteString("# HELP loki_vl_proxy_uptime_seconds Proxy uptime.\n")
 	sb.WriteString("# TYPE loki_vl_proxy_uptime_seconds gauge\n")
 	fmt.Fprintf(&sb, "loki_vl_proxy_uptime_seconds %g\n", time.Since(m.startTime).Seconds())
+
+	sb.WriteString("# HELP loki_vl_proxy_active_requests Current in-flight requests.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_active_requests gauge\n")
+	fmt.Fprintf(&sb, "loki_vl_proxy_active_requests %d\n", m.activeRequests.Load())
+
+	sb.WriteString("# HELP loki_vl_proxy_http_connections Current HTTP server connections by state.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_http_connections gauge\n")
+	connStates := make([]string, 0, len(m.connectionStates))
+	for state := range m.connectionStates {
+		connStates = append(connStates, state)
+	}
+	sort.Strings(connStates)
+	for _, state := range connStates {
+		fmt.Fprintf(&sb, "loki_vl_proxy_http_connections{state=%q} %d\n", state, m.connectionStates[state].Load())
+	}
+
+	sb.WriteString("# HELP loki_vl_proxy_http_connection_transitions_total HTTP server connection state transitions.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_http_connection_transitions_total counter\n")
+	connEvents := make([]string, 0, len(m.connectionTransitions))
+	for state := range m.connectionTransitions {
+		connEvents = append(connEvents, state)
+	}
+	sort.Strings(connEvents)
+	for _, state := range connEvents {
+		fmt.Fprintf(&sb, "loki_vl_proxy_http_connection_transitions_total{state=%q} %d\n", state, m.connectionTransitions[state].Load())
+	}
+
+	sb.WriteString("# HELP loki_vl_proxy_http_connection_rotations_total Downstream HTTP/1.x connection rotations triggered by the proxy.\n")
+	sb.WriteString("# TYPE loki_vl_proxy_http_connection_rotations_total counter\n")
+	connRotationReasons := make([]string, 0, len(m.connectionRotations))
+	for reason := range m.connectionRotations {
+		connRotationReasons = append(connRotationReasons, reason)
+	}
+	sort.Strings(connRotationReasons)
+	for _, reason := range connRotationReasons {
+		fmt.Fprintf(&sb, "loki_vl_proxy_http_connection_rotations_total{reason=%q} %d\n", reason, m.connectionRotations[reason].Load())
+	}
 
 	// Go runtime / GC metrics
 	var memStats runtime.MemStats

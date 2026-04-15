@@ -1006,3 +1006,25 @@ func (p *Proxy) forceQueryRangeParallelBackoff() {
 	p.queryRangeAdaptiveLastAdjust = time.Now()
 	p.metrics.RecordQueryRangeAdaptiveState(p.queryRangeParallelCurrent, p.queryRangeLatencyEWMA, p.queryRangeErrorEWMA)
 }
+
+// DownstreamConnectionPressure reports whether this proxy instance is currently
+// experiencing enough query_range backpressure to justify nudging sticky
+// downstream HTTP/1.x clients to reconnect elsewhere.
+func (p *Proxy) DownstreamConnectionPressure() bool {
+	if !p.queryRangeAdaptiveParallel {
+		return false
+	}
+
+	p.queryRangeAdaptiveMu.Lock()
+	defer p.queryRangeAdaptiveMu.Unlock()
+
+	if p.queryRangeErrorEWMA > 0 && p.queryRangeErrorEWMA >= p.queryRangeErrorBackoffThreshold {
+		return true
+	}
+	if p.queryRangeLatencyEWMA > 0 && p.queryRangeLatencyEWMA >= p.queryRangeLatencyBackoff {
+		return true
+	}
+	return p.queryRangeParallelCurrent <= p.queryRangeParallelMin &&
+		p.queryRangeLatencyEWMA > 0 &&
+		p.queryRangeLatencyEWMA >= p.queryRangeLatencyTarget
+}

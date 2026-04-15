@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ReliablyObserve/Loki-VL-proxy/internal/cache"
+	mw "github.com/ReliablyObserve/Loki-VL-proxy/internal/middleware"
 )
 
 func TestCompatCacheMiddleware_CachesSeriesResponses(t *testing.T) {
@@ -33,6 +37,133 @@ func TestCompatCacheMiddleware_CachesSeriesResponses(t *testing.T) {
 	}
 	if backendCalls != 1 {
 		t.Fatalf("expected 1 backend call after compat cache hit, got %d", backendCalls)
+	}
+}
+
+func TestCompatCacheMiddleware_CachesCompressedVariantOnHit(t *testing.T) {
+	var backendCalls int
+	payload := `{"values":[` + strings.Repeat(`{"value":"{app=\"api\"}","hits":1},`, 64) + `{"value":"{app=\"api\"}","hits":1}]}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer backend.Close()
+
+	p := newCompatTestProxyWithCompression(t, backend.URL, "gzip", 128)
+	target := "/loki/api/v1/series?match[]=%7Bapp%3D%22api%22%7D"
+
+	first := doCompatProxyRequest(p, target, map[string]string{"X-Scope-OrgID": "team-a"})
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	if _, ok := p.compatCache.Get(compatCacheVariantKey("compat:v1:series:team-a:/loki/api/v1/series?match[]=%7Bapp%3D%22api%22%7D", "gzip")); ok {
+		t.Fatal("did not expect gzip variant to be primed from an identity miss")
+	}
+
+	second := doCompatProxyRequest(p, target, map[string]string{
+		"X-Scope-OrgID":   "team-a",
+		"Accept-Encoding": "gzip",
+	})
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected cached 200, got %d: %s", second.Code, second.Body.String())
+	}
+	if got := second.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("expected gzip compat-cache hit, got %q", got)
+	}
+	gr, err := gzip.NewReader(second.Body)
+	if err != nil {
+		t.Fatalf("create gzip reader: %v", err)
+	}
+	decoded, err := io.ReadAll(gr)
+	_ = gr.Close()
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if string(decoded) != first.Body.String() {
+		t.Fatalf("unexpected decoded compat-cache body length %d", len(decoded))
+	}
+
+	third := doCompatProxyRequest(p, target, map[string]string{
+		"X-Scope-OrgID":   "team-a",
+		"Accept-Encoding": "gzip",
+	})
+	if third.Code != http.StatusOK {
+		t.Fatalf("expected cached 200 on repeated gzip hit, got %d: %s", third.Code, third.Body.String())
+	}
+	if backendCalls != 1 {
+		t.Fatalf("expected gzip compat-cache variant to avoid backend retry, got %d backend calls", backendCalls)
+	}
+}
+
+func TestCompatCacheMiddleware_PrimesCompressedVariantOnGzipMiss(t *testing.T) {
+	payload := `{"values":[` + strings.Repeat(`{"value":"{app=\"api\"}","hits":1},`, 64) + `{"value":"{app=\"api\"}","hits":1}]}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer backend.Close()
+
+	p := newCompatTestProxyWithCompression(t, backend.URL, "gzip", 128)
+	target := "/loki/api/v1/series?match[]=%7Bapp%3D%22api%22%7D"
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("X-Scope-OrgID", "team-a")
+	cacheKey, ok := p.compatCacheKey("series", req)
+	if !ok {
+		t.Fatal("expected compat cache key")
+	}
+
+	first := doCompatProxyCompressedRequest(p, target, map[string]string{
+		"X-Scope-OrgID":   "team-a",
+		"Accept-Encoding": "gzip",
+	}, "gzip", 128)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected gzip miss to succeed, got %d: %s", first.Code, first.Body.String())
+	}
+	if got := first.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("expected first miss to be gzip-compressed, got %q", got)
+	}
+	if _, ok := p.compatCache.Get(compatCacheVariantKey(cacheKey, "gzip")); !ok {
+		t.Fatal("expected gzip variant to be primed from the initial miss")
+	}
+}
+
+func TestCompatCacheCaptureWriter_DropsOversizedBodies(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := newCompatCacheCaptureWriter(rec, 8)
+	defer w.Release()
+
+	if _, err := w.Write([]byte("1234")); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if got := string(w.CapturedBody()); got != "1234" {
+		t.Fatalf("expected buffered body before overflow, got %q", got)
+	}
+	if _, err := w.Write([]byte("56789")); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+	if body := w.CapturedBody(); len(body) != 0 {
+		t.Fatalf("expected buffered body to be dropped after overflow, got %q", string(body))
+	}
+	if !w.overflowed {
+		t.Fatal("expected overflow marker to be set")
+	}
+}
+
+func TestCompatCacheCaptureWriter_SetsSafeJSONHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := newCompatCacheCaptureWriter(rec, 64)
+	defer w.Release()
+
+	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("expected nosniff header, got %q", got)
 	}
 }
 
@@ -172,12 +303,18 @@ func TestShouldUseCompatCache_SkipsStreamingAndUnsafeEndpoints(t *testing.T) {
 }
 
 func newCompatTestProxy(t *testing.T, backendURL string) *Proxy {
+	return newCompatTestProxyWithCompression(t, backendURL, "auto", 1024)
+}
+
+func newCompatTestProxyWithCompression(t *testing.T, backendURL, compression string, minBytes int) *Proxy {
 	t.Helper()
 	p, err := New(Config{
-		BackendURL:  backendURL,
-		Cache:       cache.New(60*time.Second, 1000),
-		CompatCache: cache.New(60*time.Second, 100),
-		LogLevel:    "error",
+		BackendURL:                        backendURL,
+		Cache:                             cache.New(60*time.Second, 1000),
+		CompatCache:                       cache.New(60*time.Second, 100),
+		LogLevel:                          "error",
+		ClientResponseCompression:         compression,
+		ClientResponseCompressionMinBytes: minBytes,
 		TenantMap: map[string]TenantMapping{
 			"team-a": {AccountID: "10", ProjectID: "0"},
 			"team-b": {AccountID: "20", ProjectID: "0"},
@@ -207,5 +344,21 @@ func doCompatProxyRequest(p *Proxy, target string, headers map[string]string) *h
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func doCompatProxyCompressedRequest(p *Proxy, target string, headers map[string]string, mode string, minBytes int) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+	handler := mw.CompressionHandlerWithOptions(mux, mw.CompressionOptions{
+		Mode:     mode,
+		MinBytes: minBytes,
+	})
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 	return rec
 }

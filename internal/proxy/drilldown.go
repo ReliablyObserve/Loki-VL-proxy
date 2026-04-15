@@ -684,7 +684,7 @@ func (p *Proxy) volumeByDerivedLabels(ctx context.Context, query, start, end, ta
 			if value < 0 {
 				continue
 			}
-			entryNs, ok := parseLokiTimeToUnixNano(strings.TrimSpace(ts))
+			entryNs, ok := parseLokiTimeToUnixNano(strings.TrimSpace(string(ts)))
 			if !ok {
 				continue
 			}
