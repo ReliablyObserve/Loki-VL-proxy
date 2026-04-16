@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- drilldown/step-parsing: normalize float-second `step` values before forwarding them to backend volume and patterns requests, and reuse the same positive-duration parsing in zero-fill plus patterns bucketing so float-second cadences stay dense and aligned.
+
 ## [1.4.3] - 2026-04-16
 
 ### Bug Fixes

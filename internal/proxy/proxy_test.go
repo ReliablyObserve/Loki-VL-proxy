@@ -1860,12 +1860,17 @@ func TestContract_Patterns_DenseShortRangeAvoidsFortyMinuteSamplingGaps(t *testi
 }
 
 func TestContract_Patterns_FloatSecondStepRespectsRequestedBuckets(t *testing.T) {
-	var receivedStep string
+	var (
+		mu           sync.Mutex
+		receivedStep string
+	)
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form: %v", err)
 		}
+		mu.Lock()
 		receivedStep = r.FormValue("step")
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		_, _ = w.Write([]byte(`{"_time":"2026-04-04T12:59:59Z","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}` + "\n"))
 	}))
@@ -1883,8 +1888,11 @@ func TestContract_Patterns_FloatSecondStepRespectsRequestedBuckets(t *testing.T)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
 	}
-	if receivedStep != "90s" {
-		t.Fatalf("expected float-second step to be normalized to 90s, got %q", receivedStep)
+	mu.Lock()
+	gotStep := receivedStep
+	mu.Unlock()
+	if gotStep != "90s" {
+		t.Fatalf("expected float-second step to be normalized to 90s, got %q", gotStep)
 	}
 
 	var resp patternsResponse
