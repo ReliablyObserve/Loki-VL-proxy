@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-04-16
+
 ### Bug Fixes
 
 - drilldown: translate Loki pattern-match filters (`|>`, `!>`) into VictoriaLogs regex filters so pattern stats queries compile correctly, and accept both `start/end` and `from/to` on volume endpoints so long-range volume buckets remain dense.
