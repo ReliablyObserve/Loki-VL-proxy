@@ -7529,8 +7529,7 @@ func (p *Proxy) fetchStatsQueryRangeWindow(ctx context.Context, r *http.Request,
 	}
 	defer cancel()
 
-	params := url.Values{}
-	params = buildStatsQueryRangeParams(
+	params := buildStatsQueryRangeParams(
 		logsqlQuery,
 		strconv.FormatInt(window.startNs, 10),
 		strconv.FormatInt(window.endNs, 10),
