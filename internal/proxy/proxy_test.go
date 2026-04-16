@@ -1859,6 +1859,60 @@ func TestContract_Patterns_DenseShortRangeAvoidsFortyMinuteSamplingGaps(t *testi
 	}
 }
 
+func TestContract_Patterns_FloatSecondStepRespectsRequestedBuckets(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		receivedStep string
+	)
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		mu.Lock()
+		receivedStep = r.FormValue("step")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"_time":"2026-04-04T12:59:59Z","_msg":"GET /api/users 200 15ms","app":"web","level":"info"}` + "\n"))
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=2026-04-04T10:00:00Z&end=2026-04-04T13:00:00Z&step=90.000&limit=1",
+		nil,
+	)
+	p.handlePatterns(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	gotStep := receivedStep
+	mu.Unlock()
+	if gotStep != "90s" {
+		t.Fatalf("expected float-second step to be normalized to 90s, got %q", gotStep)
+	}
+
+	var resp patternsResponse
+	mustUnmarshal(t, w.Body.Bytes(), &resp)
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected one pattern, got %+v", resp.Data)
+	}
+	if got := len(resp.Data[0].Samples); got != 121 {
+		t.Fatalf("expected 121 requested 90s buckets across 3h range, got %d", got)
+	}
+	firstTS, okFirst := numberToInt64(resp.Data[0].Samples[0][0])
+	lastTS, okLast := numberToInt64(resp.Data[0].Samples[len(resp.Data[0].Samples)-1][0])
+	if !okFirst || !okLast {
+		t.Fatalf("expected numeric sample timestamps, got first=%v last=%v", resp.Data[0].Samples[0], resp.Data[0].Samples[len(resp.Data[0].Samples)-1])
+	}
+	if firstTS != 1775296800 || lastTS != 1775307600 {
+		t.Fatalf("expected requested 3h range to stay anchored to 90s buckets, got %d..%d", firstTS, lastTS)
+	}
+}
+
 func TestContract_Patterns_FillCoarsensHugePointRanges(t *testing.T) {
 	entries := []patternResultEntry{
 		{

@@ -8964,18 +8964,35 @@ func normalizeUnixSeconds(v int64) int64 {
 	}
 }
 
-func parseStepSeconds(step string) (int64, bool) {
+func parsePositiveStepDuration(step string) (time.Duration, bool) {
 	value := strings.TrimSpace(step)
 	if value == "" {
 		return 0, false
 	}
 	if d, err := time.ParseDuration(value); err == nil && d > 0 {
-		return int64(d / time.Second), true
+		return d, true
 	}
-	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
-		return int64(seconds), true
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || seconds <= 0 {
+		return 0, false
 	}
-	return 0, false
+	nanos := seconds * float64(time.Second)
+	if nanos > float64(math.MaxInt64) {
+		return 0, false
+	}
+	d := time.Duration(nanos)
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+func parseStepSeconds(step string) (int64, bool) {
+	d, ok := parsePositiveStepDuration(step)
+	if !ok || d < time.Second {
+		return 0, false
+	}
+	return int64(d / time.Second), true
 }
 
 func parseRequestedBucketRange(start, end, step string) (requestedBucketRange, bool) {
@@ -9209,8 +9226,8 @@ func formatVLStep(step string) string {
 		}
 	}
 	// Numeric-only: treat as seconds, append "s"
-	if _, err := strconv.ParseFloat(step, 64); err == nil {
-		return step + "s"
+	if seconds, err := strconv.ParseFloat(step, 64); err == nil && seconds > 0 {
+		return strconv.FormatFloat(seconds, 'f', -1, 64) + "s"
 	}
 	return step
 }

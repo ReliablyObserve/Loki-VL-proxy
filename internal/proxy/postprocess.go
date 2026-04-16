@@ -7,7 +7,6 @@ import (
 	"net"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -272,11 +271,8 @@ func parsePatternStepSeconds(step string) int64 {
 	if step == "" {
 		return stepSeconds
 	}
-	if d, err := time.ParseDuration(step); err == nil && d > 0 {
+	if d, ok := parsePositiveStepDuration(step); ok && d >= time.Second {
 		return int64(d / time.Second)
-	}
-	if seconds, err := strconv.Atoi(step); err == nil && seconds > 0 {
-		return int64(seconds)
 	}
 	return stepSeconds
 }
