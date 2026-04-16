@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -201,13 +202,24 @@ func TestPeerCache_WriteThroughAndReadAheadBranches(t *testing.T) {
 		localCache := New(60*time.Second, 1000)
 		defer localCache.Close()
 
-		var pushedKey string
-		var pushedTTL string
-		var pushedBody []byte
+		type pushResult struct {
+			key  string
+			ttl  string
+			body []byte
+		}
+		var (
+			mu     sync.Mutex
+			pushed pushResult
+		)
 		peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pushedKey = r.URL.Query().Get("key")
-			pushedTTL = r.URL.Query().Get("ttl_ms")
-			pushedBody, _ = io.ReadAll(r.Body)
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			pushed = pushResult{
+				key:  r.URL.Query().Get("key"),
+				ttl:  r.URL.Query().Get("ttl_ms"),
+				body: append([]byte(nil), body...),
+			}
+			mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 		}))
 		defer peerServer.Close()
@@ -239,13 +251,20 @@ func TestPeerCache_WriteThroughAndReadAheadBranches(t *testing.T) {
 		}
 
 		localCache.SetWithTTL(targetKey, []byte("payload"), 30*time.Second)
-		requireEventually(t, time.Second, func() bool { return pushedKey == targetKey })
+		requireEventually(t, time.Second, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return pushed.key == targetKey
+		})
 
-		if string(pushedBody) != "payload" {
-			t.Fatalf("unexpected pushed body %q", string(pushedBody))
+		mu.Lock()
+		got := pushed
+		mu.Unlock()
+		if string(got.body) != "payload" {
+			t.Fatalf("unexpected pushed body %q", string(got.body))
 		}
-		if pushedTTL != "30000" {
-			t.Fatalf("unexpected pushed ttl %q", pushedTTL)
+		if got.ttl != "30000" {
+			t.Fatalf("unexpected pushed ttl %q", got.ttl)
 		}
 		if got := pc.WTPushes.Load(); got != 1 {
 			t.Fatalf("expected write-through push count 1, got %d", got)
