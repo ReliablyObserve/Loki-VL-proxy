@@ -10944,13 +10944,6 @@ func extractParserProbeQuery(logql string) string {
 	return strings.TrimSpace(logql)
 }
 
-// translateStatsResponseLabels translates label names in VL stats responses
-// (both vector and matrix result types) from VL field names (dots) to
-// Loki-compatible label names (underscores).
-func (p *Proxy) translateStatsResponseLabels(body []byte, originalQuery string) []byte {
-	return p.translateStatsResponseLabelsWithContext(context.Background(), body, originalQuery)
-}
-
 func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, body []byte, originalQuery string) []byte {
 	start := time.Now()
 	var resp map[string]interface{}
