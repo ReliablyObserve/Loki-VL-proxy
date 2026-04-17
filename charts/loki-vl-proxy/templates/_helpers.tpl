@@ -166,6 +166,20 @@ Priority:
 {{- end }}
 
 {{/*
+Render a custom manifest entry from values.customManifests.
+Supports either raw YAML objects/maps or templated string snippets.
+*/}}
+{{- define "loki-vl-proxy.renderCustomManifest" -}}
+{{- $manifest := .manifest -}}
+{{- $context := .context -}}
+{{- if kindIs "string" $manifest -}}
+{{- tpl $manifest $context -}}
+{{- else -}}
+{{- tpl (toYaml $manifest) $context -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Resolve effective GOMEMLIMIT value.
 Priority:
 1) explicit .Values.goMemLimit
