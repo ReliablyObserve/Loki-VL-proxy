@@ -2556,7 +2556,7 @@ func TestPatternWindowedSamplingConfig_DenseShortRangeUsesStepToIncreaseFanout(t
 	}
 }
 
-func TestPatternWindowedSamplingConfig_DenseThirtyMinuteRangeCapsDrilldownFanout(t *testing.T) {
+func TestPatternWindowedSamplingConfig_DenseThirtyMinuteRangeCapsShortRangeFanout(t *testing.T) {
 	start := strconv.FormatInt(0, 10)
 	end := strconv.FormatInt(int64((30*time.Minute)/time.Second), 10)
 
@@ -2566,10 +2566,10 @@ func TestPatternWindowedSamplingConfig_DenseThirtyMinuteRangeCapsDrilldownFanout
 	}
 	windows := splitQueryRangeWindowsWithOptions(startNs, endNs, interval, "backward", true)
 	if got := len(windows); got > 25 {
-		t.Fatalf("expected short dense drilldown fanout capped at 25 aligned windows, got %d", got)
+		t.Fatalf("expected short dense fanout capped at 25 aligned windows, got %d", got)
 	}
 	if got := len(windows); got < 20 {
-		t.Fatalf("expected short dense drilldown fanout to stay granular, got %d", got)
+		t.Fatalf("expected short dense fanout to stay granular, got %d", got)
 	}
 	if perWindow < 200 {
 		t.Fatalf("expected dense per-window lower bound >=200, got %d", perWindow)

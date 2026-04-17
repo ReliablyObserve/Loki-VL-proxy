@@ -5508,8 +5508,8 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 	if denseWindowing {
 		// Dense ranges can otherwise explode into hundreds of windows and produce
 		// short/unstable tails under backend pressure. Keep fanout bounded so
-		// short Drilldown ranges don't turn a single /patterns refresh into
-		// dozens of raw-log backend fetches.
+		// short dense ranges don't turn a single /patterns refresh into dozens
+		// of raw-log backend fetches.
 		targetWindowSpan = 45 * time.Minute
 		minWindowSourceLimit = 200
 		maxWindowSourceLimit = 4_000
