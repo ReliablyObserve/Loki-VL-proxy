@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-04-17
+
 ### Features
 
 - helm/chart: add a reusable `customManifests` hook so downstream installs can render extra Kubernetes resources with full chart context without forking chart templates.
