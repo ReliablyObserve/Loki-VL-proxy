@@ -1,0 +1,7 @@
+{{- range $manifest := .Values.customManifests }}
+{{- $rendered := include "loki-vl-proxy.renderCustomManifest" (dict "manifest" $manifest "context" $) | trim }}
+{{- if $rendered }}
+---
+{{ $rendered }}
+{{- end }}
+{{- end }}

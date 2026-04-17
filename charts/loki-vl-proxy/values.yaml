@@ -354,6 +354,25 @@ envFrom: []
   # - configMapRef:
   #     name: loki-vl-proxy-config
 
+# Extra manifests rendered with full Helm chart context.
+# Each entry may be either:
+# - a YAML object/map
+# - a templated YAML string using Helm expressions
+# Rendered objects are emitted as standalone resources.
+customManifests: []
+  # - apiVersion: external-secrets.io/v1beta1
+  #   kind: ExternalSecret
+  #   metadata:
+  #     name: '{{ include "loki-vl-proxy.fullname" . }}-env'
+  #   spec: {}
+  # - |
+  #   apiVersion: v1
+  #   kind: ConfigMap
+  #   metadata:
+  #     name: {{ include "loki-vl-proxy.fullname" . }}-extra
+  #   data:
+  #     example: "value"
+
 # --- PrometheusRule (alert rules for Prometheus Operator) ---
 # Base rules source:
 # - canonical repo asset: /alerting/loki-vl-proxy-prometheusrule.yaml
