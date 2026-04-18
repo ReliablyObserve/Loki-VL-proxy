@@ -1437,15 +1437,22 @@ func (p *Proxy) fetchNativeFieldValues(ctx context.Context, query, start, end, f
 }
 
 func (p *Proxy) resolveNativeDetectedField(ctx context.Context, query, start, end, fieldName string) (string, bool, error) {
-	fieldNames, err := p.fetchNativeFieldNames(ctx, query, start, end)
-	if err != nil {
-		return "", false, err
+	var lastErr error
+	for _, candidate := range fieldDetectionQueryCandidates(query) {
+		fieldNames, err := p.fetchNativeFieldNames(ctx, candidate, start, end)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		candidates := make([]string, 0, len(fieldNames))
+		candidates = append(candidates, fieldNames...)
+		resolution := p.labelTranslator.ResolveMetadataCandidates(fieldName, candidates, p.metadataFieldMode)
+		if len(resolution.candidates) == 1 {
+			return resolution.candidates[0], true, nil
+		}
 	}
-	candidates := make([]string, 0, len(fieldNames))
-	candidates = append(candidates, fieldNames...)
-	resolution := p.labelTranslator.ResolveMetadataCandidates(fieldName, candidates, p.metadataFieldMode)
-	if len(resolution.candidates) == 1 {
-		return resolution.candidates[0], true, nil
+	if lastErr != nil {
+		return "", false, lastErr
 	}
 	return "", false, nil
 }

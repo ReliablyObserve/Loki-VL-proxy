@@ -587,6 +587,7 @@ func TestDetectedFields_EmptyStrictQueryDoesNotRelaxCandidates(t *testing.T) {
 func TestDetectedFieldValues_EmptyStrictQueryRelaxesCandidates(t *testing.T) {
 	const strictToken = "strict-only"
 
+	var fieldNameQueries []string
 	var fieldValueQueries []string
 	var streamQueries []string
 	var scanQueries []string
@@ -598,7 +599,12 @@ func TestDetectedFieldValues_EmptyStrictQueryRelaxesCandidates(t *testing.T) {
 		strict := strings.Contains(got, strictToken)
 		switch r.URL.Path {
 		case "/select/logsql/field_names":
+			fieldNameQueries = append(fieldNameQueries, got)
 			w.Header().Set("Content-Type", "application/json")
+			if strict {
+				_, _ = w.Write([]byte(`{"values":[]}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"values":[{"value":"status","hits":1}]}`))
 		case "/select/logsql/field_values":
 			fieldValueQueries = append(fieldValueQueries, got)
@@ -640,6 +646,15 @@ func TestDetectedFieldValues_EmptyStrictQueryRelaxesCandidates(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(fieldNameQueries) != 2 {
+		t.Fatalf("expected strict+relaxed native field-name lookups, got %v", fieldNameQueries)
+	}
+	if !strings.Contains(fieldNameQueries[0], strictToken) {
+		t.Fatalf("expected strict native field-name lookup to preserve strict filter, got %q", fieldNameQueries[0])
+	}
+	if strings.Contains(fieldNameQueries[1], strictToken) {
+		t.Fatalf("expected relaxed native field-name lookup to strip strict-only filter, got %q", fieldNameQueries[1])
 	}
 	if len(fieldValueQueries) != 2 {
 		t.Fatalf("expected strict+relaxed native field-value lookups, got %v", fieldValueQueries)
