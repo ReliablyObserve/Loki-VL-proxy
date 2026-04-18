@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -141,13 +142,8 @@ func shouldExposeStructuredField(key string, streamLabels map[string]string, lt 
 
 func scanNativeStreamLabelSet(body []byte) map[string]string {
 	labels := make(map[string]string)
-	startIdx := 0
-	for i := 0; i <= len(body); i++ {
-		if i < len(body) && body[i] != '\n' {
-			continue
-		}
-		line := strings.TrimSpace(string(body[startIdx:i]))
-		startIdx = i + 1
+	for _, rawLine := range bytes.Split(body, []byte{'\n'}) {
+		line := strings.TrimSpace(string(rawLine))
 		if line == "" {
 			continue
 		}
@@ -1018,11 +1014,14 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 	if len(nativeFields) > 0 && scanLimit > detectedFieldsSampleLimit {
 		scanLimit = detectedFieldsSampleLimit
 	}
+	candidates := fieldDetectionQueryCandidates(query)
+	hadScanFailure := false
 	var lastErr error
-	for _, candidate := range fieldDetectionQueryCandidates(query) {
+	for _, candidate := range candidates {
 		logsqlQuery, err := p.translateQuery(candidate)
 		if err != nil {
 			lastErr = err
+			hadScanFailure = true
 			continue
 		}
 
@@ -1039,6 +1038,7 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 		resp, err := p.vlPost(ctx, "/select/logsql/query", params)
 		if err != nil {
 			lastErr = err
+			hadScanFailure = true
 			continue
 		}
 
@@ -1050,6 +1050,7 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 				msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
 			}
 			lastErr = fmt.Errorf("%s", msg)
+			hadScanFailure = true
 			continue
 		}
 		if resp.StatusCode >= http.StatusBadRequest {
@@ -1066,12 +1067,21 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 			p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
 			return fieldList, fieldValues, nil
 		}
+		if len(candidates) > 1 && !hadScanFailure {
+			emptyFields := []map[string]interface{}{}
+			emptyValues := map[string][]string{}
+			p.setCachedDetectedFields(ctx, query, start, end, lineLimit, emptyFields, emptyValues)
+			return emptyFields, emptyValues, nil
+		}
+		break
 	}
 
 	if len(nativeFields) > 0 {
-		streamLabels, err := p.fetchNativeStreamLabelSet(ctx, query, start, end)
-		if err == nil {
-			nativeFields = filterNativeDetectedFields(nativeFields, streamLabels, p.labelTranslator)
+		if nativeFieldFilterNeedsStreamLabels(nativeFields, p.labelTranslator) {
+			streamLabels, err := p.fetchNativeStreamLabelSet(ctx, query, start, end)
+			if err == nil {
+				nativeFields = filterNativeDetectedFields(nativeFields, streamLabels, p.labelTranslator)
+			}
 		}
 		fieldList, fieldValues := mergeNativeDetectedFields(nil, nil, nativeFields)
 		p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
@@ -1352,9 +1362,7 @@ func (p *Proxy) fetchNativeFieldNames(ctx context.Context, query, start, end str
 		for _, item := range resp.Values {
 			out = append(out, item.Value)
 		}
-		if len(out) > 0 {
-			return out, nil
-		}
+		return out, nil
 	}
 	return nil, lastErr
 }
@@ -1421,9 +1429,7 @@ func (p *Proxy) fetchNativeFieldValues(ctx context.Context, query, start, end, f
 			values = append(values, item.Value)
 		}
 		sort.Strings(values)
-		if len(values) > 0 {
-			return values, nil
-		}
+		return values, nil
 	}
 	return nil, lastErr
 }
@@ -1496,10 +1502,7 @@ func (p *Proxy) fetchNativeStreams(ctx context.Context, query, start, end string
 			lastErr = err
 			continue
 		}
-		if len(parsed.Values) > 0 {
-			return &parsed, nil
-		}
-		lastErr = nil
+		return &parsed, nil
 	}
 	return &vlStreamsResponse{}, lastErr
 }
@@ -1515,6 +1518,15 @@ func filterNativeDetectedFields(native map[string]*detectedFieldSummary, streamL
 		}
 	}
 	return filtered
+}
+
+func nativeFieldFilterNeedsStreamLabels(native map[string]*detectedFieldSummary, lt *LabelTranslator) bool {
+	for label := range native {
+		if !shouldExposeStructuredField(label, map[string]string{label: "1"}, lt) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Proxy) detectScannedLabels(ctx context.Context, query, start, end string, lineLimit int) (map[string]*detectedLabelSummary, error) {
