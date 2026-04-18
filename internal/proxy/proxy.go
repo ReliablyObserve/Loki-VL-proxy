@@ -2392,6 +2392,90 @@ func appendUniqueStrings(dst []string, values ...string) []string {
 	return dst
 }
 
+func (p *Proxy) metadataQueryParams(ctx context.Context, candidate, start, end, limit, search string) (url.Values, error) {
+	params := url.Values{}
+	translated, err := p.translateQueryWithContext(ctx, candidate)
+	if err != nil {
+		return nil, err
+	}
+	params.Set("query", translated)
+	if strings.TrimSpace(start) != "" {
+		params.Set("start", start)
+	}
+	if strings.TrimSpace(end) != "" {
+		params.Set("end", end)
+	}
+	if strings.TrimSpace(limit) != "" {
+		params.Set("limit", limit)
+	}
+	if search = strings.TrimSpace(search); search != "" && p.supportsMetadataSubstringFilter() {
+		params.Set("q", search)
+		params.Set("filter", "substring")
+	}
+	return params, nil
+}
+
+func (p *Proxy) fetchScopedLabelNames(ctx context.Context, rawQuery, start, end, search string, useInventoryCache bool) ([]string, error) {
+	candidates := metadataQueryCandidates(rawQuery)
+	var (
+		lastErr   error
+		lastEmpty []string
+	)
+	for i, candidate := range candidates {
+		params, err := p.metadataQueryParams(ctx, candidate, start, end, "", search)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var labels []string
+		if useInventoryCache {
+			labels, err = p.fetchPreferredLabelNamesCached(ctx, params)
+		} else {
+			labels, err = p.fetchPreferredLabelNames(ctx, params)
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(labels) > 0 || i == len(candidates)-1 {
+			return labels, nil
+		}
+		lastEmpty = labels
+	}
+	if lastEmpty != nil {
+		return lastEmpty, nil
+	}
+	return nil, lastErr
+}
+
+func (p *Proxy) fetchScopedLabelValues(ctx context.Context, labelName, rawQuery, start, end, limit, search string) ([]string, error) {
+	candidates := metadataQueryCandidates(rawQuery)
+	var (
+		lastErr   error
+		lastEmpty []string
+	)
+	for i, candidate := range candidates {
+		params, err := p.metadataQueryParams(ctx, candidate, start, end, limit, search)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		values, err := p.fetchPreferredLabelValues(ctx, labelName, params)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(values) > 0 || i == len(candidates)-1 {
+			return values, nil
+		}
+		lastEmpty = values
+	}
+	if lastEmpty != nil {
+		return lastEmpty, nil
+	}
+	return nil, lastErr
+}
+
 func (p *Proxy) snapshotDeclaredLabelFields() []string {
 	if p == nil || len(p.declaredLabelFields) == 0 {
 		return nil
@@ -2607,29 +2691,7 @@ func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end, s
 				ctx = context.WithValue(ctx, orgIDKey, orgID)
 			}
 
-			params := url.Values{}
-			if strings.TrimSpace(rawQuery) != "" {
-				translated, terr := p.translateQueryWithContext(ctx, defaultQuery(rawQuery))
-				if terr == nil {
-					params.Set("query", translated)
-				} else {
-					params.Set("query", "*")
-				}
-			} else {
-				params.Set("query", "*")
-			}
-			if strings.TrimSpace(start) != "" {
-				params.Set("start", start)
-			}
-			if strings.TrimSpace(end) != "" {
-				params.Set("end", end)
-			}
-			if search = strings.TrimSpace(search); search != "" && p.supportsMetadataSubstringFilter() {
-				params.Set("q", search)
-				params.Set("filter", "substring")
-			}
-
-			labels, fetchErr := p.fetchPreferredLabelNames(ctx, params)
+			labels, fetchErr := p.fetchScopedLabelNames(ctx, rawQuery, start, end, search, false)
 			if fetchErr != nil {
 				return nil, fetchErr
 			}
@@ -2670,31 +2732,7 @@ func (p *Proxy) refreshLabelValuesCacheAsync(orgID, cacheKey, labelName, rawQuer
 			if labelName == "service_name" {
 				values, fetchErr = p.serviceNameValues(ctx, rawQuery, start, end)
 			} else {
-				params := url.Values{}
-				if strings.TrimSpace(rawQuery) != "" {
-					translated, terr := p.translateQueryWithContext(ctx, defaultQuery(rawQuery))
-					if terr == nil {
-						params.Set("query", translated)
-					} else {
-						params.Set("query", "*")
-					}
-				} else {
-					params.Set("query", "*")
-				}
-				if strings.TrimSpace(start) != "" {
-					params.Set("start", start)
-				}
-				if strings.TrimSpace(end) != "" {
-					params.Set("end", end)
-				}
-				if strings.TrimSpace(limit) != "" {
-					params.Set("limit", limit)
-				}
-				if search = strings.TrimSpace(search); search != "" && p.supportsMetadataSubstringFilter() {
-					params.Set("q", search)
-					params.Set("filter", "substring")
-				}
-				values, fetchErr = p.fetchPreferredLabelValues(ctx, labelName, params)
+				values, fetchErr = p.fetchScopedLabelValues(ctx, labelName, rawQuery, start, end, limit, search)
 			}
 			if fetchErr != nil {
 				return nil, fetchErr
@@ -4262,34 +4300,12 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	p.metrics.RecordCacheMiss()
 	r = withOrgID(r)
 
-	params := url.Values{}
-	// Forward the query param if provided (Loki uses it to scope label suggestions)
-	if q := r.FormValue("query"); q != "" {
-		translated, terr := p.translateQueryWithContext(r.Context(), defaultQuery(q))
-		if terr == nil {
-			params.Set("query", translated)
-		} else {
-			params.Set("query", "*")
-		}
-	} else {
-		params.Set("query", "*")
-	}
-	if s := r.FormValue("start"); s != "" {
-		params.Set("start", s)
-	}
-	if e := r.FormValue("end"); e != "" {
-		params.Set("end", e)
-	}
 	search := strings.TrimSpace(r.FormValue("search"))
 	if search == "" {
 		search = strings.TrimSpace(r.FormValue("q"))
 	}
-	if search != "" && p.supportsMetadataSubstringFilter() {
-		params.Set("q", search)
-		params.Set("filter", "substring")
-	}
 
-	labels, err := p.fetchPreferredLabelNamesCached(r.Context(), params)
+	labels, err := p.fetchScopedLabelNames(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), search, true)
 	if err != nil {
 		status := statusFromUpstreamErr(err)
 		p.writeError(w, status, err.Error())
@@ -4414,32 +4430,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params := url.Values{}
-	if q := r.FormValue("query"); q != "" {
-		translated, terr := p.translateQueryWithContext(r.Context(), defaultQuery(q))
-		if terr == nil {
-			params.Set("query", translated)
-		} else {
-			params.Set("query", "*")
-		}
-	} else {
-		params.Set("query", "*")
-	}
-	if s := r.FormValue("start"); s != "" {
-		params.Set("start", s)
-	}
-	if e := r.FormValue("end"); e != "" {
-		params.Set("end", e)
-	}
-	if l := r.FormValue("limit"); l != "" {
-		params.Set("limit", l)
-	}
-	if search != "" && p.supportsMetadataSubstringFilter() {
-		params.Set("q", search)
-		params.Set("filter", "substring")
-	}
-
-	values, err := p.fetchPreferredLabelValues(r.Context(), labelName, params)
+	values, err := p.fetchScopedLabelValues(r.Context(), labelName, rawQuery, r.FormValue("start"), r.FormValue("end"), r.FormValue("limit"), search)
 	if err != nil {
 		status := statusFromUpstreamErr(err)
 		p.writeError(w, status, err.Error())

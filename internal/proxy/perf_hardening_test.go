@@ -238,17 +238,17 @@ func TestLabelValuesServiceName_StripsFieldStagesForDrilldownQueries(t *testing.
 	var receivedQuery string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/select/logsql/streams":
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"values":[{"value":"service.name","hits":1}]}`)
+		case "/select/logsql/field_values":
 			receivedQuery = r.URL.Query().Get("query")
 			w.Header().Set("Content-Type", "application/json")
 			if strings.Contains(receivedQuery, "source_message_bytes") || strings.Contains(receivedQuery, "unpack_json") || strings.Contains(receivedQuery, "logfmt") {
 				fmt.Fprintln(w, `{"values":[]}`)
 				return
 			}
-			fmt.Fprintln(w, `{"values":[{"value":"{service=\"grafana\"}","hits":1}]}`)
-		case "/select/logsql/query":
-			w.Header().Set("Content-Type", "application/x-ndjson")
-			fmt.Fprintln(w, `{"_time":"2024-01-15T10:30:00Z","_msg":"ok","_stream":"{service=\"grafana\"}"}`)
+			fmt.Fprintln(w, `{"values":[{"value":"grafana","hits":1}]}`)
 		default:
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
 		}
@@ -278,6 +278,156 @@ func TestLabelValuesServiceName_StripsFieldStagesForDrilldownQueries(t *testing.
 	}
 	if len(resp.Data) == 0 || resp.Data[0] != "grafana" {
 		t.Fatalf("expected derived service_name value, got %#v (query=%q)", resp.Data, receivedQuery)
+	}
+}
+
+func TestLabels_StripsFieldStagesForDrilldownQueries(t *testing.T) {
+	var receivedQueries []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/stream_field_names" && r.URL.Path != "/select/logsql/field_names" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		query := r.URL.Query().Get("query")
+		receivedQueries = append(receivedQueries, query)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(query, "source_message_bytes") || strings.Contains(query, "unpack_json") || strings.Contains(query, "logfmt") {
+			fmt.Fprintln(w, `{"values":[]}`)
+			return
+		}
+		fmt.Fprintln(w, `{"values":[{"value":"app","hits":1},{"value":"level","hits":1}]}`)
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodGet,
+		`/loki/api/v1/labels?query=%7Bdeployment_environment%3D%22dev%22%7D+%7C+json+%7C+source_message_bytes%3D%2289%22&start=1&end=2`,
+		nil,
+	)
+	p.handleLabels(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if len(receivedQueries) == 0 {
+		t.Fatal("expected metadata labels lookup to hit backend")
+	}
+	lastQuery := receivedQueries[len(receivedQueries)-1]
+	if strings.Contains(lastQuery, "source_message_bytes") || strings.Contains(lastQuery, "unpack_json") || strings.Contains(lastQuery, "logfmt") {
+		t.Fatalf("labels lookup should strip field-detection stages, got query %q (all=%v)", lastQuery, receivedQueries)
+	}
+
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data) == 0 || resp.Data[0] != "app" {
+		t.Fatalf("expected scoped labels after relaxed fallback, got %#v (queries=%v)", resp.Data, receivedQueries)
+	}
+}
+
+func TestLabelValues_StripsFieldStagesForDrilldownQueries(t *testing.T) {
+	var receivedValueQueries []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/stream_field_names":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"values":[{"value":"app","hits":1}]}`)
+		case "/select/logsql/stream_field_values", "/select/logsql/field_values":
+			query := r.URL.Query().Get("query")
+			receivedValueQueries = append(receivedValueQueries, query)
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(query, "source_message_bytes") || strings.Contains(query, "unpack_json") || strings.Contains(query, "logfmt") {
+				fmt.Fprintln(w, `{"values":[]}`)
+				return
+			}
+			fmt.Fprintln(w, `{"values":[{"value":"grafana","hits":1}]}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodGet,
+		`/loki/api/v1/label/app/values?query=%7Bdeployment_environment%3D%22dev%22%7D+%7C+json+%7C+source_message_bytes%3D%2289%22&start=1&end=2`,
+		nil,
+	)
+	p.handleLabelValues(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if len(receivedValueQueries) == 0 {
+		t.Fatal("expected label values lookup to hit backend")
+	}
+	lastQuery := receivedValueQueries[len(receivedValueQueries)-1]
+	if strings.Contains(lastQuery, "source_message_bytes") || strings.Contains(lastQuery, "unpack_json") || strings.Contains(lastQuery, "logfmt") {
+		t.Fatalf("label values lookup should strip field-detection stages, got query %q (all=%v)", lastQuery, receivedValueQueries)
+	}
+
+	var resp struct {
+		Data []string `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0] != "grafana" {
+		t.Fatalf("expected scoped label values after relaxed fallback, got %#v (queries=%v)", resp.Data, receivedValueQueries)
+	}
+}
+
+func TestDetectedLabels_ScannedFallback_StripsFieldStagesForDrilldownQueries(t *testing.T) {
+	var scanQueries []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/streams":
+			http.Error(w, "backend unavailable", http.StatusBadGateway)
+		case "/select/logsql/query":
+			query := r.FormValue("query")
+			scanQueries = append(scanQueries, query)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			if strings.Contains(query, "source_message_bytes") || strings.Contains(query, "unpack_json") || strings.Contains(query, "logfmt") {
+				http.Error(w, "unsupported parser stage", http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintln(w, `{"_time":"2024-01-15T10:30:00Z","_msg":"ok","_stream":"{app=\"grafana\",level=\"info\"}"}`)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer backend.Close()
+
+	p := newTestProxy(t, backend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodGet,
+		`/loki/api/v1/detected_labels?query=%7Bdeployment_environment%3D%22dev%22%7D+%7C+json+%7C+source_message_bytes%3D%2289%22&start=1&end=2`,
+		nil,
+	)
+	p.handleDetectedLabels(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if len(scanQueries) < 2 {
+		t.Fatalf("expected detected_labels scan fallback to retry with relaxed query, got %v", scanQueries)
+	}
+	lastQuery := scanQueries[len(scanQueries)-1]
+	if strings.Contains(lastQuery, "source_message_bytes") || strings.Contains(lastQuery, "unpack_json") || strings.Contains(lastQuery, "logfmt") {
+		t.Fatalf("detected_labels scan fallback should strip field-detection stages, got query %q (all=%v)", lastQuery, scanQueries)
+	}
+
+	var resp struct {
+		DetectedLabels []map[string]interface{} `json:"detectedLabels"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.DetectedLabels) == 0 {
+		t.Fatalf("expected detected_labels after relaxed fallback, got empty response (queries=%v body=%s)", scanQueries, w.Body.String())
 	}
 }
 

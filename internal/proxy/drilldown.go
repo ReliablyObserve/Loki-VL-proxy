@@ -318,6 +318,11 @@ func formatDetectedLabelSummaries(summaries map[string]*detectedLabelSummary) []
 }
 
 func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string) ([]string, error) {
+	values, err := p.serviceNameValuesFromNativeFields(ctx, query, start, end)
+	if err == nil && len(values) > 0 {
+		return values, nil
+	}
+
 	selectorQuery := streamSelectorPrefix(query)
 	if selectorQuery == "" {
 		selectorQuery = defaultFieldDetectionQuery(query)
@@ -358,7 +363,7 @@ func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string)
 	}
 
 	seen := make(map[string]struct{}, len(vlResp.Values))
-	values := make([]string, 0, len(vlResp.Values))
+	fallbackValues := make([]string, 0, len(vlResp.Values))
 	for _, item := range vlResp.Values {
 		labels := parseStreamLabels(item.Value)
 		serviceName := deriveServiceName(labels)
@@ -366,13 +371,58 @@ func (p *Proxy) serviceNameValues(ctx context.Context, query, start, end string)
 			continue
 		}
 		seen[serviceName] = struct{}{}
-		values = append(values, serviceName)
+		fallbackValues = append(fallbackValues, serviceName)
 	}
-	sort.Strings(values)
-	if len(values) == 0 {
+	sort.Strings(fallbackValues)
+	if len(fallbackValues) == 0 {
 		return p.serviceNameValuesFromDetectedLabels(ctx, detectionQuery, start, end)
 	}
-	return values, nil
+	return fallbackValues, nil
+}
+
+func (p *Proxy) serviceNameValuesFromNativeFields(ctx context.Context, query, start, end string) ([]string, error) {
+	fieldNames, err := p.fetchNativeFieldNames(ctx, query, start, end)
+	if err != nil {
+		return nil, err
+	}
+
+	available := make(map[string]struct{}, len(fieldNames))
+	for _, field := range fieldNames {
+		available[field] = struct{}{}
+	}
+
+	var lastErr error
+	for _, field := range serviceNameSourceFields {
+		if _, ok := available[field]; !ok {
+			continue
+		}
+		fieldValues, err := p.fetchNativeFieldValues(ctx, query, start, end, field, 0)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(fieldValues) == 0 {
+			continue
+		}
+		values := make([]string, 0, len(fieldValues))
+		seen := make(map[string]struct{}, len(fieldValues))
+		for _, value := range fieldValues {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			values = append(values, value)
+		}
+		sort.Strings(values)
+		if len(values) > 0 {
+			return values, nil
+		}
+	}
+	return nil, lastErr
 }
 
 func streamSelectorPrefix(query string) string {
@@ -861,6 +911,14 @@ func fieldDetectionQueryCandidates(query string) []string {
 		return []string{primary}
 	}
 	return []string{primary, relaxed}
+}
+
+func metadataQueryCandidates(query string) []string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []string{"*"}
+	}
+	return fieldDetectionQueryCandidates(query)
 }
 
 func normalizeBareSelectorQuery(query string) string {
@@ -1539,36 +1597,48 @@ func nativeFieldFilterNeedsStreamLabels(native map[string]*detectedFieldSummary,
 }
 
 func (p *Proxy) detectScannedLabels(ctx context.Context, query, start, end string, lineLimit int) (map[string]*detectedLabelSummary, error) {
-	logsqlQuery, err := p.translateQuery(defaultQuery(query))
-	if err != nil {
-		return nil, err
-	}
-
-	params := url.Values{}
-	params.Set("query", logsqlQuery+" | sort by (_time desc)")
-	params.Set("limit", strconv.Itoa(lineLimit))
-	if start != "" {
-		params.Set("start", formatVLTimestamp(start))
-	}
-	if end != "" {
-		params.Set("end", formatVLTimestamp(end))
-	}
-
-	resp, err := p.vlPost(ctx, "/select/logsql/query", params)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= http.StatusBadRequest {
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+	candidates := fieldDetectionQueryCandidates(query)
+	var lastErr error
+	for i, candidate := range candidates {
+		logsqlQuery, err := p.translateQuery(candidate)
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		return nil, fmt.Errorf("%s", msg)
+
+		params := url.Values{}
+		params.Set("query", logsqlQuery+" | sort by (_time desc)")
+		params.Set("limit", strconv.Itoa(lineLimit))
+		if start != "" {
+			params.Set("start", formatVLTimestamp(start))
+		}
+		if end != "" {
+			params.Set("end", formatVLTimestamp(end))
+		}
+
+		resp, err := p.vlPost(ctx, "/select/logsql/query", params)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode >= http.StatusBadRequest {
+			msg := strings.TrimSpace(string(body))
+			if msg == "" {
+				msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+			}
+			lastErr = fmt.Errorf("%s", msg)
+			continue
+		}
+
+		summaries := scanDetectedLabelSummaries(body, p.labelTranslator)
+		if len(summaries) > 0 || i == len(candidates)-1 {
+			return summaries, nil
+		}
 	}
-	return scanDetectedLabelSummaries(body, p.labelTranslator), nil
+	return nil, lastErr
 }
 
 type detectedFieldsCachePayload struct {

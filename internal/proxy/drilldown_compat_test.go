@@ -592,17 +592,29 @@ func TestDrilldown_IndexVolumeRange_TargetLabelsServiceName_FillsFullRangeBucket
 	}
 }
 
-func TestDrilldown_LabelValues_ServiceNameDerivedFromStreams(t *testing.T) {
+func TestDrilldown_LabelValues_ServiceNameUsesNativeFieldValues(t *testing.T) {
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/select/logsql/streams" {
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"values": []map[string]interface{}{
+					{"value": "app", "hits": 12},
+					{"value": "service.name", "hits": 12},
+				},
+			})
+		case "/select/logsql/field_values":
+			if got := r.URL.Query().Get("field"); got != "service.name" {
+				t.Fatalf("expected service_name fast path to use service.name field first, got %q", got)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"values": []map[string]interface{}{
+					{"value": "api-gateway", "hits": 12},
+					{"value": "worker", "hits": 5},
+				},
+			})
+		default:
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"values": []map[string]interface{}{
-				{"value": `{app="api-gateway",cluster="us-east-1"}`, "hits": 12},
-				{"value": `{container="worker"}`, "hits": 5},
-			},
-		})
 	}))
 	defer vlBackend.Close()
 
@@ -1004,15 +1016,25 @@ func TestDrilldown_DetectedFieldValues_ReturnStructuredMetadataValues(t *testing
 }
 
 func TestDrilldown_DetectedFieldValues_ServiceNameUsesFastPath(t *testing.T) {
-	var sawStreams bool
+	var (
+		sawFieldNames  bool
+		sawFieldValues bool
+	)
 	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/select/logsql/streams":
-			sawStreams = true
+		case "/select/logsql/field_names":
+			sawFieldNames = true
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"values":[{"value":"{service.name=\"grafana\",cluster=\"test-cluster\"}","hits":2}]}`))
-		case "/select/logsql/field_names", "/select/logsql/query", "/select/logsql/field_values":
-			t.Fatalf("service_name detected field values must use dedicated fast path, got %s", r.URL.Path)
+			w.Write([]byte(`{"values":[{"value":"service.name","hits":2},{"value":"app","hits":1}]}`))
+		case "/select/logsql/field_values":
+			sawFieldValues = true
+			if r.URL.Query().Get("field") != "service.name" {
+				t.Fatalf("expected service_name fast path to use service.name field first, got %q", r.URL.Query().Get("field"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"values":[{"value":"grafana","hits":2}]}`))
+		case "/select/logsql/streams", "/select/logsql/query":
+			t.Fatalf("service_name detected field values must avoid stream scans, got %s", r.URL.Path)
 		default:
 			t.Fatalf("unexpected backend path %s", r.URL.Path)
 		}
@@ -1047,8 +1069,8 @@ func TestDrilldown_DetectedFieldValues_ServiceNameUsesFastPath(t *testing.T) {
 	if len(values) != 1 || values[0].(string) != "grafana" {
 		t.Fatalf("expected service_name values from fast path, got %v", values)
 	}
-	if !sawStreams {
-		t.Fatalf("expected streams endpoint to be used")
+	if !sawFieldNames || !sawFieldValues {
+		t.Fatalf("expected field_names + field_values fast path, got fieldNames=%v fieldValues=%v", sawFieldNames, sawFieldValues)
 	}
 }
 
