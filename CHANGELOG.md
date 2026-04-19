@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-04-19
+
 ### Bug Fixes
 
 - drilldown/metadata: restore `service_name` label discovery by preferring native field metadata over stream scans, and retry relaxed query candidates for labels, label values, and detected-label fallbacks when parser-heavy Drilldown queries return empty metadata.
