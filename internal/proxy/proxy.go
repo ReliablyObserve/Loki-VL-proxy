@@ -5238,11 +5238,11 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 
 		if endpoint == "/select/logsql/query" {
 			denseWindowing := p.supportsDensePatternWindowingForRequest(r)
-			startNs, endNs, splitInterval, perWindowLimit, ok := patternWindowedSamplingConfig(startParam, endParam, stepParam, sourceLimit, denseWindowing)
+			startNs, endNs, splitInterval, perWindowLimit, secondPassCap, ok := patternWindowedSamplingConfig(startParam, endParam, stepParam, sourceLimit, denseWindowing)
 			if ok {
 				windows := splitQueryRangeWindowsWithOptions(startNs, endNs, splitInterval, "backward", true)
 				if len(windows) > 1 {
-					windowEntries, windowSuccesses, windowDiag := p.fetchPatternsFromWindows(r, logsqlQuery, sourceLimit, perWindowLimit, windows, stepParam, patternLimit)
+					windowEntries, windowSuccesses, windowDiag := p.fetchPatternsFromWindows(r, logsqlQuery, sourceLimit, perWindowLimit, secondPassCap, windows, stepParam, patternLimit)
 					diag.sourceLinesRequested += windowDiag.sourceLinesRequested
 					diag.sourceLinesScanned += windowDiag.sourceLinesScanned
 					diag.sourceLinesObserved += windowDiag.sourceLinesObserved
@@ -5331,6 +5331,7 @@ func (p *Proxy) fetchPatternsFromWindows(
 	logsqlQuery string,
 	sourceLimit int,
 	perWindowLimit int,
+	maxSecondPassWindows int,
 	windows []queryRangeWindow,
 	stepParam string,
 	patternLimit int,
@@ -5340,6 +5341,9 @@ func (p *Proxy) fetchPatternsFromWindows(
 	}
 	if perWindowLimit <= 0 {
 		perWindowLimit = 1
+	}
+	if maxSecondPassWindows <= 0 {
+		maxSecondPassWindows = maxPatternSecondPassWindows
 	}
 	effectiveLimit := perWindowLimit
 	if sourceLimit > 0 && sourceLimit < effectiveLimit {
@@ -5457,7 +5461,7 @@ func (p *Proxy) fetchPatternsFromWindows(
 		}
 	}
 	if boostedLimit := patternSecondPassLimit(effectiveLimit, sourceLimit); boostedLimit > 0 && len(cappedResults) > 0 {
-		rerunCount := min(len(cappedResults), maxPatternSecondPassWindows)
+		rerunCount := min(len(cappedResults), maxSecondPassWindows)
 		diag.secondPassWindows += rerunCount
 		for i := 0; i < rerunCount; i++ {
 			result := cappedResults[i]
@@ -5613,10 +5617,10 @@ func derivePatternStep(startParam, endParam string) string {
 	return strconv.FormatInt(stepSeconds, 10) + "s"
 }
 
-func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourceLimit int, denseWindowing bool) (int64, int64, time.Duration, int, bool) {
+func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourceLimit int, denseWindowing bool) (int64, int64, time.Duration, int, int, bool) {
 	startNs, endNs, ok := parseLokiTimeRangeToUnixNano(startParam, endParam)
 	if !ok || sourceLimit <= 0 || endNs <= startNs {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 
 	span := time.Duration(endNs - startNs)
@@ -5625,8 +5629,13 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 	minWindowSourceLimit := 200
 	maxWindowSourceLimit := 1_000
 	maxPatternWindowSamples := 96
+	secondPassCap := maxPatternSecondPassWindows
 	shortDenseSpanThreshold := 6 * time.Hour
-	shortDenseWindowCap := 24
+	// The aligned splitter adds an extra boundary window, so keep the internal
+	// cap at 20 to hold the effective backend fanout to about 21 windows while
+	// still preserving enough bucket coverage for short Drilldown ranges.
+	shortDenseWindowCap := 20
+	shortDenseSecondPassCap := 4
 	if denseWindowing {
 		// Dense ranges can otherwise explode into hundreds of windows and produce
 		// short/unstable tails under backend pressure. Keep fanout bounded so
@@ -5643,7 +5652,7 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 		}
 	}
 	if span < minWindowedSpan {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 
 	windowCount := int(span/targetWindowSpan) + 1
@@ -5659,6 +5668,7 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 		if windowCount > shortDenseWindowCap {
 			windowCount = shortDenseWindowCap
 		}
+		secondPassCap = shortDenseSecondPassCap
 	}
 	if !denseWindowing {
 		if stepSeconds > 0 {
@@ -5680,7 +5690,7 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 
 	intervalNs := (endNs - startNs) / int64(windowCount)
 	if intervalNs <= 0 {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
 	interval := time.Duration(intervalNs)
 
@@ -5692,7 +5702,7 @@ func patternWindowedSamplingConfig(startParam, endParam, stepParam string, sourc
 		perWindowLimit = maxWindowSourceLimit
 	}
 
-	return startNs, endNs, interval, perWindowLimit, true
+	return startNs, endNs, interval, perWindowLimit, secondPassCap, true
 }
 
 func shouldAcceptWindowedPatternResults(successes, total int, denseWindowing bool) bool {

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- patterns/read-path: tighten dense short-range `/patterns` fanout and second-pass widening so Drilldown refreshes stop turning a single request into dozens of raw-log backend fetches under fine step sizes.
+
 ## [1.8.1] - 2026-04-19
 
 ### Bug Fixes
