@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - drilldown/discovery: ignore zero-hit native `field_values` entries so detected field value pickers stop advertising values that are not actually present in the current selector and time window, and query-escape peer-cache GET/SET keys so discovery caches with embedded query strings survive peer transport correctly instead of truncating on `&`-style separators.
+- query-range/metrics: stop splitting metric `query_range` requests into multiple backend `stats_query_range` windows, keeping the read path aligned with the documented log-only windowing contract and reducing avoidable VL request fanout for Drilldown and Explore metric panels.
 
 ### Tests
 
