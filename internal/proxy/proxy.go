@@ -2155,12 +2155,12 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write(cacheOut)
 		if cacheable && sc.code == http.StatusOK {
-			p.cache.SetWithTTL(cacheKey, append([]byte(nil), cacheOut...), CacheTTLs["query_range"])
+			p.setLocalReadCacheWithTTL(cacheKey, append([]byte(nil), cacheOut...), CacheTTLs["query_range"])
 		}
 	} else if cacheTap != nil {
 		if cacheable && sc.code == http.StatusOK {
 			if body := cacheTap.CapturedBody(); len(body) > 0 {
-				p.cache.SetWithTTL(cacheKey, append([]byte(nil), body...), CacheTTLs["query_range"])
+				p.setLocalReadCacheWithTTL(cacheKey, append([]byte(nil), body...), CacheTTLs["query_range"])
 			}
 		}
 		cacheTap.Release()
@@ -2724,7 +2724,7 @@ func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end, s
 			}
 			labels = p.labelTranslator.TranslateLabelsList(filtered)
 			labels = appendSyntheticLabels(labels)
-			p.cache.SetWithTTL(cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
+			p.setLocalReadCacheWithTTL(cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
 			return nil, nil
 		})
 		if err != nil {
@@ -2763,7 +2763,7 @@ func (p *Proxy) refreshLabelValuesCacheAsync(orgID, cacheKey, labelName, rawQuer
 					values = indexedValues
 				}
 			}
-			p.cache.SetWithTTL(cacheKey, lokiLabelsResponse(values), CacheTTLs["label_values"])
+			p.setLocalReadCacheWithTTL(cacheKey, lokiLabelsResponse(values), CacheTTLs["label_values"])
 			return nil, nil
 		})
 		if err != nil {
@@ -4160,7 +4160,18 @@ func (p *Proxy) setJSONCacheWithTTL(cacheKey string, ttl time.Duration, value in
 	if err != nil {
 		return
 	}
-	p.cache.SetWithTTL(cacheKey, encoded, ttl)
+	p.setLocalReadCacheWithTTL(cacheKey, encoded, ttl)
+}
+
+// setLocalReadCacheWithTTL stores response bodies for handlers that only read
+// cache entries via GetWithTTL, which is intentionally L1-only. Writing those
+// entries to disk or peer write-through adds churn without creating a fallback
+// path the handlers actually use.
+func (p *Proxy) setLocalReadCacheWithTTL(cacheKey string, value []byte, ttl time.Duration) {
+	if p == nil || p.cache == nil {
+		return
+	}
+	p.cache.SetLocalOnlyWithTTL(cacheKey, value, ttl)
 }
 
 func (p *Proxy) refreshDetectedFieldsCacheAsync(orgID, cacheKey, query, start, end string, lineLimit int) {
@@ -4346,7 +4357,7 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	labels = appendSyntheticLabels(labels)
 
 	result := lokiLabelsResponse(labels)
-	p.cache.SetWithTTL(cacheKey, result, CacheTTLs["labels"])
+	p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["labels"])
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("labels", http.StatusOK, time.Since(start))
@@ -4417,7 +4428,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	if p.labelValuesBrowseMode(rawQuery) {
 		if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, search, offset, limit); ok {
 			result := lokiLabelsResponse(indexedValues)
-			p.cache.SetWithTTL(cacheKey, result, CacheTTLs["label_values"])
+			p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(result)
 			p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4442,7 +4453,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result := lokiLabelsResponse(values)
-		p.cache.SetWithTTL(cacheKey, result, CacheTTLs["label_values"])
+		p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(result)
 		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4469,7 +4480,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := lokiLabelsResponse(values)
-	p.cache.SetWithTTL(cacheKey, result, CacheTTLs["label_values"])
+	p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
