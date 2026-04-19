@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- drilldown/detected-labels: recover `service_name` in broad Drilldown label discovery when native stream labels collapse to `unknown_service` by deriving service identity from structured metadata fields such as `service.name` during scan fallback and replacing incomplete native summaries with scanned service names.
+
 ## [1.8.0] - 2026-04-19
 
 ### Bug Fixes
