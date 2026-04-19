@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,6 +152,7 @@ func TestContract_Labels_PrefersStreamFieldNames(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
 	p.handleLabels(w, r)
@@ -184,6 +186,7 @@ func TestContract_Labels_FallsBackToGenericFieldNames(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/labels", nil)
 	p.handleLabels(w, r)
@@ -641,6 +644,7 @@ func TestContract_Series_ResponseFormat(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/series?match[]=%7Bapp%3D%22nginx%22%7D", nil)
 	r.ParseForm()
@@ -684,6 +688,7 @@ func TestContract_Series_ParsesLabelsCorrectly(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/loki/api/v1/series?match[]=%7B%7D", nil)
 	r.ParseForm()
@@ -1013,6 +1018,7 @@ func TestContract_Patterns_UsesFromToWhenStartEndMissing(t *testing.T) {
 	defer vlBackend.Close()
 
 	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(
 		"GET",
@@ -1257,6 +1263,71 @@ func TestContract_Patterns_WindowedSamplingSecondPassWidensCappedWindows(t *test
 	mustUnmarshal(t, w.Body.Bytes(), &resp)
 	if len(resp.Data) < 2 {
 		t.Fatalf("expected widened second pass to surface multiple pattern families, got %v", resp.Data)
+	}
+}
+
+func TestContract_Patterns_DenseShortRangeKeepsBackendCallsBounded(t *testing.T) {
+	var backendCalls atomic.Int64
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/query" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		backendCalls.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		limit, err := strconv.Atoi(strings.TrimSpace(r.FormValue("limit")))
+		if err != nil {
+			t.Fatalf("expected numeric limit, got %q: %v", r.FormValue("limit"), err)
+		}
+		startRaw := strings.TrimSpace(r.FormValue("start"))
+		startVal, err := strconv.ParseInt(startRaw, 10, 64)
+		if err != nil {
+			t.Fatalf("expected numeric start timestamp, got %q: %v", startRaw, err)
+		}
+		startSec := startVal
+		if len(startRaw) > 10 {
+			startSec = startVal / int64(time.Second)
+		}
+		base := time.Unix(startSec, 0).UTC()
+
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		writeLine := func(ts time.Time, msg string) {
+			_, _ = fmt.Fprintf(w, `{"_time":"%s","_msg":%q,"level":"info"}`+"\n", ts.Format(time.RFC3339), msg)
+		}
+		if limit <= 200 {
+			for i := 0; i < limit; i++ {
+				writeLine(base.Add(time.Duration(i)*time.Second), fmt.Sprintf("level=info msg=request id=%d user=alpha", i))
+			}
+			return
+		}
+		for i := 0; i < 200; i++ {
+			writeLine(base.Add(time.Duration(i)*time.Second), fmt.Sprintf("level=info msg=request id=%d user=alpha", i))
+		}
+		for i := 0; i < 200; i++ {
+			writeLine(base.Add(time.Duration(i+400)*time.Second), fmt.Sprintf("level=warn msg=audit path=/api/v1/orders/%d status=500", i))
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newTestProxy(t, vlBackend.URL)
+	p.backendSupportsDensePatternWindowing = true
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		"GET",
+		"/loki/api/v1/patterns?query=%7Bapp%3D%22web%22%7D&start=0&end=10800&step=90s&line_limit=2420",
+		nil,
+	)
+	if !p.supportsDensePatternWindowingForRequest(r) {
+		t.Fatal("expected dense pattern windowing to be enabled for short dense range test")
+	}
+	p.handlePatterns(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for patterns endpoint, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := backendCalls.Load(); got > 26 {
+		t.Fatalf("expected dense short-range patterns backend calls <=26, got %d", got)
 	}
 }
 
@@ -2510,8 +2581,8 @@ func TestPatternWindowedSamplingConfig_DenseIgnoresStepInflationAndCapsFanout(t 
 	start := strconv.FormatInt(0, 10)
 	end := strconv.FormatInt(int64((24*time.Hour)/time.Second), 10)
 
-	startNsA, endNsA, intervalA, perWindowA, okA := patternWindowedSamplingConfig(start, end, "1s", 10000, true)
-	startNsB, endNsB, intervalB, perWindowB, okB := patternWindowedSamplingConfig(start, end, "30m", 10000, true)
+	startNsA, endNsA, intervalA, perWindowA, secondPassA, okA := patternWindowedSamplingConfig(start, end, "1s", 10000, true)
+	startNsB, endNsB, intervalB, perWindowB, secondPassB, okB := patternWindowedSamplingConfig(start, end, "30m", 10000, true)
 	if !okA || !okB {
 		t.Fatal("expected dense windowed config to be enabled for long ranges")
 	}
@@ -2523,6 +2594,9 @@ func TestPatternWindowedSamplingConfig_DenseIgnoresStepInflationAndCapsFanout(t 
 	}
 	if perWindowA != perWindowB {
 		t.Fatalf("expected dense mode per-window limit to remain stable across steps, got %d vs %d", perWindowA, perWindowB)
+	}
+	if secondPassA != secondPassB {
+		t.Fatalf("expected dense mode second-pass cap to remain stable across steps, got %d vs %d", secondPassA, secondPassB)
 	}
 
 	span := time.Duration(endNsA - startNsA)
@@ -2539,20 +2613,23 @@ func TestPatternWindowedSamplingConfig_DenseShortRangeUsesStepToIncreaseFanout(t
 	start := strconv.FormatInt(0, 10)
 	end := strconv.FormatInt(int64((3*time.Hour)/time.Second), 10)
 
-	_, _, interval, perWindow, ok := patternWindowedSamplingConfig(start, end, "90s", 2420, true)
+	_, _, interval, perWindow, secondPassCap, ok := patternWindowedSamplingConfig(start, end, "90s", 2420, true)
 	if !ok {
 		t.Fatal("expected dense windowed config for short 3h range")
 	}
 	span := 3 * time.Hour
 	windowCount := int(span/interval) + 1
-	if windowCount < 20 {
+	if windowCount < 18 {
 		t.Fatalf("expected short dense range to fan out beyond coarse 45m windows, got %d windows", windowCount)
 	}
-	if windowCount > 96 {
-		t.Fatalf("expected short dense range fanout capped at 96 windows, got %d", windowCount)
+	if windowCount > 21 {
+		t.Fatalf("expected short dense range fanout capped at 21 windows, got %d", windowCount)
 	}
 	if perWindow < 200 {
 		t.Fatalf("expected short dense per-window lower bound >=200, got %d", perWindow)
+	}
+	if secondPassCap != 4 {
+		t.Fatalf("expected short dense second-pass cap of 4, got %d", secondPassCap)
 	}
 }
 
@@ -2560,19 +2637,22 @@ func TestPatternWindowedSamplingConfig_DenseThirtyMinuteRangeCapsShortRangeFanou
 	start := strconv.FormatInt(0, 10)
 	end := strconv.FormatInt(int64((30*time.Minute)/time.Second), 10)
 
-	startNs, endNs, interval, perWindow, ok := patternWindowedSamplingConfig(start, end, "5s", 7220, true)
+	startNs, endNs, interval, perWindow, secondPassCap, ok := patternWindowedSamplingConfig(start, end, "5s", 7220, true)
 	if !ok {
 		t.Fatal("expected dense windowed config for 30m range")
 	}
 	windows := splitQueryRangeWindowsWithOptions(startNs, endNs, interval, "backward", true)
-	if got := len(windows); got > 25 {
-		t.Fatalf("expected short dense fanout capped at 25 aligned windows, got %d", got)
+	if got := len(windows); got > 21 {
+		t.Fatalf("expected short dense fanout capped at 21 aligned windows, got %d", got)
 	}
-	if got := len(windows); got < 20 {
+	if got := len(windows); got < 12 {
 		t.Fatalf("expected short dense fanout to stay granular, got %d", got)
 	}
 	if perWindow < 200 {
 		t.Fatalf("expected dense per-window lower bound >=200, got %d", perWindow)
+	}
+	if secondPassCap != 4 {
+		t.Fatalf("expected short dense second-pass cap of 4, got %d", secondPassCap)
 	}
 }
 
@@ -2580,12 +2660,15 @@ func TestPatternWindowedSamplingConfig_DenseLongRangeBoostsPerWindowLimit(t *tes
 	start := strconv.FormatInt(0, 10)
 	end := strconv.FormatInt(int64((48*time.Hour)/time.Second), 10)
 
-	_, _, _, perWindow, ok := patternWindowedSamplingConfig(start, end, "5m", 11540, true)
+	_, _, _, perWindow, secondPassCap, ok := patternWindowedSamplingConfig(start, end, "5m", 11540, true)
 	if !ok {
 		t.Fatal("expected dense windowed config to be enabled for long ranges")
 	}
 	if perWindow < 4000 {
 		t.Fatalf("expected dense long-range per-window limit >=4000, got %d", perWindow)
+	}
+	if secondPassCap != maxPatternSecondPassWindows {
+		t.Fatalf("expected long dense second-pass cap to stay at %d, got %d", maxPatternSecondPassWindows, secondPassCap)
 	}
 }
 
