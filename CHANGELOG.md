@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-04-19
+
 ### Bug Fixes
 
 - drilldown/metrics: treat synthetic `service_name!=""` filters as "any service source field is populated" instead of requiring every possible backing field to be non-empty, restoring Grafana Drilldown label-card metric queries such as `sum(count_over_time({service_name="argocd",service_name != ""}[5s])) by (service_name)`.
