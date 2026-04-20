@@ -3035,10 +3035,6 @@ func compactPatternSnapshotSamples(samples [][]interface{}) [][]interface{} {
 	if len(samples) == 0 {
 		return samples
 	}
-	type bucketCount struct {
-		ts    int64
-		count int
-	}
 	byTimestamp := make(map[int64]int, len(samples))
 	order := make([]int64, 0, len(samples))
 	for _, pair := range samples {
