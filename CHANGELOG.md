@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-04-20
+
 ### Bug Fixes
 
 - chart/helm: quote rendered container args in the chart deployment template so values containing JSON, commas, colons, or embedded delimiters survive Helm rendering unchanged instead of being split or reinterpreted by YAML parsing.
