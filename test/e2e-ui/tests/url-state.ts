@@ -77,6 +77,7 @@ export function buildServiceDrilldownUrl(
   const fieldFilter = overrides["var-fields"];
   const params = new URLSearchParams({
     ...baseDrilldownState(datasourceUid),
+    "var-primary_label": "service_name|=~|.+",
     "var-filters": `service_name|=|${serviceName}`,
     displayedFields: "[]",
     urlColumns: "[]",
