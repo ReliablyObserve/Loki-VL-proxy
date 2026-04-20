@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- cache/tiering: move helper/read caches onto shared fresh reads with local-memory plus local-disk persistence, keep stale fallback local-first, and expose per-tier cache lookup metrics.
+- cache/keys: canonicalize helper/read cache keys across query-param ordering and alias pairs such as `from`/`start`, `to`/`end`, and `q`/`search`, plus normalize effective detected-field limits so Grafana refreshes can reuse the same helper cache entries instead of churning near-identical keys.
+- drilldown/discovery: stop relaxing helper discovery queries after a successful empty primary result for label names, label values, native field values, and detected-label scans; successful empty strict detected-field value resolution now stays strict instead of broadening into relaxed query data, and `service_name` metadata lookup stays on metadata endpoints instead of spilling into streams/scans when metadata is sufficient.
+- metrics/cache: promote cache-tier stats into the shared metrics pipeline so `/metrics` and OTLP now export the same L1/L2/L3 request, hit, miss, stale-hit, backend-fallthrough, object, and byte series instead of keeping them as proxy-local text-only metrics.
+- peer/persistence: advertise peer write-through compression support on existing GET/hot responses, opportunistically compress owner write-through pushes only when the remote peer has confirmed support, accept compressed peer cache POST bodies, request compressed peer snapshot warm responses, and skip periodic snapshot rewrites when the on-disk patterns or label-values payload is unchanged.
+
+### Tests
+
+- cache/tiering: add regression coverage for TTL-aware disk fresh/stale reads, shared L2 promotion into L1, and helper cache locality.
+- discovery/keys: add regression coverage for canonical helper cache keys, for stopping relaxed discovery fallback after a successful empty primary result, and for OTLP/Prometheus cache-tier metric export.
+- peer/persistence: add regression coverage for compressed peer write-through/set round trips, compressed peer snapshot warm fetches, and skipping unchanged periodic snapshot rewrites.
+
 ## [1.9.6] - 2026-04-20
 
 ### Bug Fixes
