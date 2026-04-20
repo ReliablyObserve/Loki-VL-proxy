@@ -4647,6 +4647,12 @@ func (p *Proxy) resolveDetectedFieldValues(ctx context.Context, fieldName, query
 	if errVals != nil {
 		return nil, errVals
 	}
+	if relaxOnEmpty && len(values) == 0 {
+		if relaxed := relaxedFieldDetectionQuery(query); relaxed != "" && relaxed != query {
+			p.observeInternalOperation(ctx, "discovery_fallback", "detected_field_values_relaxed_after_empty", 0)
+			return p.resolveDetectedFieldValues(ctx, fieldName, relaxed, start, end, lineLimit, false)
+		}
+	}
 	if values == nil {
 		values = []string{}
 	}

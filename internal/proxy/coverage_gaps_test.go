@@ -584,7 +584,7 @@ func TestDetectedFields_EmptyStrictQueryDoesNotRelaxCandidates(t *testing.T) {
 	}
 }
 
-func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxCandidates(t *testing.T) {
+func TestDetectedFieldValues_EmptyStrictQueryRelaxesCandidates(t *testing.T) {
 	const strictToken = "strict-only"
 
 	var fieldNameQueries []string
@@ -647,20 +647,24 @@ func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxCandidates(t *testing.T
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(fieldNameQueries) == 0 {
-		t.Fatalf("expected at least one strict native field-name lookup, got %v", fieldNameQueries)
+	if len(fieldNameQueries) < 2 {
+		t.Fatalf("expected strict+relaxed native field-name lookups, got %v", fieldNameQueries)
 	}
-	for _, got := range fieldNameQueries {
-		if !strings.Contains(got, strictToken) {
-			t.Fatalf("expected strict native field-name lookups only, got %v", fieldNameQueries)
-		}
+	if !strings.Contains(fieldNameQueries[0], strictToken) {
+		t.Fatalf("expected first native field-name lookup to stay strict, got %v", fieldNameQueries)
 	}
-	if len(fieldValueQueries) != 0 {
-		t.Fatalf("expected unresolved strict native field inventory to avoid field-value lookups, got %v", fieldValueQueries)
+	if strings.Contains(fieldNameQueries[len(fieldNameQueries)-1], strictToken) {
+		t.Fatalf("expected final native field-name lookup to relax whole-query filters, got %v", fieldNameQueries)
+	}
+	if len(fieldValueQueries) == 0 {
+		t.Fatalf("expected relaxed native field-value lookup, got %v", fieldValueQueries)
+	}
+	if strings.Contains(fieldValueQueries[len(fieldValueQueries)-1], strictToken) {
+		t.Fatalf("expected final native field-value lookup to use relaxed query, got %v", fieldValueQueries)
 	}
 	for _, got := range append(streamQueries, scanQueries...) {
 		if !strings.Contains(got, strictToken) {
-			t.Fatalf("expected strict-only empty detection to avoid relaxed label/scan fallback, got %q", got)
+			t.Fatalf("expected unresolved strict candidates to keep strict fallback scans, got %q", got)
 		}
 	}
 
@@ -669,12 +673,12 @@ func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxCandidates(t *testing.T
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	values, _ := resp["values"].([]interface{})
-	if len(values) != 0 {
-		t.Fatalf("expected strict detected_field values payload to stay empty, got %v", resp)
+	if len(values) != 1 || values[0] != "200" {
+		t.Fatalf("expected relaxed detected_field values payload, got %v", resp)
 	}
 }
 
-func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxWholeLookup(t *testing.T) {
+func TestDetectedFieldValues_EmptyStrictQueryRelaxesWholeLookup(t *testing.T) {
 	const strictToken = "strict-only"
 
 	var fieldNameQueries []string
@@ -718,21 +722,23 @@ func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxWholeLookup(t *testing.
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(fieldNameQueries) == 0 {
-		t.Fatalf("expected at least one strict native field-name lookup, got %v", fieldNameQueries)
+	if len(fieldNameQueries) < 2 {
+		t.Fatalf("expected strict+relaxed native field-name lookups, got %v", fieldNameQueries)
 	}
-	for _, got := range fieldNameQueries {
-		if !strings.Contains(got, strictToken) {
-			t.Fatalf("expected strict native field-name lookups only, got %v", fieldNameQueries)
-		}
+	if !strings.Contains(fieldNameQueries[0], strictToken) {
+		t.Fatalf("expected first native field-name lookup to stay strict, got %v", fieldNameQueries)
 	}
-	if len(scanQueries) == 0 {
-		t.Fatalf("expected at least one strict field scan without whole-query relaxation, got %v", scanQueries)
+	if strings.Contains(fieldNameQueries[len(fieldNameQueries)-1], strictToken) {
+		t.Fatalf("expected final native field-name lookup to relax whole-query filters, got %v", fieldNameQueries)
 	}
-	for _, got := range scanQueries {
-		if !strings.Contains(got, strictToken) {
-			t.Fatalf("expected strict field scans only, got %v", scanQueries)
-		}
+	if len(scanQueries) < 2 {
+		t.Fatalf("expected strict+relaxed field scans, got %v", scanQueries)
+	}
+	if !strings.Contains(scanQueries[0], strictToken) {
+		t.Fatalf("expected first field scan to stay strict, got %v", scanQueries)
+	}
+	if strings.Contains(scanQueries[len(scanQueries)-1], strictToken) {
+		t.Fatalf("expected final field scan to relax whole-query filters, got %v", scanQueries)
 	}
 
 	var resp map[string]interface{}
@@ -740,8 +746,8 @@ func TestDetectedFieldValues_EmptyStrictQueryDoesNotRelaxWholeLookup(t *testing.
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	values, _ := resp["values"].([]interface{})
-	if len(values) != 0 {
-		t.Fatalf("expected strict whole-query resolution to stay empty, got %v", resp)
+	if len(values) != 1 || values[0] != "200" {
+		t.Fatalf("expected relaxed whole-query resolution to recover detected_field values, got %v", resp)
 	}
 }
 
