@@ -854,7 +854,7 @@ func tryTranslateMetricQuery(logql string, labelFn LabelTranslateFunc) (string, 
 		}
 
 		if funcName == "rate" || funcName == "bytes_rate" {
-			if rateResult, ok := buildRateLikeQuery(logsqlQuery, logsqlFunc, duration, outerAgg, byLabels, labelFn); ok {
+			if rateResult, ok := buildRateLikeQuery(logsqlQuery, query, logsqlFunc, duration, outerAgg, byLabels, labelFn); ok {
 				return rateResult, true
 			}
 		}
@@ -910,13 +910,21 @@ func tryTranslateMetricQuery(logql string, labelFn LabelTranslateFunc) (string, 
 	return "", false
 }
 
-func buildRateLikeQuery(logsqlQuery, statsExpr, duration, outerAgg, byLabels string, labelFn LabelTranslateFunc) (string, bool) {
+func defaultRateInnerGrouping(query string) string {
+	if hasParserPipeline(query) {
+		return "_stream"
+	}
+	// Keep level-split streams distinct when level isn't configured as a VL _stream field.
+	return "_stream, level"
+}
+
+func buildRateLikeQuery(logsqlQuery, originalQuery, statsExpr, duration, outerAgg, byLabels string, labelFn LabelTranslateFunc) (string, bool) {
 	seconds := durationSeconds(duration)
 	if seconds <= 0 {
 		return "", false
 	}
 
-	innerBy := "_stream"
+	innerBy := defaultRateInnerGrouping(originalQuery)
 	if byLabels != "" {
 		innerBy = normalizeByLabels(byLabels, labelFn)
 	}

@@ -23,7 +23,7 @@ func TestAdvanced_MetricQueries(t *testing.T) {
 		{
 			name:  "bytes_rate",
 			logql: `bytes_rate({app="nginx"}[5m])`,
-			want:  `app:=nginx | stats by (_stream) sum_len(_msg) as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream) sum(__lvp_rate)`,
+			want:  `app:=nginx | stats by (_stream, level) sum_len(_msg) as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream, level) sum(__lvp_rate)`,
 		},
 		{
 			name:  "avg_over_time with unwrap",
@@ -43,7 +43,7 @@ func TestAdvanced_MetricQueries(t *testing.T) {
 		{
 			name:  "topk of rate — simplified",
 			logql: `topk(10, rate({region="us-east-1"}[5m]))`,
-			want:  `region:=us-east-1 | stats by (_stream) count() as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream) sum(__lvp_rate)`,
+			want:  `region:=us-east-1 | stats by (_stream, level) count() as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream, level) sum(__lvp_rate)`,
 		},
 		{
 			name:  "count_over_time with line filter",

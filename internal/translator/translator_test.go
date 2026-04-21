@@ -252,7 +252,7 @@ func TestMetricQueryTranslation(t *testing.T) {
 		{
 			name:  "rate",
 			logql: `rate({app="nginx"}[5m])`,
-			want:  `app:=nginx | stats by (_stream) count() as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream) sum(__lvp_rate)`,
+			want:  `app:=nginx | stats by (_stream, level) count() as __lvp_inner | math __lvp_inner/300 as __lvp_rate | stats by (_stream, level) sum(__lvp_rate)`,
 		},
 		{
 			name:  "count_over_time",
