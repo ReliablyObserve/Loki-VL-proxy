@@ -66,6 +66,18 @@ func shouldSuppressDetectedField(label string) bool {
 	return suppressed
 }
 
+func hasServiceSignal(labels map[string]string) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	for _, key := range serviceNameSourceFields {
+		if strings.TrimSpace(labels[key]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func deriveServiceName(labels map[string]string) string {
 	for _, key := range serviceNameSourceFields {
 		if value := strings.TrimSpace(labels[key]); value != "" {
