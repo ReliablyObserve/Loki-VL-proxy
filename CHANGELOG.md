@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - drilldown/volume: stop injecting synthetic `service_name="unknown_service"` into `index/volume` and `index/volume_range` buckets when requests are grouped by non-service labels (for example `cluster`), while preserving service-aware grouping behavior.
+- drilldown/volume: honor Drilldown grouping hints (`drillDownLabel`, `fieldBy`, and `var-fieldBy`) as target-label fallbacks when `targetLabels` is omitted, so field/label include-exclude actions keep grouping on the selected dimension instead of falling back to selector-order inference.
 
 ### Tests
 
-- drilldown/volume: add regression coverage that inferred non-service target labels do not emit synthetic `unknown_service` buckets for both vector and matrix volume endpoints.
+- drilldown/volume: add regression coverage for inferred non-service target labels (no synthetic `unknown_service`) and for Drilldown `fieldBy` fallback mapping on both vector and matrix volume endpoints.
 
 ## [1.9.5] - 2026-04-20
 

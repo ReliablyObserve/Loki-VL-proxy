@@ -4776,6 +4776,34 @@ func (p *Proxy) resolveTargetLabelFields(ctx context.Context, targetLabels strin
 	return resolved
 }
 
+func normalizeDrilldownGroupingLabel(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	switch strings.ToLower(raw) {
+	case "$__all", "__all":
+		return ""
+	default:
+		return raw
+	}
+}
+
+func requestedVolumeTargetLabels(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if direct := strings.TrimSpace(r.FormValue("targetLabels")); direct != "" {
+		return direct
+	}
+	for _, key := range []string{"drillDownLabel", "fieldBy", "labelBy", "var-fieldBy", "var-labelBy"} {
+		if candidate := normalizeDrilldownGroupingLabel(r.FormValue(key)); candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // handleVolume returns volume data via VL /select/logsql/hits with field grouping.
 // Loki: GET /loki/api/v1/index/volume?query={...}&start=...&end=...
 // Response: {"status":"success","data":{"resultType":"vector","result":[{"metric":{...},"value":[ts,"count"]}]}}
@@ -4789,7 +4817,7 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	query := r.FormValue("query")
 	startParam := strings.TrimSpace(firstNonEmpty(r.FormValue("start"), r.FormValue("from")))
 	endParam := strings.TrimSpace(firstNonEmpty(r.FormValue("end"), r.FormValue("to")))
-	targetLabels := r.FormValue("targetLabels")
+	targetLabels := requestedVolumeTargetLabels(r)
 	cacheKey := "volume:" + orgID + ":" + r.URL.RawQuery
 	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
 		if !p.shouldBypassRecentTailCache("volume", remaining, r) {
@@ -4899,7 +4927,7 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	startParam := strings.TrimSpace(firstNonEmpty(r.FormValue("start"), r.FormValue("from")))
 	endParam := strings.TrimSpace(firstNonEmpty(r.FormValue("end"), r.FormValue("to")))
 	stepParam := r.FormValue("step")
-	targetLabels := r.FormValue("targetLabels")
+	targetLabels := requestedVolumeTargetLabels(r)
 	cacheKey := "volume_range:" + orgID + ":" + r.URL.RawQuery
 	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
 		if !p.shouldBypassRecentTailCache("volume_range", remaining, r) {
