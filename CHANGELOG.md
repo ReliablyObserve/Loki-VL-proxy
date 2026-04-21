@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-04-21
+
 ### Bug Fixes
 
 - metrics/query-range: stop injecting synthetic `service_name="unknown_service"` into metric `query`/`query_range` responses when the result labelset has no real service signal (for example `sum by(cluster)(rate(...))`).
