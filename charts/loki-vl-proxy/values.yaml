@@ -354,6 +354,17 @@ envFrom: []
   # - configMapRef:
   #     name: loki-vl-proxy-config
 
+# Compatibility aliases for deployments where `env` is already used as a
+# scalar environment selector instead of a list of container environment vars.
+# When set, these entries are appended after `env` / `envFrom`.
+extraEnv: []
+  # - name: LOG_LEVEL
+  #   value: "info"
+
+extraEnvFrom: []
+  # - secretRef:
+  #     name: loki-vl-proxy-extra-env
+
 # Extra manifests rendered with full Helm chart context.
 # Each entry may be either:
 # - a YAML object/map

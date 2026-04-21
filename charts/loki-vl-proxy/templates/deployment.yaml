@@ -171,7 +171,9 @@ spec:
             - {{ printf "-peer-static=%s" (join "," .Values.peerCache.peers) | quote }}
             {{- end }}
             {{- end }}
-          {{- if or .Values.peerCache.enabled .Values.env $goMemLimitValue $injectOTELFromPod }}
+          {{- $hasChartEnv := and (kindIs "slice" .Values.env) (gt (len .Values.env) 0) }}
+          {{- $hasExtraEnv := and (kindIs "slice" .Values.extraEnv) (gt (len .Values.extraEnv) 0) }}
+          {{- if or .Values.peerCache.enabled $hasChartEnv $hasExtraEnv $goMemLimitValue $injectOTELFromPod }}
           env:
             {{- if $goMemLimitValue }}
             - name: GOMEMLIMIT
@@ -193,13 +195,23 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
             {{- end }}
-            {{- with .Values.env }}
-            {{- toYaml . | nindent 12 }}
+            {{- if $hasChartEnv }}
+            {{- toYaml .Values.env | nindent 12 }}
+            {{- end }}
+            {{- if $hasExtraEnv }}
+            {{- toYaml .Values.extraEnv | nindent 12 }}
             {{- end }}
           {{- end }}
-          {{- with .Values.envFrom }}
+          {{- $hasChartEnvFrom := and (kindIs "slice" .Values.envFrom) (gt (len .Values.envFrom) 0) }}
+          {{- $hasExtraEnvFrom := and (kindIs "slice" .Values.extraEnvFrom) (gt (len .Values.extraEnvFrom) 0) }}
+          {{- if or $hasChartEnvFrom $hasExtraEnvFrom }}
           envFrom:
-            {{- toYaml . | nindent 12 }}
+            {{- if $hasChartEnvFrom }}
+            {{- toYaml .Values.envFrom | nindent 12 }}
+            {{- end }}
+            {{- if $hasExtraEnvFrom }}
+            {{- toYaml .Values.extraEnvFrom | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http
