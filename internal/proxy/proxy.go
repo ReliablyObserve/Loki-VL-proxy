@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -671,6 +672,8 @@ type Proxy struct {
 	patternsSnapshotEntries               map[string]patternSnapshotEntry
 	patternsSnapshotPatternCount          int64
 	patternsSnapshotPayloadBytes          int64
+	patternsPersistDigest                 [sha256.Size]byte
+	patternsPersistDigestReady            bool
 	backendVersionMu                      sync.RWMutex
 	backendVersionRaw                     string
 	backendVersionSemver                  string
@@ -686,6 +689,19 @@ type Proxy struct {
 	labelValuesIndexPersistDone           chan struct{}
 	labelValuesIndexMu                    sync.RWMutex
 	labelValuesIndex                      map[string]*labelValuesIndexState
+	labelValuesIndexPersistDigest         [sha256.Size]byte
+	labelValuesIndexPersistDigestReady    bool
+	readCacheKeyMemoMu                    sync.RWMutex
+	readCacheKeyMemo                      map[canonicalReadCacheMemoKey]string
+}
+
+const maxReadCacheKeyMemoEntries = 16384
+
+type canonicalReadCacheMemoKey struct {
+	endpoint string
+	orgID    string
+	extra    string
+	rawQuery string
 }
 
 var defaultTenantLimitsAllowPublish = []string{
@@ -1072,6 +1088,10 @@ func New(cfg Config) (*Proxy, error) {
 	tenantDefaultLimits := cloneStringAnyMap(cfg.TenantDefaultLimits)
 	tenantLimits := cloneTenantLimitsMap(cfg.TenantLimits)
 	patternsCustom := normalizeCustomPatterns(cfg.PatternsCustom)
+	proxyMetrics := metrics.NewMetricsWithOptions(cfg.MetricsMaxTenants, cfg.MetricsMaxClients, cfg.MetricsExportSensitiveLabels)
+	if cfg.Cache != nil {
+		proxyMetrics.SetCacheStatsProvider(cfg.Cache.Stats)
+	}
 
 	return &Proxy{
 		backend:       u,
@@ -1087,7 +1107,7 @@ func New(cfg Config) (*Proxy, error) {
 		cache:                                 cfg.Cache,
 		compatCache:                           cfg.CompatCache,
 		log:                                   logger,
-		metrics:                               metrics.NewMetricsWithOptions(cfg.MetricsMaxTenants, cfg.MetricsMaxClients, cfg.MetricsExportSensitiveLabels),
+		metrics:                               proxyMetrics,
 		queryTracker:                          metrics.NewQueryTracker(10000),
 		coalescer:                             mw.NewCoalescer(),
 		limiter:                               mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
@@ -1173,6 +1193,7 @@ func New(cfg Config) (*Proxy, error) {
 		labelValuesIndexPersistStop:           make(chan struct{}),
 		labelValuesIndexPersistDone:           make(chan struct{}),
 		labelValuesIndex:                      make(map[string]*labelValuesIndexState),
+		readCacheKeyMemo:                      make(map[canonicalReadCacheMemoKey]string, 2048),
 	}, nil
 }
 
@@ -2102,6 +2123,16 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 
 	logqlQuery = p.preferWorkingParser(r.Context(), logqlQuery, r.FormValue("start"), r.FormValue("end"))
 
+	if spec, ok := parseBareParserMetricCompatSpec(logqlQuery); ok {
+		p.proxyBareParserMetricQueryRange(w, r, start, logqlQuery, spec)
+		return
+	}
+
+	if postAgg, ok := parseInstantMetricPostAggQuery(logqlQuery); ok {
+		p.handleInstantMetricPostAggregation(w, r, start, logqlQuery, postAgg)
+		return
+	}
+
 	logsqlQuery, err := p.translateQueryWithContext(r.Context(), logqlQuery)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
@@ -2110,6 +2141,7 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	// Extract without() labels for post-processing
 	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
+	logsqlQuery = preserveMetricStreamIdentity(logqlQuery, logsqlQuery, withoutLabels)
 	p.log.Debug("translated query", "logsql", logsqlQuery, "without", withoutLabels)
 
 	r = withOrgID(r)
@@ -2214,6 +2246,20 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	logqlQuery = p.preferWorkingParser(r.Context(), logqlQuery, r.FormValue("start"), r.FormValue("end"))
 
+	if spec, ok := parseBareParserMetricCompatSpec(logqlQuery); ok {
+		p.proxyBareParserMetricQuery(w, r, start, logqlQuery, spec)
+		return
+	}
+	if spec, ok := parseAbsentOverTimeCompatSpec(logqlQuery); ok {
+		p.proxyAbsentOverTimeQuery(w, r, start, logqlQuery, spec)
+		return
+	}
+
+	if postAgg, ok := parseInstantMetricPostAggQuery(logqlQuery); ok {
+		p.handleInstantMetricPostAggregation(w, r, start, logqlQuery, postAgg)
+		return
+	}
+
 	logsqlQuery, err := p.translateQueryWithContext(r.Context(), logqlQuery)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, err.Error())
@@ -2223,6 +2269,7 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Extract without() labels for post-processing
 	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
+	logsqlQuery = preserveMetricStreamIdentity(logqlQuery, logsqlQuery, withoutLabels)
 
 	r = withOrgID(r)
 
@@ -2242,7 +2289,7 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 	} else if isStatsQuery(logsqlQuery) {
 		p.proxyStatsQuery(sc, r, logsqlQuery)
 	} else {
-		p.proxyLogQuery(sc, r, logsqlQuery)
+		p.writeError(sc, http.StatusBadRequest, "log queries are not supported as an instant query type, please change your query to a range query type")
 	}
 
 	if bw != nil && len(withoutLabels) > 0 {
@@ -2332,6 +2379,230 @@ func parseInstantVectorTime(timeParam string) int64 {
 		return int64(f)
 	}
 	return time.Now().UnixNano()
+}
+
+type instantMetricPostAgg struct {
+	name  string
+	inner string
+	k     int
+}
+
+func parseInstantMetricPostAggQuery(logql string) (instantMetricPostAgg, bool) {
+	logql = strings.TrimSpace(logql)
+	for _, name := range []string{"sort_desc", "sort"} {
+		prefix := name + "("
+		if !strings.HasPrefix(logql, prefix) || !strings.HasSuffix(logql, ")") {
+			continue
+		}
+		inner := strings.TrimSpace(logql[len(prefix) : len(logql)-1])
+		if inner == "" {
+			return instantMetricPostAgg{}, false
+		}
+		return instantMetricPostAgg{name: name, inner: inner}, true
+	}
+	for _, name := range []string{"topk", "bottomk"} {
+		prefix := name + "("
+		if !strings.HasPrefix(logql, prefix) || !strings.HasSuffix(logql, ")") {
+			continue
+		}
+		args := strings.TrimSpace(logql[len(prefix) : len(logql)-1])
+		comma := topLevelCommaIndex(args)
+		if comma <= 0 {
+			return instantMetricPostAgg{}, false
+		}
+		k, err := strconv.Atoi(strings.TrimSpace(args[:comma]))
+		if err != nil || k <= 0 {
+			return instantMetricPostAgg{}, false
+		}
+		inner := strings.TrimSpace(args[comma+1:])
+		if inner == "" {
+			return instantMetricPostAgg{}, false
+		}
+		return instantMetricPostAgg{name: name, inner: inner, k: k}, true
+	}
+	return instantMetricPostAgg{}, false
+}
+
+func topLevelCommaIndex(s string) int {
+	depth := 0
+	inQuote := false
+	for i, r := range s {
+		switch r {
+		case '"':
+			inQuote = !inQuote
+		case '(':
+			if !inQuote {
+				depth++
+			}
+		case ')':
+			if !inQuote && depth > 0 {
+				depth--
+			}
+		case ',':
+			if !inQuote && depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func preserveMetricStreamIdentity(originalLogQL, translatedLogsQL string, withoutLabels []string) string {
+	if !isStatsQuery(translatedLogsQL) {
+		return translatedLogsQL
+	}
+	if strings.Contains(translatedLogsQL, "| stats by (") {
+		return translatedLogsQL
+	}
+	if len(withoutLabels) > 0 || isBareMetricFunctionQuery(strings.TrimSpace(originalLogQL)) {
+		return addStatsByStreamClause(translatedLogsQL)
+	}
+	return translatedLogsQL
+}
+
+func isBareMetricFunctionQuery(logql string) bool {
+	for _, prefix := range []string{
+		"rate(",
+		"count_over_time(",
+		"bytes_over_time(",
+		"bytes_rate(",
+		"sum_over_time(",
+		"avg_over_time(",
+		"max_over_time(",
+		"min_over_time(",
+		"first_over_time(",
+		"last_over_time(",
+		"stddev_over_time(",
+		"stdvar_over_time(",
+		"absent_over_time(",
+		"quantile_over_time(",
+	} {
+		if strings.HasPrefix(logql, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func addStatsByStreamClause(logsqlQuery string) string {
+	idx := strings.Index(logsqlQuery, "| stats ")
+	if idx < 0 {
+		return logsqlQuery
+	}
+	statsStart := idx + len("| stats ")
+	return logsqlQuery[:statsStart] + "by (_stream, level) " + logsqlQuery[statsStart:]
+}
+
+func (p *Proxy) handleInstantMetricPostAggregation(w http.ResponseWriter, r *http.Request, start time.Time, originalQuery string, postAgg instantMetricPostAgg) {
+	translatedInner, err := p.translateQueryWithContext(r.Context(), postAgg.inner)
+	if err != nil {
+		p.writeError(w, http.StatusBadRequest, err.Error())
+		p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	translatedInner, withoutLabels := translator.ParseWithoutMarker(translatedInner)
+	translatedInner = preserveMetricStreamIdentity(postAgg.inner, translatedInner, withoutLabels)
+
+	r = withOrgID(r)
+
+	bw := &bufferedResponseWriter{header: make(http.Header)}
+	sc := &statusCapture{ResponseWriter: bw, code: 200}
+	if outerFunc, innerQL, rng, step, ok := translator.ParseSubqueryExpr(translatedInner); ok {
+		p.proxySubquery(sc, r, outerFunc, innerQL, rng, step)
+	} else if op, left, right, vm, ok := translator.ParseBinaryMetricExprFull(translatedInner); ok {
+		p.proxyBinaryMetricQueryVM(sc, r, op, left, right, vm)
+	} else if isStatsQuery(translatedInner) {
+		p.proxyStatsQuery(sc, r, translatedInner)
+	} else {
+		p.writeError(w, http.StatusBadRequest, "unsupported instant aggregation target")
+		p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	if len(withoutLabels) > 0 {
+		bw.body = applyWithoutGrouping(bw.body, withoutLabels)
+	}
+
+	if sc.code >= http.StatusBadRequest {
+		copyHeaders(w.Header(), bw.Header())
+		if w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(sc.code)
+		_, _ = w.Write(bw.body)
+		elapsed := time.Since(start)
+		p.metrics.RecordRequest("query", sc.code, elapsed)
+		p.queryTracker.Record("query", originalQuery, elapsed, true)
+		return
+	}
+
+	result := applyInstantVectorPostAggregation(bw.body, postAgg)
+	copyHeaders(w.Header(), bw.Header())
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	_, _ = w.Write(result)
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query", http.StatusOK, elapsed)
+	p.queryTracker.Record("query", originalQuery, elapsed, false)
+}
+
+func applyInstantVectorPostAggregation(body []byte, postAgg instantMetricPostAgg) []byte {
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]interface{} `json:"metric"`
+				Value  []interface{}          `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Status != "success" || resp.Data.ResultType != "vector" {
+		return body
+	}
+
+	sort.SliceStable(resp.Data.Result, func(i, j int) bool {
+		left := vectorPointValue(resp.Data.Result[i].Value)
+		right := vectorPointValue(resp.Data.Result[j].Value)
+		switch postAgg.name {
+		case "sort", "bottomk":
+			if left == right {
+				return metricKey(resp.Data.Result[i].Metric) < metricKey(resp.Data.Result[j].Metric)
+			}
+			return left < right
+		default:
+			if left == right {
+				return metricKey(resp.Data.Result[i].Metric) < metricKey(resp.Data.Result[j].Metric)
+			}
+			return left > right
+		}
+	})
+
+	if (postAgg.name == "topk" || postAgg.name == "bottomk") && postAgg.k < len(resp.Data.Result) {
+		resp.Data.Result = resp.Data.Result[:postAgg.k]
+	}
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func vectorPointValue(value []interface{}) float64 {
+	if len(value) < 2 {
+		return 0
+	}
+	switch raw := value[1].(type) {
+	case string:
+		parsed, _ := strconv.ParseFloat(raw, 64)
+		return parsed
+	case float64:
+		return raw
+	default:
+		return 0
+	}
 }
 
 func applyConstantBinaryOp(left, right float64, op string) (float64, bool) {
@@ -2436,14 +2707,14 @@ func (p *Proxy) metadataQueryParams(ctx context.Context, candidate, start, end, 
 
 func (p *Proxy) fetchScopedLabelNames(ctx context.Context, rawQuery, start, end, search string, useInventoryCache bool) ([]string, error) {
 	candidates := metadataQueryCandidates(rawQuery)
-	var (
-		lastErr   error
-		lastEmpty []string
-	)
+	var lastErr error
 	for i, candidate := range candidates {
 		params, err := p.metadataQueryParams(ctx, candidate, start, end, "", search)
 		if err != nil {
 			lastErr = err
+			if i+1 < len(candidates) {
+				p.observeInternalOperation(ctx, "discovery_fallback", "label_names_relaxed_after_error", 0)
+			}
 			continue
 		}
 		var labels []string
@@ -2454,43 +2725,43 @@ func (p *Proxy) fetchScopedLabelNames(ctx context.Context, rawQuery, start, end,
 		}
 		if err != nil {
 			lastErr = err
+			if i+1 < len(candidates) {
+				p.observeInternalOperation(ctx, "discovery_fallback", "label_names_relaxed_after_error", 0)
+			}
 			continue
 		}
-		if len(labels) > 0 || i == len(candidates)-1 {
-			return labels, nil
+		if len(labels) == 0 && i+1 < len(candidates) {
+			p.observeInternalOperation(ctx, "discovery_fallback", "label_names_empty_primary", 0)
 		}
-		lastEmpty = labels
-	}
-	if lastEmpty != nil {
-		return lastEmpty, nil
+		return labels, nil
 	}
 	return nil, lastErr
 }
 
 func (p *Proxy) fetchScopedLabelValues(ctx context.Context, labelName, rawQuery, start, end, limit, search string) ([]string, error) {
 	candidates := metadataQueryCandidates(rawQuery)
-	var (
-		lastErr   error
-		lastEmpty []string
-	)
+	var lastErr error
 	for i, candidate := range candidates {
 		params, err := p.metadataQueryParams(ctx, candidate, start, end, limit, search)
 		if err != nil {
 			lastErr = err
+			if i+1 < len(candidates) {
+				p.observeInternalOperation(ctx, "discovery_fallback", "label_values_relaxed_after_error", 0)
+			}
 			continue
 		}
 		values, err := p.fetchPreferredLabelValues(ctx, labelName, params)
 		if err != nil {
 			lastErr = err
+			if i+1 < len(candidates) {
+				p.observeInternalOperation(ctx, "discovery_fallback", "label_values_relaxed_after_error", 0)
+			}
 			continue
 		}
-		if len(values) > 0 || i == len(candidates)-1 {
-			return values, nil
+		if len(values) == 0 && i+1 < len(candidates) {
+			p.observeInternalOperation(ctx, "discovery_fallback", "label_values_empty_primary", 0)
 		}
-		lastEmpty = values
-	}
-	if lastEmpty != nil {
-		return lastEmpty, nil
+		return values, nil
 	}
 	return nil, lastErr
 }
@@ -2724,7 +2995,7 @@ func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end, s
 			}
 			labels = p.labelTranslator.TranslateLabelsList(filtered)
 			labels = appendSyntheticLabels(labels)
-			p.setLocalReadCacheWithTTL(cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
+			p.setEndpointReadCacheWithTTL("labels", cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
 			return nil, nil
 		})
 		if err != nil {
@@ -2763,7 +3034,7 @@ func (p *Proxy) refreshLabelValuesCacheAsync(orgID, cacheKey, labelName, rawQuer
 					values = indexedValues
 				}
 			}
-			p.setLocalReadCacheWithTTL(cacheKey, lokiLabelsResponse(values), CacheTTLs["label_values"])
+			p.setEndpointReadCacheWithTTL("label_values", cacheKey, lokiLabelsResponse(values), CacheTTLs["label_values"])
 			return nil, nil
 		})
 		if err != nil {
@@ -3236,6 +3507,33 @@ func (p *Proxy) recomputePatternSnapshotStatsLocked() {
 	p.patternsSnapshotPayloadBytes = payloadBytes
 }
 
+func writeSnapshotFileIfChanged(path string, data []byte, compareDigest [sha256.Size]byte, digest *[sha256.Size]byte, ready *bool) (bool, error) {
+	if *ready && *digest == compareDigest {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return false, err
+	}
+	*digest = compareDigest
+	*ready = true
+	return true, nil
+}
+
+func mustMarshalSnapshot(v interface{}) []byte {
+	out, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
 func (p *Proxy) persistPatternsNow(reason string) error {
 	if !p.patternsEnabled || strings.TrimSpace(p.patternsPersistPath) == "" {
 		return nil
@@ -3250,17 +3548,14 @@ func (p *Proxy) persistPatternsNow(reason string) error {
 	if err != nil {
 		return fmt.Errorf("marshal patterns snapshot: %w", err)
 	}
+	snapshotForDigest := snapshot
+	snapshotForDigest.SavedAtUnixNano = 0
+	snapshotDigest := sha256.Sum256(mustMarshalSnapshot(snapshotForDigest))
 
 	path := p.patternsPersistPath
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create patterns snapshot directory: %w", err)
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return fmt.Errorf("write patterns snapshot temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename patterns snapshot temp file: %w", err)
+	wrote, err := writeSnapshotFileIfChanged(path, data, snapshotDigest, &p.patternsPersistDigest, &p.patternsPersistDigestReady)
+	if err != nil {
+		return fmt.Errorf("persist patterns snapshot: %w", err)
 	}
 
 	if p.cache != nil {
@@ -3281,13 +3576,16 @@ func (p *Proxy) persistPatternsNow(reason string) error {
 		"patterns snapshot persisted",
 		"reason", reason,
 		"path", path,
+		"wrote_disk", wrote,
 		"entries", entryCount,
 		"patterns", patternCount,
 		"bytes", len(data),
 		"duration_ms", time.Since(startedAt).Milliseconds(),
 	)
 	p.metrics.SetPatternsPersistedDiskState(patternCount, entryCount, int64(len(data)))
-	p.metrics.RecordPatternsPersistWrite(int64(len(data)))
+	if wrote {
+		p.metrics.RecordPatternsPersistWrite(int64(len(data)))
+	}
 	p.patternsPersistDirty.Store(false)
 	return nil
 }
@@ -3307,7 +3605,6 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return false, 0, nil
 	}
-
 	var snapshot patternsSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return false, 0, fmt.Errorf("decode patterns snapshot: %w", err)
@@ -3318,6 +3615,10 @@ func (p *Proxy) restorePatternsFromDisk() (bool, int64, error) {
 	if snapshot.SavedAtUnixNano <= 0 {
 		return false, 0, fmt.Errorf("invalid patterns snapshot timestamp: %d", snapshot.SavedAtUnixNano)
 	}
+	snapshotForDigest := snapshot
+	snapshotForDigest.SavedAtUnixNano = 0
+	p.patternsPersistDigest = sha256.Sum256(mustMarshalSnapshot(snapshotForDigest))
+	p.patternsPersistDigestReady = true
 
 	snapshotEntryCount := len(snapshot.EntriesByKey)
 	snapshotPatternCount := patternCountFromSnapshot(snapshot)
@@ -3359,6 +3660,7 @@ func (p *Proxy) fetchPatternsSnapshotFromPeer(peerAddr string, timeout time.Dura
 	if p.peerAuthToken != "" {
 		req.Header.Set("X-Peer-Token", p.peerAuthToken)
 	}
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -3374,6 +3676,9 @@ func (p *Proxy) fetchPatternsSnapshotFromPeer(peerAddr string, timeout time.Dura
 		return nil, 0, fmt.Errorf("peer %s status %d: %s", peerAddr, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		return nil, 0, err
+	}
 	body, err := readBodyLimited(resp.Body, maxPatternsPeerSnapshotBytes)
 	if err != nil {
 		return nil, 0, err
@@ -3664,17 +3969,14 @@ func (p *Proxy) persistLabelValuesIndexNow(reason string) error {
 	if err != nil {
 		return fmt.Errorf("marshal label index snapshot: %w", err)
 	}
+	snapshotForDigest := snapshot
+	snapshotForDigest.SavedAtUnixNano = 0
+	snapshotDigest := sha256.Sum256(mustMarshalSnapshot(snapshotForDigest))
 
 	path := p.labelValuesIndexPersistPath
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create label index snapshot directory: %w", err)
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return fmt.Errorf("write label index snapshot temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename label index snapshot temp file: %w", err)
+	wrote, err := writeSnapshotFileIfChanged(path, data, snapshotDigest, &p.labelValuesIndexPersistDigest, &p.labelValuesIndexPersistDigestReady)
+	if err != nil {
+		return fmt.Errorf("persist label index snapshot: %w", err)
 	}
 
 	if p.cache != nil {
@@ -3691,9 +3993,9 @@ func (p *Proxy) persistLabelValuesIndexNow(reason string) error {
 
 	states, values := p.labelValuesIndexCardinality()
 	if reason == "periodic" {
-		p.log.Debug("label values index snapshot persisted", "path", path, "states", states, "values", values, "bytes", len(data), "duration_ms", time.Since(startedAt).Milliseconds())
+		p.log.Debug("label values index snapshot persisted", "path", path, "wrote_disk", wrote, "states", states, "values", values, "bytes", len(data), "duration_ms", time.Since(startedAt).Milliseconds())
 	} else {
-		p.log.Info("label values index snapshot persisted", "reason", reason, "path", path, "states", states, "values", values, "bytes", len(data), "duration_ms", time.Since(startedAt).Milliseconds())
+		p.log.Info("label values index snapshot persisted", "reason", reason, "path", path, "wrote_disk", wrote, "states", states, "values", values, "bytes", len(data), "duration_ms", time.Since(startedAt).Milliseconds())
 	}
 	p.labelValuesIndexPersistDirty.Store(false)
 	return nil
@@ -3712,7 +4014,6 @@ func (p *Proxy) restoreLabelValuesIndexFromDisk() (bool, int64, error) {
 		}
 		return false, 0, fmt.Errorf("read label index snapshot: %w", err)
 	}
-
 	var snapshot labelValuesIndexSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return false, 0, fmt.Errorf("decode label index snapshot: %w", err)
@@ -3723,6 +4024,10 @@ func (p *Proxy) restoreLabelValuesIndexFromDisk() (bool, int64, error) {
 	if snapshot.SavedAtUnixNano <= 0 {
 		return false, 0, fmt.Errorf("invalid label index snapshot timestamp: %d", snapshot.SavedAtUnixNano)
 	}
+	snapshotForDigest := snapshot
+	snapshotForDigest.SavedAtUnixNano = 0
+	p.labelValuesIndexPersistDigest = sha256.Sum256(mustMarshalSnapshot(snapshotForDigest))
+	p.labelValuesIndexPersistDigestReady = true
 
 	states, values := p.applyLabelValuesIndexSnapshot(snapshot)
 	if p.cache != nil {
@@ -3759,6 +4064,7 @@ func (p *Proxy) fetchLabelValuesIndexSnapshotFromPeer(peerAddr string, timeout t
 	if p.peerAuthToken != "" {
 		req.Header.Set("X-Peer-Token", p.peerAuthToken)
 	}
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -3774,6 +4080,9 @@ func (p *Proxy) fetchLabelValuesIndexSnapshotFromPeer(peerAddr string, timeout t
 		return nil, 0, fmt.Errorf("peer %s status %d: %s", peerAddr, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	if err := decodeCompressedHTTPResponse(resp); err != nil {
+		return nil, 0, err
+	}
 	body, err := readBodyLimited(resp.Body, maxLabelValuesPeerSnapshotBytes)
 	if err != nil {
 		return nil, 0, err
@@ -4249,7 +4558,145 @@ func selectLabelValuesWindow(values []string, search string, offset, limit int) 
 	return out
 }
 
+func (p *Proxy) endpointUsesSharedReadCache(endpoint string) bool {
+	switch endpoint {
+	case "labels", "label_values", "index_stats", "volume", "volume_range", "detected_fields", "detected_field_values", "detected_labels":
+		return true
+	default:
+		return false
+	}
+}
+
+func endpointForReadCacheKey(cacheKey string) string {
+	switch {
+	case strings.HasPrefix(cacheKey, "labels:"):
+		return "labels"
+	case strings.HasPrefix(cacheKey, "label_values:"):
+		return "label_values"
+	case strings.HasPrefix(cacheKey, "index_stats:"):
+		return "index_stats"
+	case strings.HasPrefix(cacheKey, "volume_range:"):
+		return "volume_range"
+	case strings.HasPrefix(cacheKey, "volume:"):
+		return "volume"
+	case strings.HasPrefix(cacheKey, "detected_fields:"):
+		return "detected_fields"
+	case strings.HasPrefix(cacheKey, "detected_field_values:"):
+		return "detected_field_values"
+	case strings.HasPrefix(cacheKey, "detected_labels:"):
+		return "detected_labels"
+	default:
+		return ""
+	}
+}
+
+func (p *Proxy) canonicalReadCacheKey(endpoint, orgID string, r *http.Request, extraParts ...string) string {
+	if memoKey, ok := buildCanonicalReadCacheMemoKey(endpoint, orgID, r, extraParts); ok && p != nil {
+		p.readCacheKeyMemoMu.RLock()
+		if cached, hit := p.readCacheKeyMemo[memoKey]; hit {
+			p.readCacheKeyMemoMu.RUnlock()
+			return cached
+		}
+		p.readCacheKeyMemoMu.RUnlock()
+
+		computed := computeCanonicalReadCacheKey(endpoint, orgID, r, extraParts...)
+		p.readCacheKeyMemoMu.Lock()
+		if p.readCacheKeyMemo == nil || len(p.readCacheKeyMemo) >= maxReadCacheKeyMemoEntries {
+			p.readCacheKeyMemo = make(map[canonicalReadCacheMemoKey]string, 2048)
+		}
+		p.readCacheKeyMemo[memoKey] = computed
+		p.readCacheKeyMemoMu.Unlock()
+		return computed
+	}
+	return computeCanonicalReadCacheKey(endpoint, orgID, r, extraParts...)
+}
+
+func buildCanonicalReadCacheMemoKey(endpoint, orgID string, r *http.Request, extraParts []string) (canonicalReadCacheMemoKey, bool) {
+	if r == nil || len(extraParts) > 1 {
+		return canonicalReadCacheMemoKey{}, false
+	}
+	key := canonicalReadCacheMemoKey{
+		endpoint: endpoint,
+		orgID:    orgID,
+		rawQuery: r.URL.RawQuery,
+	}
+	if len(extraParts) == 1 {
+		key.extra = strings.TrimSpace(extraParts[0])
+	}
+	return key, true
+}
+
+func computeCanonicalReadCacheKey(endpoint, orgID string, r *http.Request, extraParts ...string) string {
+	params := r.URL.Query()
+	normalizeReadCacheParams(endpoint, params)
+	switch endpoint {
+	case "detected_fields", "detected_field_values", "detected_labels":
+		params.Set("limit", strconv.Itoa(parseDetectedLineLimit(r)))
+	}
+	if endpoint == "volume" || endpoint == "volume_range" {
+		query := strings.TrimSpace(params.Get("query"))
+		if query == "" {
+			query = "*"
+		}
+		if strings.TrimSpace(params.Get("targetLabels")) == "" {
+			if inferred := inferPrimaryTargetLabel(query); inferred != "" {
+				params.Set("targetLabels", inferred)
+			}
+		}
+		if endpoint == "volume_range" {
+			if step := strings.TrimSpace(params.Get("step")); step != "" {
+				params.Set("step", formatVLStep(step))
+			}
+		}
+	}
+
+	parts := make([]string, 0, 3+len(extraParts))
+	parts = append(parts, endpoint, orgID)
+	for _, part := range extraParts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	parts = append(parts, params.Encode())
+	return strings.Join(parts, ":")
+}
+
+func normalizeReadCacheParams(endpoint string, params url.Values) {
+	if params == nil {
+		return
+	}
+	if start := strings.TrimSpace(firstNonEmpty(params.Get("start"), params.Get("from"))); start != "" {
+		params.Set("start", start)
+	}
+	params.Del("from")
+	if end := strings.TrimSpace(firstNonEmpty(params.Get("end"), params.Get("to"))); end != "" {
+		params.Set("end", end)
+	}
+	params.Del("to")
+
+	if search := strings.TrimSpace(firstNonEmpty(params.Get("search"), params.Get("q"))); search != "" {
+		params.Set("search", search)
+	}
+	params.Del("q")
+	params.Del("line_limit")
+
+	switch endpoint {
+	case "labels", "label_values", "index_stats", "volume", "volume_range", "detected_fields", "detected_field_values", "detected_labels":
+		if query := strings.TrimSpace(params.Get("query")); query == "" {
+			params.Set("query", "*")
+		} else {
+			params.Set("query", query)
+		}
+	}
+}
+
 func (p *Proxy) setJSONCacheWithTTL(cacheKey string, ttl time.Duration, value interface{}) {
+	p.setEndpointJSONCacheWithTTL(endpointForReadCacheKey(cacheKey), cacheKey, ttl, value)
+}
+
+func (p *Proxy) setEndpointJSONCacheWithTTL(endpoint, cacheKey string, ttl time.Duration, value interface{}) {
 	if p == nil || p.cache == nil {
 		return
 	}
@@ -4257,7 +4704,7 @@ func (p *Proxy) setJSONCacheWithTTL(cacheKey string, ttl time.Duration, value in
 	if err != nil {
 		return
 	}
-	p.setLocalReadCacheWithTTL(cacheKey, encoded, ttl)
+	p.setEndpointReadCacheWithTTL(endpoint, cacheKey, encoded, ttl)
 }
 
 // setLocalReadCacheWithTTL stores response bodies for handlers that only read
@@ -4269,6 +4716,72 @@ func (p *Proxy) setLocalReadCacheWithTTL(cacheKey string, value []byte, ttl time
 		return
 	}
 	p.cache.SetLocalOnlyWithTTL(cacheKey, value, ttl)
+}
+
+func (p *Proxy) setEndpointReadCacheWithTTL(endpoint, cacheKey string, value []byte, ttl time.Duration) {
+	if p == nil || p.cache == nil {
+		return
+	}
+	if p.endpointUsesSharedReadCache(endpoint) {
+		p.cache.SetLocalAndDiskWithTTL(cacheKey, value, ttl)
+		return
+	}
+	p.cache.SetLocalOnlyWithTTL(cacheKey, value, ttl)
+}
+
+func (p *Proxy) endpointReadCacheEntry(endpoint, cacheKey string) ([]byte, time.Duration, string, bool) {
+	if p == nil || p.cache == nil || strings.TrimSpace(cacheKey) == "" {
+		return nil, 0, "", false
+	}
+	if p.endpointUsesSharedReadCache(endpoint) {
+		return p.cache.GetSharedWithTTL(cacheKey)
+	}
+	body, ttl, ok := p.cache.GetWithTTL(cacheKey)
+	if !ok {
+		return nil, 0, "", false
+	}
+	return body, ttl, "l1_memory", true
+}
+
+func (p *Proxy) staleEndpointCacheEntry(endpoint, cacheKey string) ([]byte, time.Duration, string, bool) {
+	if p == nil || p.cache == nil || strings.TrimSpace(cacheKey) == "" {
+		return nil, 0, "", false
+	}
+	if p.endpointUsesSharedReadCache(endpoint) {
+		return p.cache.GetRecoverableStaleWithTTL(cacheKey)
+	}
+	body, ttl, ok := p.cache.GetStaleWithTTL(cacheKey)
+	if !ok {
+		return nil, 0, "", false
+	}
+	return body, ttl, "l1_memory", true
+}
+
+func (p *Proxy) serveStaleReadCacheOnError(w http.ResponseWriter, endpoint, cacheKey string, started time.Time, err error) bool {
+	body, remaining, tier, ok := p.staleEndpointCacheEntry(endpoint, cacheKey)
+	if !ok || len(body) == 0 {
+		return false
+	}
+	if strings.TrimSpace(w.Header().Get("Content-Type")) == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	_, _ = w.Write(body)
+	if p.metrics != nil {
+		p.metrics.RecordRequest(endpoint, http.StatusOK, time.Since(started))
+	}
+	staleFor := time.Duration(0)
+	if remaining < 0 {
+		staleFor = -remaining
+	}
+	p.log.Warn(
+		"serving stale cached response after backend failure",
+		"endpoint", endpoint,
+		"cache_key", cacheKey,
+		"cache_tier", tier,
+		"stale_for", staleFor.String(),
+		"error", err,
+	)
+	return true
 }
 
 func (p *Proxy) refreshDetectedFieldsCacheAsync(orgID, cacheKey, query, start, end string, lineLimit int) {
@@ -4290,7 +4803,7 @@ func (p *Proxy) refreshDetectedFieldsCacheAsync(orgID, cacheKey, query, start, e
 				"fields": fields,
 				"limit":  lineLimit,
 			}
-			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
+			p.setEndpointJSONCacheWithTTL("detected_fields", cacheKey, CacheTTLs["detected_fields"], payload)
 			return nil, nil
 		})
 		if err != nil {
@@ -4318,7 +4831,7 @@ func (p *Proxy) refreshDetectedLabelsCacheAsync(orgID, cacheKey, query, start, e
 				"detectedLabels": labels,
 				"limit":          lineLimit,
 			}
-			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
+			p.setEndpointJSONCacheWithTTL("detected_labels", cacheKey, CacheTTLs["detected_labels"], payload)
 			return nil, nil
 		})
 		if err != nil {
@@ -4347,7 +4860,7 @@ func (p *Proxy) refreshDetectedFieldValuesCacheAsync(orgID, cacheKey, fieldName,
 				"values": values,
 				"limit":  lineLimit,
 			}
-			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+			p.setEndpointJSONCacheWithTTL("detected_field_values", cacheKey, CacheTTLs["detected_field_values"], payload)
 			return nil, nil
 		})
 		if err != nil {
@@ -4384,10 +4897,9 @@ func (p *Proxy) resolveDetectedFieldValues(ctx context.Context, fieldName, query
 	if errVals != nil {
 		return nil, errVals
 	}
-	if len(values) == 0 && relaxOnEmpty {
-		primary := defaultFieldDetectionQuery(query)
-		relaxed := relaxedFieldDetectionQuery(query)
-		if relaxed != "" && relaxed != primary {
+	if relaxOnEmpty && len(values) == 0 {
+		if relaxed := relaxedFieldDetectionQuery(query); relaxed != "" && relaxed != query {
+			p.observeInternalOperation(ctx, "discovery_fallback", "detected_field_values_relaxed_after_empty", 0)
 			return p.resolveDetectedFieldValues(ctx, fieldName, relaxed, start, end, lineLimit, false)
 		}
 	}
@@ -4408,9 +4920,9 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := r.Header.Get("X-Scope-OrgID")
-	cacheKey := "labels:" + orgID + ":" + r.URL.RawQuery
+	cacheKey := p.canonicalReadCacheKey("labels", orgID, r)
 
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("labels", cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("labels", http.StatusOK, time.Since(start))
@@ -4454,7 +4966,7 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 	labels = appendSyntheticLabels(labels)
 
 	result := lokiLabelsResponse(labels)
-	p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["labels"])
+	p.setEndpointReadCacheWithTTL("labels", cacheKey, result, CacheTTLs["labels"])
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("labels", http.StatusOK, time.Since(start))
@@ -4487,7 +4999,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := r.Header.Get("X-Scope-OrgID")
-	cacheKey := "label_values:" + orgID + ":" + labelName + ":" + r.URL.RawQuery
+	cacheKey := p.canonicalReadCacheKey("label_values", orgID, r, labelName)
 	rawQuery := r.FormValue("query")
 	rawLimit := r.FormValue("limit")
 	rawOffset := r.FormValue("offset")
@@ -4501,7 +5013,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 		limit = maxLimitValue
 	}
 
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("label_values", cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4525,7 +5037,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	if p.labelValuesBrowseMode(rawQuery) {
 		if indexedValues, ok := p.selectLabelValuesFromIndex(orgID, labelName, search, offset, limit); ok {
 			result := lokiLabelsResponse(indexedValues)
-			p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
+			p.setEndpointReadCacheWithTTL("label_values", cacheKey, result, CacheTTLs["label_values"])
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(result)
 			p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4550,7 +5062,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result := lokiLabelsResponse(values)
-		p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
+		p.setEndpointReadCacheWithTTL("label_values", cacheKey, result, CacheTTLs["label_values"])
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(result)
 		p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4577,7 +5089,7 @@ func (p *Proxy) handleLabelValues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := lokiLabelsResponse(values)
-	p.setLocalReadCacheWithTTL(cacheKey, result, CacheTTLs["label_values"])
+	p.setEndpointReadCacheWithTTL("label_values", cacheKey, result, CacheTTLs["label_values"])
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(result)
 	p.metrics.RecordRequest("label_values", http.StatusOK, time.Since(start))
@@ -4665,35 +5177,65 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	if p.handleMultiTenantFanout(w, r, "index_stats", p.handleIndexStats) {
 		return
 	}
+	orgID := r.Header.Get("X-Scope-OrgID")
+	cacheKey := p.canonicalReadCacheKey("index_stats", orgID, r)
+	if cached, _, _, ok := p.endpointReadCacheEntry("index_stats", cacheKey); ok {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(cached)
+		p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
+		p.metrics.RecordCacheHit()
+		return
+	}
+	p.metrics.RecordCacheMiss()
+
 	r = withOrgID(r)
-	query := r.FormValue("query")
+	result, err := p.computeIndexStatsResult(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"))
+	if err != nil {
+		if p.serveStaleReadCacheOnError(w, "index_stats", cacheKey, start, err) {
+			return
+		}
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("index_stats", status, time.Since(start))
+		return
+	}
+	p.setEndpointReadCacheWithTTL("index_stats", cacheKey, result, CacheTTLs["index_stats"])
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
+	p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
+}
+
+func (p *Proxy) computeIndexStatsResult(ctx context.Context, query, start, end string) ([]byte, error) {
 	if query == "" {
 		query = "*"
 	}
-	logsqlQuery, _ := p.translateQueryWithContext(r.Context(), query)
+	logsqlQuery, _ := p.translateQueryWithContext(ctx, query)
 
 	params := url.Values{}
 	params.Set("query", logsqlQuery)
-	if s := r.FormValue("start"); s != "" {
+	if s := start; s != "" {
 		params.Set("start", formatVLTimestamp(s))
 	}
-	if e := r.FormValue("end"); e != "" {
+	if e := end; e != "" {
 		params.Set("end", formatVLTimestamp(e))
 	}
-	// VL v1.49+ requires step for hits — use large step to get one bucket (total count)
 	if params.Get("step") == "" {
 		params.Set("step", "1h")
 	}
 
-	resp, err := p.vlGet(r.Context(), "/select/logsql/hits", params)
+	resp, err := p.vlGet(ctx, "/select/logsql/hits", params)
 	if err != nil {
-		// Fallback to zeros on error
-		p.writeJSON(w, map[string]interface{}{"streams": 0, "chunks": 0, "bytes": 0, "entries": 0})
-		p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := readBodyLimited(resp.Body, maxBufferedBackendBodyBytes)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 
 	entries := sumHitsValues(body)
 	hits := parseHits(body)
@@ -4704,12 +5246,10 @@ func (p *Proxy) handleIndexStats(w http.ResponseWriter, r *http.Request) {
 	result, _ := json.Marshal(map[string]interface{}{
 		"streams": streams,
 		"chunks":  streams,
-		"bytes":   entries * 100, // approximate — VL doesn't expose bytes
+		"bytes":   entries * 100,
 		"entries": entries,
 	})
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(result)
-	p.metrics.RecordRequest("index_stats", http.StatusOK, time.Since(start))
+	return result, nil
 }
 
 func (p *Proxy) resolveTargetLabelFields(ctx context.Context, targetLabels string, params url.Values) []string {
@@ -4818,8 +5358,8 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 	startParam := strings.TrimSpace(firstNonEmpty(r.FormValue("start"), r.FormValue("from")))
 	endParam := strings.TrimSpace(firstNonEmpty(r.FormValue("end"), r.FormValue("to")))
 	targetLabels := requestedVolumeTargetLabels(r)
-	cacheKey := "volume:" + orgID + ":" + r.URL.RawQuery
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	cacheKey := p.canonicalReadCacheKey("volume", orgID, r)
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("volume", cacheKey); ok {
 		if !p.shouldBypassRecentTailCache("volume", remaining, r) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(cached)
@@ -4835,12 +5375,15 @@ func (p *Proxy) handleVolume(w http.ResponseWriter, r *http.Request) {
 
 	result, err := p.computeVolumeResult(r.Context(), query, startParam, endParam, targetLabels)
 	if err != nil {
-		result = map[string]interface{}{
-			"status": "success",
-			"data":   map[string]interface{}{"resultType": "vector", "result": []interface{}{}},
+		if p.serveStaleReadCacheOnError(w, "volume", cacheKey, start, err) {
+			return
 		}
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("volume", status, time.Since(start))
+		return
 	}
-	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["volume"], result)
+	p.setEndpointJSONCacheWithTTL("volume", cacheKey, CacheTTLs["volume"], result)
 	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume", http.StatusOK, time.Since(start))
 }
@@ -4888,6 +5431,13 @@ func (p *Proxy) computeVolumeResult(ctx context.Context, query, start, end, targ
 	}
 	defer resp.Body.Close()
 	body, _ := readBodyLimited(resp.Body, maxBufferedBackendBodyBytes)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 
 	return p.hitsToVolumeVector(body), nil
 }
@@ -4903,7 +5453,7 @@ func (p *Proxy) refreshVolumeCacheAsync(orgID, cacheKey, rawQuery, start, end, t
 			}
 			result, err := p.computeVolumeResult(ctx, rawQuery, start, end, targetLabels)
 			if err == nil {
-				p.setJSONCacheWithTTL(cacheKey, CacheTTLs["volume"], result)
+				p.setEndpointJSONCacheWithTTL("volume", cacheKey, CacheTTLs["volume"], result)
 			}
 			return nil, err
 		})
@@ -4928,8 +5478,8 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 	endParam := strings.TrimSpace(firstNonEmpty(r.FormValue("end"), r.FormValue("to")))
 	stepParam := r.FormValue("step")
 	targetLabels := requestedVolumeTargetLabels(r)
-	cacheKey := "volume_range:" + orgID + ":" + r.URL.RawQuery
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	cacheKey := p.canonicalReadCacheKey("volume_range", orgID, r)
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("volume_range", cacheKey); ok {
 		if !p.shouldBypassRecentTailCache("volume_range", remaining, r) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(cached)
@@ -4945,12 +5495,15 @@ func (p *Proxy) handleVolumeRange(w http.ResponseWriter, r *http.Request) {
 
 	result, err := p.computeVolumeRangeResult(r.Context(), query, startParam, endParam, stepParam, targetLabels)
 	if err != nil {
-		result = map[string]interface{}{
-			"status": "success",
-			"data":   map[string]interface{}{"resultType": "matrix", "result": []interface{}{}},
+		if p.serveStaleReadCacheOnError(w, "volume_range", cacheKey, start, err) {
+			return
 		}
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("volume_range", status, time.Since(start))
+		return
 	}
-	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["volume_range"], result)
+	p.setEndpointJSONCacheWithTTL("volume_range", cacheKey, CacheTTLs["volume_range"], result)
 	p.writeJSON(w, result)
 	p.metrics.RecordRequest("volume_range", http.StatusOK, time.Since(start))
 }
@@ -4997,6 +5550,13 @@ func (p *Proxy) computeVolumeRangeResult(ctx context.Context, query, start, end,
 	}
 	defer resp.Body.Close()
 	body, _ := readBodyLimited(resp.Body, maxBufferedBackendBodyBytes)
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
 
 	return p.hitsToVolumeMatrix(body, start, end, step), nil
 }
@@ -5012,7 +5572,7 @@ func (p *Proxy) refreshVolumeRangeCacheAsync(orgID, cacheKey, rawQuery, start, e
 			}
 			result, err := p.computeVolumeRangeResult(ctx, rawQuery, start, end, step, targetLabels)
 			if err == nil {
-				p.setJSONCacheWithTTL(cacheKey, CacheTTLs["volume_range"], result)
+				p.setEndpointJSONCacheWithTTL("volume_range", cacheKey, CacheTTLs["volume_range"], result)
 			}
 			return nil, err
 		})
@@ -5029,8 +5589,8 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := r.Header.Get("X-Scope-OrgID")
-	cacheKey := "detected_fields:" + orgID + ":" + r.URL.RawQuery
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	cacheKey := p.canonicalReadCacheKey("detected_fields", orgID, r)
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("detected_fields", cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
@@ -5046,14 +5606,12 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 	lineLimit := parseDetectedLineLimit(r)
 	fields, _, err := p.detectFields(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
 	if err != nil {
-		payload := map[string]interface{}{
-			"status": "success",
-			"data":   []interface{}{},
-			"fields": []interface{}{},
-			"limit":  lineLimit,
+		if p.serveStaleReadCacheOnError(w, "detected_fields", cacheKey, start, err) {
+			return
 		}
-		p.writeJSON(w, payload)
-		p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("detected_fields", status, time.Since(start))
 		return
 	}
 	payload := map[string]interface{}{
@@ -5062,7 +5620,7 @@ func (p *Proxy) handleDetectedFields(w http.ResponseWriter, r *http.Request) {
 		"fields": fields,
 		"limit":  lineLimit,
 	}
-	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_fields"], payload)
+	p.setEndpointJSONCacheWithTTL("detected_fields", cacheKey, CacheTTLs["detected_fields"], payload)
 	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_fields", http.StatusOK, time.Since(start))
 }
@@ -5093,8 +5651,8 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 	}
 
 	lineLimit := parseDetectedLineLimit(r)
-	cacheKey := "detected_field_values:" + orgID + ":" + fieldName + ":" + r.URL.RawQuery
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	cacheKey := p.canonicalReadCacheKey("detected_field_values", orgID, r, fieldName)
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("detected_field_values", cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
@@ -5114,7 +5672,7 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 				"values": values,
 				"limit":  lineLimit,
 			}
-			p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+			p.setEndpointJSONCacheWithTTL("detected_field_values", cacheKey, CacheTTLs["detected_field_values"], payload)
 			p.writeJSON(w, payload)
 			p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 			return
@@ -5123,14 +5681,12 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 
 	values, err := p.resolveDetectedFieldValues(r.Context(), fieldName, r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit, true)
 	if err != nil {
-		payload := map[string]interface{}{
-			"status": "success",
-			"data":   []string{},
-			"values": []string{},
-			"limit":  lineLimit,
+		if p.serveStaleReadCacheOnError(w, "detected_field_values", cacheKey, start, err) {
+			return
 		}
-		p.writeJSON(w, payload)
-		p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("detected_field_values", status, time.Since(start))
 		return
 	}
 
@@ -5140,7 +5696,7 @@ func (p *Proxy) handleDetectedFieldValues(w http.ResponseWriter, r *http.Request
 		"values": values,
 		"limit":  lineLimit,
 	}
-	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_field_values"], payload)
+	p.setEndpointJSONCacheWithTTL("detected_field_values", cacheKey, CacheTTLs["detected_field_values"], payload)
 	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_field_values", http.StatusOK, time.Since(start))
 }
@@ -5299,7 +5855,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 
 	cacheWriteKey := cacheLookupKeys[0]
 	if cacheWriteKey == "" {
-		cacheWriteKey = "patterns:" + orgID + ":" + r.URL.RawQuery
+		cacheWriteKey = "patterns:" + orgID + ":" + r.URL.Query().Encode()
 	}
 
 	for _, key := range cacheLookupKeys {
@@ -5332,7 +5888,7 @@ func (p *Proxy) handlePatterns(w http.ResponseWriter, r *http.Request) {
 		// generated by query/query_range autodetect path (empty step key).
 		cacheWriteKey = p.patternsAutodetectCacheKey(orgID, query, startParam, endParam, "")
 		if cacheWriteKey == "" {
-			cacheWriteKey = "patterns:" + orgID + ":" + r.URL.RawQuery
+			cacheWriteKey = "patterns:" + orgID + ":" + r.URL.Query().Encode()
 		}
 	}
 	derivedStepCacheKey := ""
@@ -6489,8 +7045,8 @@ func (p *Proxy) handleDetectedLabels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := r.Header.Get("X-Scope-OrgID")
-	cacheKey := "detected_labels:" + orgID + ":" + r.URL.RawQuery
-	if cached, remaining, ok := p.cache.GetWithTTL(cacheKey); ok {
+	cacheKey := p.canonicalReadCacheKey("detected_labels", orgID, r)
+	if cached, remaining, _, ok := p.endpointReadCacheEntry("detected_labels", cacheKey); ok {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(cached)
 		p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
@@ -6506,14 +7062,12 @@ func (p *Proxy) handleDetectedLabels(w http.ResponseWriter, r *http.Request) {
 	lineLimit := parseDetectedLineLimit(r)
 	detectedLabels, _, err := p.detectLabels(r.Context(), r.FormValue("query"), r.FormValue("start"), r.FormValue("end"), lineLimit)
 	if err != nil {
-		payload := map[string]interface{}{
-			"status":         "success",
-			"data":           []interface{}{},
-			"detectedLabels": []interface{}{},
-			"limit":          lineLimit,
+		if p.serveStaleReadCacheOnError(w, "detected_labels", cacheKey, start, err) {
+			return
 		}
-		p.writeJSON(w, payload)
-		p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("detected_labels", status, time.Since(start))
 		return
 	}
 
@@ -6523,7 +7077,7 @@ func (p *Proxy) handleDetectedLabels(w http.ResponseWriter, r *http.Request) {
 		"detectedLabels": detectedLabels,
 		"limit":          lineLimit,
 	}
-	p.setJSONCacheWithTTL(cacheKey, CacheTTLs["detected_labels"], payload)
+	p.setEndpointJSONCacheWithTTL("detected_labels", cacheKey, CacheTTLs["detected_labels"], payload)
 	p.writeJSON(w, payload)
 	p.metrics.RecordRequest("detected_labels", http.StatusOK, time.Since(start))
 }
@@ -8268,6 +8822,10 @@ func (p *Proxy) proxyBinaryMetricVM(w http.ResponseWriter, r *http.Request, op, 
 	if len(vm.On) > 0 {
 		result = applyOnMatching(leftBody, rightBody, op, vm.On, resultType)
 	} else if len(vm.Ignoring) > 0 {
+		if err := validateVectorMatchCardinality(leftBody, rightBody, nil, vm.Ignoring, len(vm.GroupLeft) > 0, len(vm.GroupRight) > 0); err != nil {
+			p.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		result = applyIgnoringMatching(leftBody, rightBody, op, vm.Ignoring, resultType)
 	} else {
 		// group_left/group_right without on/ignoring — use default matching
@@ -9363,19 +9921,51 @@ func wrapAsLokiResponse(vlBody []byte, resultType string) []byte {
 	}
 
 	// If VL already returned status/data format, pass through
-	if _, ok := promResp["data"]; ok {
+	if rawData, ok := promResp["data"]; ok {
+		if dataMap, ok := rawData.(map[string]interface{}); ok {
+			normalizeLokiResultDataShape(dataMap, resultType)
+			result, _ := json.Marshal(map[string]interface{}{
+				"status": "success",
+				"data":   dataMap,
+			})
+			return result
+		}
 		result, _ := json.Marshal(map[string]interface{}{
 			"status": "success",
-			"data":   promResp["data"],
+			"data": map[string]interface{}{
+				"resultType": resultType,
+				"result":     []interface{}{},
+			},
 		})
 		return result
 	}
+
+	normalizeLokiResultDataShape(promResp, resultType)
 
 	result, _ := json.Marshal(map[string]interface{}{
 		"status": "success",
 		"data":   promResp,
 	})
 	return result
+}
+
+func normalizeLokiResultDataShape(data map[string]interface{}, defaultResultType string) {
+	if data == nil {
+		return
+	}
+
+	if _, hasResult := data["result"]; !hasResult {
+		if rawResults, ok := data["results"]; ok {
+			data["result"] = rawResults
+		} else {
+			data["result"] = []interface{}{}
+		}
+	}
+
+	currentResultType, _ := data["resultType"].(string)
+	if strings.TrimSpace(currentResultType) == "" && strings.TrimSpace(defaultResultType) != "" {
+		data["resultType"] = defaultResultType
+	}
 }
 
 // --- VL hits response conversion helpers ---
@@ -9434,6 +10024,24 @@ type requestedBucketRange struct {
 	count int
 }
 
+type bareParserMetricCompatSpec struct {
+	funcName    string
+	baseQuery   string
+	rangeWindow time.Duration
+	unwrapField string
+	quantile    float64
+}
+
+type bareParserMetricSample struct {
+	tsNanos int64
+	value   float64
+}
+
+type bareParserMetricSeries struct {
+	metric  map[string]string
+	samples []bareParserMetricSample
+}
+
 func parseFlexibleUnixSeconds(raw string) (int64, bool) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -9464,6 +10072,36 @@ func parseFlexibleUnixSeconds(raw string) (int64, bool) {
 	return 0, false
 }
 
+func parseFlexibleUnixNanos(raw string) (int64, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UnixNano(), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UnixNano(), true
+	}
+	if integer, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return normalizeUnixNanos(integer), true
+	}
+	if floating, err := strconv.ParseFloat(value, 64); err == nil {
+		abs := math.Abs(floating)
+		switch {
+		case abs >= 1_000_000_000_000_000_000:
+			return int64(floating), true
+		case abs >= 1_000_000_000_000_000:
+			return int64(floating * 1_000), true
+		case abs >= 1_000_000_000_000:
+			return int64(floating * 1_000_000), true
+		default:
+			return int64(floating * float64(time.Second)), true
+		}
+	}
+	return 0, false
+}
+
 func normalizeUnixSeconds(v int64) int64 {
 	abs := v
 	if abs < 0 {
@@ -9478,6 +10116,23 @@ func normalizeUnixSeconds(v int64) int64 {
 		return v / 1_000
 	default:
 		return v
+	}
+}
+
+func normalizeUnixNanos(v int64) int64 {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs >= 1_000_000_000_000_000_000:
+		return v
+	case abs >= 1_000_000_000_000_000:
+		return v * 1_000
+	case abs >= 1_000_000_000_000:
+		return v * 1_000_000
+	default:
+		return v * int64(time.Second)
 	}
 }
 
@@ -9980,6 +10635,25 @@ func (p *Proxy) multiTenantCacheKey(r *http.Request, endpoint string) (string, b
 	}
 	if endpoint == "patterns" || endpoint == "index_stats" || endpoint == "volume" || endpoint == "volume_range" || endpoint == "detected_labels" || endpoint == "detected_fields" || endpoint == "detected_field_values" || endpoint == "series" || endpoint == "labels" || endpoint == "label_values" || endpoint == "query" || endpoint == "query_range" {
 		key := "mt:" + endpoint + ":" + r.Header.Get("X-Scope-OrgID") + ":" + r.URL.RawQuery
+		switch endpoint {
+		case "labels", "index_stats", "volume", "volume_range", "detected_labels", "detected_fields":
+			key = "mt:" + p.canonicalReadCacheKey(endpoint, r.Header.Get("X-Scope-OrgID"), r)
+		case "label_values":
+			parts := strings.Split(r.URL.Path, "/")
+			if len(parts) >= 7 {
+				key = "mt:" + p.canonicalReadCacheKey(endpoint, r.Header.Get("X-Scope-OrgID"), r, parts[5])
+			}
+		case "detected_field_values":
+			parts := strings.Split(r.URL.Path, "/")
+			for i, part := range parts {
+				if part == "detected_field" && i+1 < len(parts) {
+					key = "mt:" + p.canonicalReadCacheKey(endpoint, r.Header.Get("X-Scope-OrgID"), r, parts[i+1])
+					break
+				}
+			}
+		case "patterns":
+			key = "mt:" + endpoint + ":" + r.Header.Get("X-Scope-OrgID") + ":" + r.URL.Query().Encode()
+		}
 		if endpoint == "query" || endpoint == "query_range" {
 			key += ":" + p.tupleModeCacheKey(r)
 		}
@@ -11784,12 +12458,570 @@ func (p *Proxy) preferWorkingParser(ctx context.Context, logql, start, end strin
 
 var metricParserProbeRE = regexp.MustCompile(`(?s)(?:count_over_time|bytes_over_time|rate|bytes_rate|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time|quantile_over_time)\((.*?)\[[^][]+\]\)`)
 
+var (
+	absentOverTimeCompatRE         = regexp.MustCompile(`(?s)^\s*absent_over_time\(\s*(.*)\[([^][]+)\]\s*\)\s*$`)
+	bareParserMetricCompatRE       = regexp.MustCompile(`(?s)^\s*(count_over_time|bytes_over_time|rate|bytes_rate|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time)\((.*)\[([^][]+)\]\)\s*$`)
+	bareParserQuantileCompatRE     = regexp.MustCompile(`(?s)^\s*quantile_over_time\(\s*([0-9.]+)\s*,\s*(.*)\[([^][]+)\]\)\s*$`)
+	bareParserUnwrapFieldRE        = regexp.MustCompile(`\|\s*unwrap\s+(?:(?:duration|bytes)\(([^)]+)\)|([A-Za-z0-9_.-]+))`)
+	regexpExtractingParserStageRE  = regexp.MustCompile(`\|\s*regexp(?:\s+[^|]+)?`)
+	patternExtractingParserStageRE = regexp.MustCompile(`\|\s*pattern(?:\s+[^|]+)?`)
+	otherExtractingParserStageRE   = regexp.MustCompile(`\|\s*(?:unpack|extract|extract_regexp)(?:\s+[^|]+)?`)
+)
+
 func extractParserProbeQuery(logql string) string {
 	matches := metricParserProbeRE.FindStringSubmatch(logql)
 	if len(matches) == 2 {
 		return strings.TrimSpace(matches[1])
 	}
 	return strings.TrimSpace(logql)
+}
+
+func hasExtractingParserStage(logql string) bool {
+	for _, re := range []*regexp.Regexp{
+		jsonParserStageRE,
+		logfmtParserStageRE,
+		regexpExtractingParserStageRE,
+		patternExtractingParserStageRE,
+		otherExtractingParserStageRE,
+	} {
+		if re.MatchString(logql) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseBareParserMetricCompatSpec(logql string) (bareParserMetricCompatSpec, bool) {
+	if matches := bareParserQuantileCompatRE.FindStringSubmatch(strings.TrimSpace(logql)); len(matches) == 4 {
+		baseQuery := strings.TrimSpace(matches[2])
+		if baseQuery == "" || !hasExtractingParserStage(baseQuery) {
+			return bareParserMetricCompatSpec{}, false
+		}
+		window, ok := parsePositiveStepDuration(matches[3])
+		if !ok {
+			return bareParserMetricCompatSpec{}, false
+		}
+		phi, err := strconv.ParseFloat(matches[1], 64)
+		if err != nil || phi < 0 || phi > 1 {
+			return bareParserMetricCompatSpec{}, false
+		}
+		unwrapField := extractBareParserUnwrapField(baseQuery)
+		if unwrapField == "" {
+			return bareParserMetricCompatSpec{}, false
+		}
+		return bareParserMetricCompatSpec{
+			funcName:    "quantile_over_time",
+			baseQuery:   baseQuery,
+			rangeWindow: window,
+			unwrapField: unwrapField,
+			quantile:    phi,
+		}, true
+	}
+
+	matches := bareParserMetricCompatRE.FindStringSubmatch(strings.TrimSpace(logql))
+	if len(matches) != 4 {
+		return bareParserMetricCompatSpec{}, false
+	}
+	baseQuery := strings.TrimSpace(matches[2])
+	if baseQuery == "" || !hasExtractingParserStage(baseQuery) {
+		return bareParserMetricCompatSpec{}, false
+	}
+	window, ok := parsePositiveStepDuration(matches[3])
+	if !ok {
+		return bareParserMetricCompatSpec{}, false
+	}
+	unwrapField := ""
+	switch matches[1] {
+	case "sum_over_time", "avg_over_time", "max_over_time", "min_over_time", "first_over_time", "last_over_time", "stddev_over_time", "stdvar_over_time":
+		unwrapField = extractBareParserUnwrapField(baseQuery)
+		if unwrapField == "" {
+			return bareParserMetricCompatSpec{}, false
+		}
+	}
+	return bareParserMetricCompatSpec{
+		funcName:    matches[1],
+		baseQuery:   baseQuery,
+		rangeWindow: window,
+		unwrapField: unwrapField,
+	}, true
+}
+
+func extractBareParserUnwrapField(query string) string {
+	matches := bareParserUnwrapFieldRE.FindStringSubmatch(query)
+	if len(matches) != 3 {
+		return ""
+	}
+	if field := strings.TrimSpace(matches[1]); field != "" {
+		return field
+	}
+	return strings.TrimSpace(matches[2])
+}
+
+func formatMetricSampleValue(v float64) string {
+	if math.IsNaN(v) {
+		return "NaN"
+	}
+	if math.IsInf(v, 1) {
+		return "+Inf"
+	}
+	if math.IsInf(v, -1) {
+		return "-Inf"
+	}
+	if math.Mod(v, 1) == 0 {
+		return strconv.FormatInt(int64(v), 10)
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func metricWindowValue(funcName string, total float64, rangeWindow time.Duration) float64 {
+	switch funcName {
+	case "rate", "bytes_rate":
+		if rangeWindow <= 0 {
+			return 0
+		}
+		return total / rangeWindow.Seconds()
+	default:
+		return total
+	}
+}
+
+func (p *Proxy) fetchBareParserMetricSeries(ctx context.Context, originalQuery string, spec bareParserMetricCompatSpec, start, end string) ([]bareParserMetricSeries, error) {
+	logsqlQuery, err := p.translateQueryWithContext(ctx, spec.baseQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery+" | sort by (_time)")
+	if start != "" {
+		params.Set("start", formatVLTimestamp(start))
+	}
+	if end != "" {
+		params.Set("end", formatVLTimestamp(end))
+	}
+
+	resp, err := p.vlPost(ctx, "/select/logsql/query", params)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := readBodyLimited(resp.Body, maxUpstreamErrorBodyBytes)
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
+		}
+		return nil, &vlAPIError{status: resp.StatusCode, body: msg}
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	seriesByKey := make(map[string]*bareParserMetricSeries, 16)
+	streamLabelCache := make(map[string]map[string]string, 16)
+	streamDescriptorCache := make(map[string]cachedLogQueryStreamDescriptor, 16)
+	exposureCache := make(map[string][]metadataFieldExposure, 16)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+
+		entry := vlEntryPool.Get().(map[string]interface{})
+		for key := range entry {
+			delete(entry, key)
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			vlEntryPool.Put(entry)
+			continue
+		}
+
+		tsNanos, ok := parseFlexibleUnixNanos(asString(entry["_time"]))
+		if !ok {
+			vlEntryPool.Put(entry)
+			continue
+		}
+		msg, _ := stringifyEntryValue(entry["_msg"])
+		desc := p.logQueryStreamDescriptor(asString(entry["_stream"]), asString(entry["level"]), streamLabelCache, streamDescriptorCache)
+		_, parsedFields := p.classifyEntryMetadataFields(entry, desc.rawLabels, true, exposureCache)
+		metric := cloneStringMap(desc.translatedLabels)
+		for key, value := range parsedFields {
+			if spec.unwrapField != "" && key == spec.unwrapField {
+				continue
+			}
+			metric[key] = value
+		}
+		seriesKey := canonicalLabelsKey(metric)
+		series, ok := seriesByKey[seriesKey]
+		if !ok {
+			series = &bareParserMetricSeries{
+				metric:  metric,
+				samples: make([]bareParserMetricSample, 0, 8),
+			}
+			seriesByKey[seriesKey] = series
+		}
+		weight := 1.0
+		if spec.unwrapField != "" {
+			rawValue, ok := stringifyEntryValue(entry[spec.unwrapField])
+			if !ok {
+				vlEntryPool.Put(entry)
+				continue
+			}
+			parsedValue, err := strconv.ParseFloat(rawValue, 64)
+			if err != nil {
+				vlEntryPool.Put(entry)
+				continue
+			}
+			weight = parsedValue
+		} else if spec.funcName == "bytes_over_time" || spec.funcName == "bytes_rate" {
+			weight = float64(len(msg))
+		}
+		series.samples = append(series.samples, bareParserMetricSample{tsNanos: tsNanos, value: weight})
+		vlEntryPool.Put(entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]bareParserMetricSeries, 0, len(seriesByKey))
+	for _, series := range seriesByKey {
+		result = append(result, *series)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return canonicalLabelsKey(result[i].metric) < canonicalLabelsKey(result[j].metric)
+	})
+	return result, nil
+}
+
+func bareParserMetricWindowValue(funcName string, window []bareParserMetricSample, spec bareParserMetricCompatSpec) float64 {
+	if len(window) == 0 {
+		return 0
+	}
+	switch funcName {
+	case "count_over_time", "rate", "bytes_over_time", "bytes_rate", "sum_over_time":
+		total := 0.0
+		for _, sample := range window {
+			total += sample.value
+		}
+		return metricWindowValue(funcName, total, spec.rangeWindow)
+	case "avg_over_time":
+		total := 0.0
+		for _, sample := range window {
+			total += sample.value
+		}
+		return total / float64(len(window))
+	case "max_over_time":
+		maxValue := window[0].value
+		for _, sample := range window[1:] {
+			if sample.value > maxValue {
+				maxValue = sample.value
+			}
+		}
+		return maxValue
+	case "min_over_time":
+		minValue := window[0].value
+		for _, sample := range window[1:] {
+			if sample.value < minValue {
+				minValue = sample.value
+			}
+		}
+		return minValue
+	case "first_over_time":
+		return window[0].value
+	case "last_over_time":
+		return window[len(window)-1].value
+	case "stddev_over_time", "stdvar_over_time":
+		mean := 0.0
+		for _, sample := range window {
+			mean += sample.value
+		}
+		mean /= float64(len(window))
+		variance := 0.0
+		for _, sample := range window {
+			delta := sample.value - mean
+			variance += delta * delta
+		}
+		variance /= float64(len(window))
+		if funcName == "stddev_over_time" {
+			return math.Sqrt(variance)
+		}
+		return variance
+	case "quantile_over_time":
+		values := make([]float64, 0, len(window))
+		for _, sample := range window {
+			values = append(values, sample.value)
+		}
+		sort.Float64s(values)
+		if len(values) == 1 {
+			return values[0]
+		}
+		pos := spec.quantile * float64(len(values)-1)
+		lower := int(math.Floor(pos))
+		upper := int(math.Ceil(pos))
+		if lower == upper {
+			return values[lower]
+		}
+		weight := pos - float64(lower)
+		return values[lower] + ((values[upper] - values[lower]) * weight)
+	default:
+		return 0
+	}
+}
+
+func buildBareParserMetricMatrix(series []bareParserMetricSeries, startNanos, endNanos, stepNanos int64, spec bareParserMetricCompatSpec) map[string]interface{} {
+	result := make([]lokiMatrixResult, 0, len(series))
+	windowNanos := int64(spec.rangeWindow)
+	for _, seriesItem := range series {
+		values := make([][]interface{}, 0, int(((endNanos-startNanos)/stepNanos)+1))
+		samples := seriesItem.samples
+		left := 0
+		right := 0
+		for eval := startNanos; eval <= endNanos; eval += stepNanos {
+			lower := eval - windowNanos
+			for right < len(samples) && samples[right].tsNanos <= eval {
+				right++
+			}
+			for left < right && samples[left].tsNanos < lower {
+				left++
+			}
+			window := samples[left:right]
+			values = append(values, []interface{}{float64(eval) / float64(time.Second), formatMetricSampleValue(bareParserMetricWindowValue(spec.funcName, window, spec))})
+		}
+		result = append(result, lokiMatrixResult{Metric: seriesItem.metric, Values: values})
+	}
+	return map[string]interface{}{
+		"status": "success",
+		"data": map[string]interface{}{
+			"resultType": "matrix",
+			"result":     result,
+		},
+	}
+}
+
+func buildBareParserMetricVector(series []bareParserMetricSeries, evalNanos int64, spec bareParserMetricCompatSpec) map[string]interface{} {
+	result := make([]lokiVectorResult, 0, len(series))
+	windowNanos := int64(spec.rangeWindow)
+	for _, seriesItem := range series {
+		lower := evalNanos - windowNanos
+		window := make([]bareParserMetricSample, 0, len(seriesItem.samples))
+		for _, sample := range seriesItem.samples {
+			if sample.tsNanos >= lower && sample.tsNanos <= evalNanos {
+				window = append(window, sample)
+			}
+		}
+		result = append(result, lokiVectorResult{
+			Metric: seriesItem.metric,
+			Value:  []interface{}{float64(evalNanos) / float64(time.Second), formatMetricSampleValue(bareParserMetricWindowValue(spec.funcName, window, spec))},
+		})
+	}
+	return map[string]interface{}{
+		"status": "success",
+		"data": map[string]interface{}{
+			"resultType": "vector",
+			"result":     result,
+		},
+	}
+}
+
+type absentOverTimeCompatSpec struct {
+	baseQuery   string
+	rangeWindow time.Duration
+}
+
+func parseAbsentOverTimeCompatSpec(logql string) (absentOverTimeCompatSpec, bool) {
+	matches := absentOverTimeCompatRE.FindStringSubmatch(strings.TrimSpace(logql))
+	if len(matches) != 3 {
+		return absentOverTimeCompatSpec{}, false
+	}
+	window, ok := parsePositiveStepDuration(matches[2])
+	if !ok {
+		return absentOverTimeCompatSpec{}, false
+	}
+	baseQuery := strings.TrimSpace(matches[1])
+	if baseQuery == "" {
+		return absentOverTimeCompatSpec{}, false
+	}
+	return absentOverTimeCompatSpec{baseQuery: baseQuery, rangeWindow: window}, true
+}
+
+func extractAbsentMetricLabels(query string) map[string]string {
+	selector, _, ok := splitLeadingSelector(strings.TrimSpace(query))
+	if !ok || len(selector) < 2 {
+		return map[string]string{}
+	}
+	matchers := splitSelectorMatchers(selector[1 : len(selector)-1])
+	labels := make(map[string]string, len(matchers))
+	for _, matcher := range matchers {
+		matcher = strings.TrimSpace(matcher)
+		if strings.Contains(matcher, "!=") || strings.Contains(matcher, "=~") || strings.Contains(matcher, "!~") {
+			continue
+		}
+		idx := strings.Index(matcher, "=")
+		if idx <= 0 {
+			continue
+		}
+		label := strings.TrimSpace(matcher[:idx])
+		value := strings.TrimSpace(matcher[idx+1:])
+		value = strings.Trim(value, "\"`")
+		if label == "" || value == "" {
+			continue
+		}
+		labels[label] = value
+	}
+	return labels
+}
+
+func statsResponseIsEmpty(body []byte) bool {
+	var resp struct {
+		Data struct {
+			Result []lokiVectorResult `json:"result"`
+		} `json:"data"`
+		Results []lokiVectorResult `json:"results"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false
+	}
+	results := resp.Results
+	if len(results) == 0 {
+		results = resp.Data.Result
+	}
+	if len(results) == 0 {
+		return true
+	}
+	for _, item := range results {
+		if len(item.Value) < 2 {
+			continue
+		}
+		raw := fmt.Sprint(item.Value[1])
+		raw = strings.Trim(raw, "\"")
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return false
+		}
+		if value != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func buildAbsentInstantVector(evalRaw string, metric map[string]string) map[string]interface{} {
+	evalNs, ok := parseFlexibleUnixNanos(evalRaw)
+	if !ok {
+		evalNs = time.Now().UnixNano()
+	}
+	return map[string]interface{}{
+		"status": "success",
+		"data": map[string]interface{}{
+			"resultType": "vector",
+			"result": []lokiVectorResult{{
+				Metric: metric,
+				Value:  []interface{}{float64(evalNs) / float64(time.Second), "1"},
+			}},
+		},
+	}
+}
+
+func (p *Proxy) proxyAbsentOverTimeQuery(w http.ResponseWriter, r *http.Request, start time.Time, originalQuery string, spec absentOverTimeCompatSpec) {
+	logsqlQuery, err := p.translateQueryWithContext(r.Context(), originalQuery)
+	if err != nil {
+		p.writeError(w, http.StatusBadRequest, err.Error())
+		p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
+		return
+	}
+
+	params := url.Values{}
+	params.Set("query", logsqlQuery)
+	if t := r.FormValue("time"); t != "" {
+		params.Set("time", formatVLTimestamp(t))
+	}
+
+	resp, err := p.vlPost(r.Context(), "/select/logsql/stats_query", params)
+	if err != nil {
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("query", status, time.Since(start))
+		p.queryTracker.Record("query", originalQuery, time.Since(start), true)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := readBodyLimited(resp.Body, maxBufferedBackendBodyBytes)
+	if resp.StatusCode >= http.StatusBadRequest {
+		p.writeError(w, resp.StatusCode, string(body))
+		p.metrics.RecordRequest("query", resp.StatusCode, time.Since(start))
+		p.queryTracker.Record("query", originalQuery, time.Since(start), true)
+		return
+	}
+
+	body = p.translateStatsResponseLabelsWithContext(r.Context(), body, originalQuery)
+	var out []byte
+	if statsResponseIsEmpty(body) {
+		out, _ = json.Marshal(buildAbsentInstantVector(r.FormValue("time"), extractAbsentMetricLabels(spec.baseQuery)))
+	} else {
+		out = wrapAsLokiResponse([]byte(`{"result":[]}`), "vector")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(out)
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query", http.StatusOK, elapsed)
+	p.queryTracker.Record("query", originalQuery, elapsed, false)
+}
+
+func (p *Proxy) proxyBareParserMetricQueryRange(w http.ResponseWriter, r *http.Request, start time.Time, originalQuery string, spec bareParserMetricCompatSpec) {
+	startNanos, ok := parseFlexibleUnixNanos(r.FormValue("start"))
+	if !ok {
+		p.writeError(w, http.StatusBadRequest, "invalid start timestamp")
+		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	endNanos, ok := parseFlexibleUnixNanos(r.FormValue("end"))
+	if !ok || endNanos < startNanos {
+		p.writeError(w, http.StatusBadRequest, "invalid end timestamp")
+		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	stepDur, ok := parsePositiveStepDuration(r.FormValue("step"))
+	if !ok {
+		p.writeError(w, http.StatusBadRequest, "invalid step")
+		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	series, err := p.fetchBareParserMetricSeries(r.Context(), originalQuery, spec, r.FormValue("start"), r.FormValue("end"))
+	if err != nil {
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("query_range", status, time.Since(start))
+		p.queryTracker.Record("query_range", originalQuery, time.Since(start), true)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	marshalJSON(w, buildBareParserMetricMatrix(series, startNanos, endNanos, int64(stepDur), spec))
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query_range", http.StatusOK, elapsed)
+	p.queryTracker.Record("query_range", originalQuery, elapsed, false)
+}
+
+func (p *Proxy) proxyBareParserMetricQuery(w http.ResponseWriter, r *http.Request, start time.Time, originalQuery string, spec bareParserMetricCompatSpec) {
+	evalNanos, ok := parseFlexibleUnixNanos(r.FormValue("time"))
+	if !ok {
+		evalNanos = time.Now().UnixNano()
+	}
+	startWindow := strconv.FormatInt(evalNanos-int64(spec.rangeWindow), 10)
+	endWindow := strconv.FormatInt(evalNanos, 10)
+	series, err := p.fetchBareParserMetricSeries(r.Context(), originalQuery, spec, startWindow, endWindow)
+	if err != nil {
+		status := statusFromUpstreamErr(err)
+		p.writeError(w, status, err.Error())
+		p.metrics.RecordRequest("query", status, time.Since(start))
+		p.queryTracker.Record("query", originalQuery, time.Since(start), true)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	marshalJSON(w, buildBareParserMetricVector(series, evalNanos, spec))
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query", http.StatusOK, elapsed)
+	p.queryTracker.Record("query", originalQuery, elapsed, false)
 }
 
 func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, body []byte, originalQuery string) []byte {
@@ -11835,6 +13067,19 @@ func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, bod
 						changed = true
 						continue
 					}
+					if k == "_stream" {
+						if rawStream, ok := v.(string); ok {
+							for streamKey, streamValue := range parseStreamLabels(rawStream) {
+								lokiKey := streamKey
+								if !p.labelTranslator.IsPassthrough() {
+									lokiKey = p.labelTranslator.ToLoki(streamKey)
+								}
+								translated[lokiKey] = streamValue
+							}
+							changed = true
+							continue
+						}
+					}
 					lokiKey := k
 					if !p.labelTranslator.IsPassthrough() {
 						lokiKey = p.labelTranslator.ToLoki(k)
@@ -11844,14 +13089,24 @@ func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, bod
 					}
 					translated[lokiKey] = v
 				}
-				if strings.Contains(originalQuery, "detected_level") {
-					if _, ok := translated["detected_level"]; !ok {
-						if value, ok := translated["level"]; ok {
-							translated["detected_level"] = value
-							delete(translated, "level")
-							changed = true
-						}
+				syntheticLabels := make(map[string]string, len(translated))
+				for key, value := range translated {
+					if s, ok := value.(string); ok {
+						syntheticLabels[key] = s
 					}
+				}
+				beforeSyntheticCount := len(syntheticLabels)
+				ensureDetectedLevel(syntheticLabels)
+				ensureSyntheticServiceName(syntheticLabels)
+				if len(syntheticLabels) != beforeSyntheticCount {
+					changed = true
+				}
+				for key, value := range syntheticLabels {
+					if existing, ok := translated[key]; ok && existing == value {
+						continue
+					}
+					translated[key] = value
+					changed = true
 				}
 				if changed {
 					translatedMetrics++

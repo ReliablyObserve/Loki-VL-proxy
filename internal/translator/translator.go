@@ -843,6 +843,9 @@ func tryTranslateMetricQuery(logql string, labelFn LabelTranslateFunc) (string, 
 
 		// Extract the query and duration: {stream} | pipeline [5m]
 		query, duration := extractQueryAndDuration(inner)
+		if strings.TrimSpace(duration) == "" {
+			continue
+		}
 
 		// Translate the inner log query part
 		logsqlQuery, err := translateLogQuery(query, labelFn)
@@ -1349,7 +1352,10 @@ func tryTranslateQuantileOverTime(innerExpr, outerAgg, byLabels string, labelFn 
 	queryPart := strings.TrimSpace(body[commaIdx+1:])
 
 	// Extract query and duration
-	query, _ := extractQueryAndDuration(queryPart)
+	query, duration := extractQueryAndDuration(queryPart)
+	if strings.TrimSpace(duration) == "" {
+		return "", false
+	}
 
 	// Translate the inner log query
 	logsqlQuery, err := translateLogQuery(query, labelFn)

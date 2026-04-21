@@ -11,13 +11,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - drilldown/volume: stop injecting synthetic `service_name="unknown_service"` into `index/volume` and `index/volume_range` buckets when requests are grouped by non-service labels (for example `cluster`), while preserving service-aware grouping behavior.
 - drilldown/volume: honor Drilldown grouping hints (`drillDownLabel`, `fieldBy`, and `var-fieldBy`) as target-label fallbacks when `targetLabels` is omitted, so field/label include-exclude actions keep grouping on the selected dimension instead of falling back to selector-order inference.
-- translator/metrics: make `bytes_over_time` and `bytes_rate` emit VictoriaLogs-compatible byte aggregations via `sum_len(_msg)` (with proxy-side window-second normalization for rate), and implement `stdvar_over_time` via proxy-side `stddev^2` composition to avoid backend `stdvar` parser failures.
+- translator/metrics: make `rate` and `bytes_rate` preserve Loki per-second semantics via window normalization, make parser+unwrap metric paths preserve Loki-like cardinality with outer-aggregation composition, emit VictoriaLogs-compatible byte aggregations via `sum_len(_msg)`, and implement `stdvar_over_time` via proxy-side `stddev^2` composition to avoid backend `stdvar` parser failures.
 - proxy/binary-metrics: fix scalar and binary post-processing to mutate both legacy `results` payloads and Prometheus-style `data.result` payloads (including instant-vector `value` samples), preventing silent no-op arithmetic on valid `stats_query` responses.
 
 ### Tests
 
 - drilldown/volume: add regression coverage for inferred non-service target labels (no synthetic `unknown_service`) and for Drilldown `fieldBy` fallback mapping on both vector and matrix volume endpoints.
 - compat/matrix: add operation/filter/function matrix coverage across translator and proxy scalar paths, with deterministic e2e checks for binary scalar operators, filter operators, and metric function families (cross-engine parity for compatible functions plus proxy-local expected-value checks where semantics intentionally differ), and add scalar/binary fuzz coverage for response-shape robustness.
+
+## [1.11.0] - 2026-04-21
+
+### Bug Fixes
+
+- compat/loki: preserve Loki semantics for bare parser-derived metric queries and `absent_over_time(...)` on the direct `query` and `query_range` paths so valid Loki operations keep their parser-derived label cardinality, unwrap behavior, and empty-series semantics instead of collapsing into proxy-specific aggregated fallback results.
+
+### Changed
+
+- release/metadata: synchronized release metadata for v1.10.2.
+
+### Tests
+
+- compat/loki: make the query-semantics matrix and operation inventory required in CI, expand positive and negative Loki operation coverage across parser pipelines, unwrap range functions, boolean/set operators, and invalid log/metric combinations, and add unit coverage for the bare parser metric and `absent_over_time(...)` compatibility handlers plus cache-tier coverage for the current mainline helper cache paths.
+
+## [1.10.2] - 2026-04-20
+
+### Bug Fixes
+
+- chart/helm: quote rendered container args in the chart deployment template so values containing JSON, commas, colons, or embedded delimiters survive Helm rendering unchanged instead of being split or reinterpreted by YAML parsing.
+- proxy/wrapping: normalize wrapped stats responses to always include Loki `data.resultType` and `data.result` (including fallback mapping from legacy/top-level `results`) so Grafana Loki datasource queries no longer fail with `no resultType found` when backend payloads omit result metadata.
+
+### Tests
+
+- chart/ci: add a quoted-args Helm template regression case covering structured `extraArgs` values such as auth pairs, field-mapping JSON, and tenant limit JSON blobs.
+
+## [1.10.0] - 2026-04-20
+
+### Bug Fixes
+
+- cache/tiering: move helper/read caches onto shared fresh reads with local-memory plus local-disk persistence, keep stale fallback local-first, and expose per-tier cache lookup metrics.
+- cache/keys: canonicalize helper/read cache keys across query-param ordering and alias pairs such as `from`/`start`, `to`/`end`, and `q`/`search`, plus normalize effective detected-field limits so Grafana refreshes can reuse the same helper cache entries instead of churning near-identical keys.
+- drilldown/discovery: stop relaxing helper discovery queries after a successful empty primary result for label names, label values, native field values, and detected-label scans; successful empty strict detected-field value resolution now stays strict instead of broadening into relaxed query data, and `service_name` metadata lookup stays on metadata endpoints instead of spilling into streams/scans when metadata is sufficient.
+- metrics/cache: promote cache-tier stats into the shared metrics pipeline so `/metrics` and OTLP now export the same L1/L2/L3 request, hit, miss, stale-hit, backend-fallthrough, object, and byte series instead of keeping them as proxy-local text-only metrics.
+- peer/persistence: advertise peer write-through compression support on existing GET/hot responses, opportunistically compress owner write-through pushes only when the remote peer has confirmed support, accept compressed peer cache POST bodies, request compressed peer snapshot warm responses, and skip periodic snapshot rewrites when the on-disk patterns or label-values payload is unchanged.
+
+### Tests
+
+- cache/tiering: add regression coverage for TTL-aware disk fresh/stale reads, shared L2 promotion into L1, and helper cache locality.
+- discovery/keys: add regression coverage for canonical helper cache keys, for stopping relaxed discovery fallback after a successful empty primary result, and for OTLP/Prometheus cache-tier metric export.
+- peer/persistence: add regression coverage for compressed peer write-through/set round trips, compressed peer snapshot warm fetches, and skipping unchanged periodic snapshot rewrites.
+
+## [1.9.6] - 2026-04-20
+
+### Bug Fixes
+
+- read-path/hardening: stop converting backend failures on Drilldown `detected_fields`, `detected_labels`, detected field values, `/index/volume`, and `/index/volume_range` into empty success payloads; these handlers now serve stale last-good cache entries when available and otherwise return real upstream-style errors, and volume helpers now reject non-success `/select/logsql/hits` responses instead of silently parsing them as empty data.
+
+### Tests
+
+- drilldown/cache: add regression coverage for stale-on-error recovery on detected fields, detected labels, detected field values, and near-now volume refreshes, plus cache coverage for reusing expired L1 entries as last-good fallback data.
 
 ## [1.9.5] - 2026-04-20
 

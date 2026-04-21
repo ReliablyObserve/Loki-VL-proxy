@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -50,5 +52,132 @@ func TestProxyHelpers_HostOnlyAndKnownPeerHost(t *testing.T) {
 	}
 	if p.isKnownPeerHost("10.0.0.9") {
 		t.Fatal("expected unknown host to be rejected")
+	}
+}
+
+func TestProxyHelpers_CanonicalReadCacheKey_NormalizesEquivalentHelperRequests(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+
+	reqA := httptest.NewRequest("GET", "/loki/api/v1/labels?from=10&to=20&q=svc&query=%7Bapp%3D%22demo%22%7D", nil)
+	reqB := httptest.NewRequest("GET", "/loki/api/v1/labels?search=svc&end=20&start=10&query=%7Bapp%3D%22demo%22%7D", nil)
+
+	keyA := p.canonicalReadCacheKey("labels", "tenant-a", reqA)
+	keyB := p.canonicalReadCacheKey("labels", "tenant-a", reqB)
+	if keyA != keyB {
+		t.Fatalf("expected equivalent helper requests to share cache key, got %q != %q", keyA, keyB)
+	}
+}
+
+func TestProxyHelpers_CanonicalReadCacheKey_NormalizesDetectedLimitsAndDefaults(t *testing.T) {
+	p := newTestProxy(t, "http://unused")
+
+	reqA := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?line_limit=1000", nil)
+	reqB := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?limit=1000&query=*", nil)
+
+	keyA := p.canonicalReadCacheKey("detected_fields", "tenant-a", reqA)
+	keyB := p.canonicalReadCacheKey("detected_fields", "tenant-a", reqB)
+	if keyA != keyB {
+		t.Fatalf("expected equivalent detected_fields requests to share cache key, got %q != %q", keyA, keyB)
+	}
+}
+
+func TestProxyHelpers_AddStatsByStreamClause_PreservesLevelIdentity(t *testing.T) {
+	got := addStatsByStreamClause(`app:=api-gateway | stats count()`)
+	if got != `app:=api-gateway | stats by (_stream, level) count()` {
+		t.Fatalf("unexpected stats identity clause: %q", got)
+	}
+}
+
+func TestProxyHelpers_PreserveMetricStreamIdentity_UsesStreamAndLevelForBareMetrics(t *testing.T) {
+	got := preserveMetricStreamIdentity(`rate({app="api-gateway"} |= "GET"[5m])`, `app:=api-gateway ~"GET" | stats rate()`, nil)
+	if got != `app:=api-gateway ~"GET" | stats by (_stream, level) rate()` {
+		t.Fatalf("unexpected preserved metric query: %q", got)
+	}
+}
+
+func TestProxyHelpers_ParseBareParserMetricCompatSpec(t *testing.T) {
+	spec, ok := parseBareParserMetricCompatSpec(`count_over_time({app="api-gateway"} | json | status >= 500 [5m])`)
+	if !ok {
+		t.Fatal("expected bare parser metric query to be recognized")
+	}
+	if spec.funcName != "count_over_time" {
+		t.Fatalf("unexpected funcName %q", spec.funcName)
+	}
+	if spec.baseQuery != `{app="api-gateway"} | json | status >= 500` {
+		t.Fatalf("unexpected baseQuery %q", spec.baseQuery)
+	}
+	if spec.rangeWindow != 5*time.Minute {
+		t.Fatalf("unexpected rangeWindow %v", spec.rangeWindow)
+	}
+}
+
+func TestProxyHelpers_ParseBareParserMetricCompatSpec_RejectsAggregatedQuery(t *testing.T) {
+	if _, ok := parseBareParserMetricCompatSpec(`sum by (app) (count_over_time({app="api-gateway"} | json | status >= 500 [5m]))`); ok {
+		t.Fatal("expected aggregated parser metric query to bypass bare compat handling")
+	}
+}
+
+func TestProxyHelpers_ParseBareParserMetricCompatSpec_AcceptsUnwrapRangeFunctions(t *testing.T) {
+	spec, ok := parseBareParserMetricCompatSpec(`sum_over_time({app="api-gateway"} | json | unwrap duration_ms [5m])`)
+	if !ok {
+		t.Fatal("expected unwrap range function to use bare compat handling")
+	}
+	if spec.unwrapField != "duration_ms" {
+		t.Fatalf("unexpected unwrapField %q", spec.unwrapField)
+	}
+}
+
+func TestProxyHelpers_ParseAbsentOverTimeCompatSpec(t *testing.T) {
+	spec, ok := parseAbsentOverTimeCompatSpec(`absent_over_time({app="missing"}[5m])`)
+	if !ok {
+		t.Fatal("expected absent_over_time to be recognized")
+	}
+	if spec.baseQuery != `{app="missing"}` {
+		t.Fatalf("unexpected baseQuery %q", spec.baseQuery)
+	}
+	if spec.rangeWindow != 5*time.Minute {
+		t.Fatalf("unexpected rangeWindow %v", spec.rangeWindow)
+	}
+}
+
+func TestProxyHelpers_BuildBareParserMetricMatrix(t *testing.T) {
+	body := buildBareParserMetricMatrix([]bareParserMetricSeries{
+		{
+			metric: map[string]string{"app": "api-gateway", "status": "500"},
+			samples: []bareParserMetricSample{
+				{tsNanos: 120 * int64(time.Second), value: 1},
+				{tsNanos: 180 * int64(time.Second), value: 1},
+			},
+		},
+	}, 180*int64(time.Second), 300*int64(time.Second), int64(time.Minute), bareParserMetricCompatSpec{
+		funcName:    "count_over_time",
+		rangeWindow: 5 * time.Minute,
+	})
+
+	data := body["data"].(map[string]interface{})
+	results := data["result"].([]lokiMatrixResult)
+	if len(results) != 1 {
+		t.Fatalf("expected single result series, got %d", len(results))
+	}
+	got := results[0].Values
+	want := [][]interface{}{
+		{float64(180), "2"},
+		{float64(240), "2"},
+		{float64(300), "2"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected matrix values: got=%v want=%v", got, want)
+	}
+}
+
+func TestProxyHelpers_StatsResponseIsEmpty(t *testing.T) {
+	if !statsResponseIsEmpty([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`)) {
+		t.Fatal("expected empty vector result to count as absent")
+	}
+	if !statsResponseIsEmpty([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[123,"0"]}]}}`)) {
+		t.Fatal("expected zero-valued vector result to count as absent")
+	}
+	if statsResponseIsEmpty([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[123,"2"]}]}}`)) {
+		t.Fatal("expected positive-valued vector result not to count as absent")
 	}
 }
