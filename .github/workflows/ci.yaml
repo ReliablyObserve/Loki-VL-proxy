@@ -692,3 +692,6 @@ jobs:
 
       - name: Helm template quoted args regression
         run: helm template loki-vl-proxy charts/loki-vl-proxy -f scripts/ci/helm-quoted-args-values.yaml >/dev/null
+
+      - name: Helm template env alias regression
+        run: helm template loki-vl-proxy charts/loki-vl-proxy -f scripts/ci/helm-env-alias-values.yaml >/dev/null

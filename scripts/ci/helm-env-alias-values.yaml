@@ -1,0 +1,7 @@
+env: example-environment
+extraEnv:
+  - name: EXAMPLE_FLAG
+    value: enabled
+extraEnvFrom:
+  - secretRef:
+      name: example-secret

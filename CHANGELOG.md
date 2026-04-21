@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- chart: tolerate reserved scalar `env` values by rendering list-typed `env`/`envFrom` only when they are real lists, and add `extraEnv` / `extraEnvFrom` compatibility aliases for chart consumers that need explicit container env injection without colliding with scalar environment selectors.
+
+### Tests
+
+- chart/ci: add a Helm render regression for scalar `env` combined with `extraEnv` / `extraEnvFrom` so the manifest shape stays valid in CI.
+
 ## [1.12.1] - 2026-04-21
 
 ### Bug Fixes
