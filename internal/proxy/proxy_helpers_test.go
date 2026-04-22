@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"math"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +129,61 @@ func TestProxyHelpers_ParseBareParserMetricCompatSpec_AcceptsUnwrapRangeFunction
 	}
 }
 
+func TestProxyHelpers_ParseBareParserMetricCompatSpec_AcceptsRateCounterWithTemplateWindow(t *testing.T) {
+	spec, ok := parseBareParserMetricCompatSpec(`rate_counter({app="api-gateway"} | json | unwrap counter [$__interval])`)
+	if !ok {
+		t.Fatal("expected rate_counter unwrap query to use bare compat handling")
+	}
+	if spec.funcName != "rate_counter" {
+		t.Fatalf("unexpected funcName %q", spec.funcName)
+	}
+	if spec.unwrapField != "counter" {
+		t.Fatalf("unexpected unwrapField %q", spec.unwrapField)
+	}
+	if spec.rangeWindow != 0 {
+		t.Fatalf("expected template window to defer duration resolution, got %v", spec.rangeWindow)
+	}
+	if spec.rangeWindowExpr != "$__interval" {
+		t.Fatalf("unexpected rangeWindowExpr %q", spec.rangeWindowExpr)
+	}
+
+	resolved, ok := resolveBareParserMetricRangeWindow(spec, "2026-01-01T00:00:00Z", "2026-01-01T00:10:00Z", "30s")
+	if !ok {
+		t.Fatal("expected template window to resolve with request step")
+	}
+	if resolved.rangeWindow != 30*time.Second {
+		t.Fatalf("unexpected resolved rangeWindow %v", resolved.rangeWindow)
+	}
+}
+
+func TestProxyHelpers_ResolveGrafanaRangeTemplateTokens(t *testing.T) {
+	query := `rate({app="api-gateway"}[$__auto]) + rate_counter({app="api-gateway"} | json | unwrap counter [$__rate_interval]) + count_over_time({app="api-gateway"}[$__range_s])`
+	got := resolveGrafanaRangeTemplateTokens(query, "2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "15s")
+	if strings.Contains(got, "$__") {
+		t.Fatalf("expected all Grafana template tokens to resolve, got %q", got)
+	}
+	if !strings.Contains(got, "[15s]") {
+		t.Fatalf("expected $__auto to resolve to step, got %q", got)
+	}
+	if !strings.Contains(got, "[1m]") {
+		t.Fatalf("expected $__rate_interval to clamp to 1m minimum, got %q", got)
+	}
+	if !strings.Contains(got, "[5m]") {
+		t.Fatalf("expected $__range_s to resolve to query range, got %q", got)
+	}
+}
+
+func TestProxyHelpers_ExtractParserProbeQuery_UnquotesInput(t *testing.T) {
+	got := extractParserProbeQuery("\"rate_counter({app=\\\"api-gateway\\\"} | json | unwrap counter [5m])\"")
+	if strings.HasPrefix(got, `"`) {
+		t.Fatalf("expected parser probe query to be unquoted, got %q", got)
+	}
+	unescaped := strings.ReplaceAll(got, `\"`, `"`)
+	if !strings.Contains(unescaped, `{app="api-gateway"} | json | unwrap counter`) {
+		t.Fatalf("unexpected parser probe extraction %q", got)
+	}
+}
+
 func TestProxyHelpers_ParseAbsentOverTimeCompatSpec(t *testing.T) {
 	spec, ok := parseAbsentOverTimeCompatSpec(`absent_over_time({app="missing"}[5m])`)
 	if !ok {
@@ -167,6 +224,22 @@ func TestProxyHelpers_BuildBareParserMetricMatrix(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected matrix values: got=%v want=%v", got, want)
+	}
+}
+
+func TestProxyHelpers_BareParserMetricWindowValue_RateCounterHandlesResets(t *testing.T) {
+	window := []bareParserMetricSample{
+		{tsNanos: 1, value: 100},
+		{tsNanos: 2, value: 110},
+		{tsNanos: 3, value: 5},
+		{tsNanos: 4, value: 12},
+	}
+	spec := bareParserMetricCompatSpec{rangeWindow: time.Minute}
+
+	got := bareParserMetricWindowValue("rate_counter", window, spec)
+	want := 22.0 / 60.0 // +10, reset then +5, then +7
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("rate_counter reset handling mismatch: got=%v want=%v", got, want)
 	}
 }
 

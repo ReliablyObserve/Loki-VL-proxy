@@ -77,3 +77,23 @@ func TestMetricQuery_MissingRangeDoesNotTranslate(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricQuery_UnwrapRequiredRangeFunctionsReturnError(t *testing.T) {
+	tests := []string{
+		`sum_over_time({app="nginx"}[5m])`,
+		`stddev_over_time({app="nginx"}[5m])`,
+		`quantile_over_time(0.95, {app="nginx"}[5m])`,
+		`rate_counter({app="nginx"}[5m])`,
+		`sum(sum_over_time({app="nginx"}[5m])) by (app)`,
+	}
+
+	for _, logql := range tests {
+		_, err := TranslateLogQL(logql)
+		if err == nil {
+			t.Fatalf("expected unwrap-required metric query to return error: %s", logql)
+		}
+		if !strings.Contains(err.Error(), "unwrap") {
+			t.Fatalf("expected unwrap hint in error for %s, got %v", logql, err)
+		}
+	}
+}

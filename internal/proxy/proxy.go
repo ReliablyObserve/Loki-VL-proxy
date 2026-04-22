@@ -2121,10 +2121,17 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	p.log.Debug("query_range request", "logql", logqlQuery)
 
+	logqlQuery = resolveGrafanaRangeTemplateTokens(logqlQuery, r.FormValue("start"), r.FormValue("end"), r.FormValue("step"))
 	logqlQuery = p.preferWorkingParser(r.Context(), logqlQuery, r.FormValue("start"), r.FormValue("end"))
 
 	if spec, ok := parseBareParserMetricCompatSpec(logqlQuery); ok {
-		p.proxyBareParserMetricQueryRange(w, r, start, logqlQuery, spec)
+		resolvedSpec, resolved := resolveBareParserMetricRangeWindow(spec, r.FormValue("start"), r.FormValue("end"), r.FormValue("step"))
+		if !resolved {
+			p.writeError(w, http.StatusBadRequest, "invalid range selector")
+			p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+			return
+		}
+		p.proxyBareParserMetricQueryRange(w, r, start, logqlQuery, resolvedSpec)
 		return
 	}
 
@@ -2142,6 +2149,11 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	// Extract without() labels for post-processing
 	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
 	logsqlQuery = preserveMetricStreamIdentity(logqlQuery, logsqlQuery, withoutLabels)
+	if isBareMetricFunctionQuery(strings.TrimSpace(logqlQuery)) && !isStatsQuery(logsqlQuery) {
+		p.writeError(w, http.StatusBadRequest, "unsupported metric query: range aggregations require compatible unwrap or translator support")
+		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+		return
+	}
 	p.log.Debug("translated query", "logsql", logsqlQuery, "without", withoutLabels)
 
 	r = withOrgID(r)
@@ -2244,10 +2256,17 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logqlQuery = resolveGrafanaRangeTemplateTokens(logqlQuery, r.FormValue("start"), r.FormValue("end"), r.FormValue("step"))
 	logqlQuery = p.preferWorkingParser(r.Context(), logqlQuery, r.FormValue("start"), r.FormValue("end"))
 
 	if spec, ok := parseBareParserMetricCompatSpec(logqlQuery); ok {
-		p.proxyBareParserMetricQuery(w, r, start, logqlQuery, spec)
+		resolvedSpec, resolved := resolveBareParserMetricRangeWindow(spec, r.FormValue("start"), r.FormValue("end"), r.FormValue("step"))
+		if !resolved {
+			p.writeError(w, http.StatusBadRequest, "invalid range selector")
+			p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
+			return
+		}
+		p.proxyBareParserMetricQuery(w, r, start, logqlQuery, resolvedSpec)
 		return
 	}
 	if spec, ok := parseAbsentOverTimeCompatSpec(logqlQuery); ok {
@@ -2270,6 +2289,11 @@ func (p *Proxy) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Extract without() labels for post-processing
 	logsqlQuery, withoutLabels := translator.ParseWithoutMarker(logsqlQuery)
 	logsqlQuery = preserveMetricStreamIdentity(logqlQuery, logsqlQuery, withoutLabels)
+	if isBareMetricFunctionQuery(strings.TrimSpace(logqlQuery)) && !isStatsQuery(logsqlQuery) {
+		p.writeError(w, http.StatusBadRequest, "unsupported metric query: range aggregations require compatible unwrap or translator support")
+		p.metrics.RecordRequest("query", http.StatusBadRequest, time.Since(start))
+		return
+	}
 
 	r = withOrgID(r)
 
@@ -2463,6 +2487,7 @@ func preserveMetricStreamIdentity(originalLogQL, translatedLogsQL string, withou
 func isBareMetricFunctionQuery(logql string) bool {
 	for _, prefix := range []string{
 		"rate(",
+		"rate_counter(",
 		"count_over_time(",
 		"bytes_over_time(",
 		"bytes_rate(",
@@ -10025,11 +10050,12 @@ type requestedBucketRange struct {
 }
 
 type bareParserMetricCompatSpec struct {
-	funcName    string
-	baseQuery   string
-	rangeWindow time.Duration
-	unwrapField string
-	quantile    float64
+	funcName        string
+	baseQuery       string
+	rangeWindow     time.Duration
+	rangeWindowExpr string
+	unwrapField     string
+	quantile        float64
 }
 
 type bareParserMetricSample struct {
@@ -10157,6 +10183,98 @@ func parsePositiveStepDuration(step string) (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+func resolveGrafanaRangeTemplateTokens(query, start, end, step string) string {
+	if !strings.Contains(query, "$__") {
+		return query
+	}
+
+	replacements := map[string]string{}
+	for _, token := range []string{
+		"$__range_ms",
+		"$__rate_interval",
+		"$__interval",
+		"$__range_s",
+		"$__range",
+		"$__auto",
+	} {
+		if duration, ok := resolveGrafanaTemplateTokenDuration(token, start, end, step); ok {
+			replacements[token] = formatLogQLDuration(duration)
+		}
+	}
+
+	if len(replacements) == 0 {
+		return query
+	}
+
+	normalized := query
+	for _, token := range []string{
+		"$__range_ms",
+		"$__rate_interval",
+		"$__interval",
+		"$__range_s",
+		"$__range",
+		"$__auto",
+	} {
+		replacement, ok := replacements[token]
+		if !ok {
+			continue
+		}
+		normalized = strings.ReplaceAll(normalized, token, replacement)
+	}
+	return normalized
+}
+
+func resolveGrafanaTemplateTokenDuration(token, start, end, step string) (time.Duration, bool) {
+	stepDur, stepOK := parsePositiveStepDuration(step)
+	if !stepOK {
+		stepDur = time.Minute
+	}
+
+	rangeDur := stepDur
+	startNanos, startOK := parseFlexibleUnixNanos(start)
+	endNanos, endOK := parseFlexibleUnixNanos(end)
+	if startOK && endOK && endNanos > startNanos {
+		rangeDur = time.Duration(endNanos - startNanos)
+	}
+	if rangeDur <= 0 {
+		rangeDur = stepDur
+	}
+
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "$__auto", "$__interval":
+		return stepDur, true
+	case "$__rate_interval":
+		rateInterval := stepDur * 4
+		if rateInterval < time.Minute {
+			rateInterval = time.Minute
+		}
+		return rateInterval, true
+	case "$__range", "$__range_s", "$__range_ms":
+		return rangeDur, true
+	default:
+		return 0, false
+	}
+}
+
+func formatLogQLDuration(d time.Duration) string {
+	if d <= 0 {
+		return "1s"
+	}
+	if d%time.Hour == 0 {
+		return strconv.FormatInt(int64(d/time.Hour), 10) + "h"
+	}
+	if d%time.Minute == 0 {
+		return strconv.FormatInt(int64(d/time.Minute), 10) + "m"
+	}
+	if d%time.Second == 0 {
+		return strconv.FormatInt(int64(d/time.Second), 10) + "s"
+	}
+	if d%time.Millisecond == 0 {
+		return strconv.FormatInt(int64(d/time.Millisecond), 10) + "ms"
+	}
+	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
 }
 
 func parseStepSeconds(step string) (int64, bool) {
@@ -12450,11 +12568,11 @@ func (p *Proxy) preferWorkingParser(ctx context.Context, logql, start, end strin
 	}
 }
 
-var metricParserProbeRE = regexp.MustCompile(`(?s)(?:count_over_time|bytes_over_time|rate|bytes_rate|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time|quantile_over_time)\((.*?)\[[^][]+\]\)`)
+var metricParserProbeRE = regexp.MustCompile(`(?s)(?:count_over_time|bytes_over_time|rate|bytes_rate|rate_counter|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time|quantile_over_time)\((.*?)\[[^][]+\]\)`)
 
 var (
 	absentOverTimeCompatRE         = regexp.MustCompile(`(?s)^\s*absent_over_time\(\s*(.*)\[([^][]+)\]\s*\)\s*$`)
-	bareParserMetricCompatRE       = regexp.MustCompile(`(?s)^\s*(count_over_time|bytes_over_time|rate|bytes_rate|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time)\((.*)\[([^][]+)\]\)\s*$`)
+	bareParserMetricCompatRE       = regexp.MustCompile(`(?s)^\s*(count_over_time|bytes_over_time|rate|bytes_rate|rate_counter|sum_over_time|avg_over_time|max_over_time|min_over_time|first_over_time|last_over_time|stddev_over_time|stdvar_over_time)\((.*)\[([^][]+)\]\)\s*$`)
 	bareParserQuantileCompatRE     = regexp.MustCompile(`(?s)^\s*quantile_over_time\(\s*([0-9.]+)\s*,\s*(.*)\[([^][]+)\]\)\s*$`)
 	bareParserUnwrapFieldRE        = regexp.MustCompile(`\|\s*unwrap\s+(?:(?:duration|bytes)\(([^)]+)\)|([A-Za-z0-9_.-]+))`)
 	regexpExtractingParserStageRE  = regexp.MustCompile(`\|\s*regexp(?:\s+[^|]+)?`)
@@ -12463,11 +12581,24 @@ var (
 )
 
 func extractParserProbeQuery(logql string) string {
+	unquote := func(s string) string {
+		s = strings.TrimSpace(s)
+		if len(s) < 2 {
+			return s
+		}
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			if unquoted, err := strconv.Unquote(s); err == nil {
+				return strings.TrimSpace(unquoted)
+			}
+		}
+		return s
+	}
+
 	matches := metricParserProbeRE.FindStringSubmatch(logql)
 	if len(matches) == 2 {
-		return strings.TrimSpace(matches[1])
+		return unquote(matches[1])
 	}
-	return strings.TrimSpace(logql)
+	return unquote(logql)
 }
 
 func hasExtractingParserStage(logql string) bool {
@@ -12491,8 +12622,9 @@ func parseBareParserMetricCompatSpec(logql string) (bareParserMetricCompatSpec, 
 		if baseQuery == "" || !hasExtractingParserStage(baseQuery) {
 			return bareParserMetricCompatSpec{}, false
 		}
-		window, ok := parsePositiveStepDuration(matches[3])
-		if !ok {
+		windowRaw := strings.TrimSpace(matches[3])
+		window, ok := parsePositiveStepDuration(windowRaw)
+		if !ok && !isGrafanaRangeTemplateSelector(windowRaw) {
 			return bareParserMetricCompatSpec{}, false
 		}
 		phi, err := strconv.ParseFloat(matches[1], 64)
@@ -12504,11 +12636,12 @@ func parseBareParserMetricCompatSpec(logql string) (bareParserMetricCompatSpec, 
 			return bareParserMetricCompatSpec{}, false
 		}
 		return bareParserMetricCompatSpec{
-			funcName:    "quantile_over_time",
-			baseQuery:   baseQuery,
-			rangeWindow: window,
-			unwrapField: unwrapField,
-			quantile:    phi,
+			funcName:        "quantile_over_time",
+			baseQuery:       baseQuery,
+			rangeWindow:     window,
+			rangeWindowExpr: windowRaw,
+			unwrapField:     unwrapField,
+			quantile:        phi,
 		}, true
 	}
 
@@ -12520,24 +12653,50 @@ func parseBareParserMetricCompatSpec(logql string) (bareParserMetricCompatSpec, 
 	if baseQuery == "" || !hasExtractingParserStage(baseQuery) {
 		return bareParserMetricCompatSpec{}, false
 	}
-	window, ok := parsePositiveStepDuration(matches[3])
-	if !ok {
+	windowRaw := strings.TrimSpace(matches[3])
+	window, ok := parsePositiveStepDuration(windowRaw)
+	if !ok && !isGrafanaRangeTemplateSelector(windowRaw) {
 		return bareParserMetricCompatSpec{}, false
 	}
 	unwrapField := ""
 	switch matches[1] {
-	case "sum_over_time", "avg_over_time", "max_over_time", "min_over_time", "first_over_time", "last_over_time", "stddev_over_time", "stdvar_over_time":
+	case "rate_counter", "sum_over_time", "avg_over_time", "max_over_time", "min_over_time", "first_over_time", "last_over_time", "stddev_over_time", "stdvar_over_time":
 		unwrapField = extractBareParserUnwrapField(baseQuery)
 		if unwrapField == "" {
 			return bareParserMetricCompatSpec{}, false
 		}
 	}
 	return bareParserMetricCompatSpec{
-		funcName:    matches[1],
-		baseQuery:   baseQuery,
-		rangeWindow: window,
-		unwrapField: unwrapField,
+		funcName:        matches[1],
+		baseQuery:       baseQuery,
+		rangeWindow:     window,
+		rangeWindowExpr: windowRaw,
+		unwrapField:     unwrapField,
 	}, true
+}
+
+func isGrafanaRangeTemplateSelector(window string) bool {
+	switch strings.ToLower(strings.TrimSpace(window)) {
+	case "$__auto", "$__interval", "$__rate_interval", "$__range", "$__range_s", "$__range_ms":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveBareParserMetricRangeWindow(spec bareParserMetricCompatSpec, start, end, step string) (bareParserMetricCompatSpec, bool) {
+	if spec.rangeWindow > 0 {
+		return spec, true
+	}
+	if strings.TrimSpace(spec.rangeWindowExpr) == "" {
+		return spec, false
+	}
+	duration, ok := resolveGrafanaTemplateTokenDuration(spec.rangeWindowExpr, start, end, step)
+	if !ok || duration <= 0 {
+		return spec, false
+	}
+	spec.rangeWindow = duration
+	return spec, true
 }
 
 func extractBareParserUnwrapField(query string) string {
@@ -12698,6 +12857,22 @@ func bareParserMetricWindowValue(funcName string, window []bareParserMetricSampl
 			total += sample.value
 		}
 		return metricWindowValue(funcName, total, spec.rangeWindow)
+	case "rate_counter":
+		if len(window) < 2 || spec.rangeWindow <= 0 {
+			return 0
+		}
+		increase := 0.0
+		prev := window[0].value
+		for _, sample := range window[1:] {
+			if sample.value >= prev {
+				increase += sample.value - prev
+			} else {
+				// Counter reset: treat current value as the post-reset increase.
+				increase += sample.value
+			}
+			prev = sample.value
+		}
+		return increase / spec.rangeWindow.Seconds()
 	case "avg_over_time":
 		total := 0.0
 		for _, sample := range window {
