@@ -108,10 +108,11 @@ func TestQueryRange_CountOverTimeParserUsesDirectStatsRange(t *testing.T) {
 				manualCalled = true
 			}
 			w.Header().Set("Content-Type", "application/x-ndjson")
-			_, _ = w.Write([]byte(fmt.Sprintf(
+			_, _ = fmt.Fprintf(
+				w,
 				`{"_time":%q,"_msg":"{\"method\":\"GET\",\"status\":200}","_stream":"{service_name=\"api-gateway\"}","service_name":"api-gateway","level":"info"}`+"\n",
 				base.Format(time.RFC3339Nano),
-			)))
+			)
 		case "/select/logsql/stats_query_range":
 			statsCalled = true
 			w.Header().Set("Content-Type", "application/json")
