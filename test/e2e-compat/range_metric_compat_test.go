@@ -116,6 +116,13 @@ func TestRangeMetricCompatibilityMissingUnwrapErrors(t *testing.T) {
 	end := now.Add(15 * time.Minute).Format(time.RFC3339Nano)
 
 	queries := []string{
+		`sum_over_time({app="api-gateway"}[5m])`,
+		`avg_over_time({app="api-gateway"}[5m])`,
+		`max_over_time({app="api-gateway"}[5m])`,
+		`min_over_time({app="api-gateway"}[5m])`,
+		`stddev_over_time({app="api-gateway"}[5m])`,
+		`stdvar_over_time({app="api-gateway"}[5m])`,
+		`quantile_over_time(0.95, {app="api-gateway"}[5m])`,
 		`rate_counter({app="range-metric-counter"}[5m])`,
 		`first_over_time({app="api-gateway"}[5m])`,
 		`last_over_time({app="api-gateway"}[5m])`,
