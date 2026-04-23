@@ -68,6 +68,9 @@ func translateLogQLFull(logql string, labelFn LabelTranslateFunc, streamFields m
 	if metricResult, ok := tryTranslateMetricQuery(logql, labelFn); ok {
 		return appendWithoutMarker(metricResult, withoutLabels), nil
 	}
+	if unwrapFunc := missingUnwrapRangeMetricFunc(logql); unwrapFunc != "" {
+		return "", fmt.Errorf("%s requires `| unwrap <field>` for range aggregation", unwrapFunc)
+	}
 
 	return translateLogQuery(logql, labelFn, streamFields)
 }
@@ -864,10 +867,10 @@ func tryTranslateMetricQuery(logql string, labelFn LabelTranslateFunc) (string, 
 		if isUnwrapFunc(funcName) {
 			// For unwrap functions, extract the unwrap field
 			unwrapField := extractUnwrapField(inner)
-			statsExpr := logsqlFunc
-			if unwrapField != "" {
-				statsExpr = fmt.Sprintf("%s(%s)", logsqlFunc, unwrapField)
+			if unwrapField == "" {
+				continue
 			}
+			statsExpr := fmt.Sprintf("%s(%s)", logsqlFunc, unwrapField)
 			innerBy := unwrapInnerGrouping(query, byLabels, outerAgg, labelFn)
 
 			// stdvar_over_time uses stddev + square, since VL doesn't have stdvar().
@@ -1239,6 +1242,57 @@ func isUnwrapFunc(name string) bool {
 	return unwrapFuncs[name]
 }
 
+func missingUnwrapRangeMetricFunc(logql string) string {
+	logql = strings.TrimSpace(logql)
+	if logql == "" {
+		return ""
+	}
+
+	if _, inner, _ := extractOuterAggregation(logql); inner != "" {
+		logql = strings.TrimSpace(inner)
+	}
+
+	funcs := []string{
+		"sum_over_time", "avg_over_time",
+		"max_over_time", "min_over_time",
+		"first_over_time", "last_over_time",
+		"stddev_over_time", "stdvar_over_time",
+		"quantile_over_time", "rate_counter",
+	}
+
+	for _, funcName := range funcs {
+		prefix := funcName + "("
+		if !strings.HasPrefix(logql, prefix) {
+			continue
+		}
+		inner := logql[len(prefix):]
+		end := findLastMatchingParen(inner)
+		if end < 0 {
+			return ""
+		}
+		inner = inner[:end]
+		if funcName == "quantile_over_time" {
+			if strings.Contains(inner, "[") && strings.Contains(inner, "]") && extractUnwrapField(inner) == "" {
+				return funcName
+			}
+			return ""
+		}
+		_, duration := extractQueryAndDuration(inner)
+		if strings.TrimSpace(duration) == "" {
+			return ""
+		}
+		if strings.Contains(duration, ":") {
+			return ""
+		}
+		if extractUnwrapField(inner) == "" {
+			return funcName
+		}
+		return ""
+	}
+
+	return ""
+}
+
 func extractOuterAggregation(logql string) (agg, inner, byLabels string) {
 	// Match two forms:
 	// 1. sum(...) by (labels)     — by AFTER
@@ -1374,7 +1428,7 @@ func tryTranslateQuantileOverTime(innerExpr, outerAgg, byLabels string, labelFn 
 	// Extract unwrap field
 	unwrapField := extractUnwrapField(queryPart)
 	if unwrapField == "" {
-		unwrapField = "_msg"
+		return "", false
 	}
 
 	statsExpr := fmt.Sprintf("quantile(%s, %s)", phi, unwrapField)
