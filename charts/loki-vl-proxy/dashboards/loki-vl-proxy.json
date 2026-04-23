@@ -337,7 +337,7 @@
       ]
     },
     {
-      "title": "Client-Side Tenant/Client Impact",
+      "title": "Client-Side Tenant/Client Impact + Resource Insights",
       "type": "row",
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
       "collapsed": false
@@ -432,15 +432,9 @@
       }
     },
     {
-      "title": "Proxy Internal - Runtime Resources & Capacity",
-      "type": "row",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 61},
-      "collapsed": false
-    },
-    {
       "title": "CPU Saturation by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 62},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 61},
       "targets": [
         {
           "expr": "sum(max by (pod, mode) (loki_vl_proxy_process_cpu_usage_ratio{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"})) by (pod)",
@@ -464,7 +458,7 @@
     {
       "title": "Memory Usage Ratio by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 62},
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 61},
       "targets": [
         {
           "expr": "max by (pod) (loki_vl_proxy_process_memory_usage_ratio{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"})",
@@ -488,7 +482,7 @@
     {
       "title": "Memory Footprint by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 62},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 61},
       "targets": [
         {
           "expr": "max by (pod) (loki_vl_proxy_process_resident_memory_bytes{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"})",
@@ -513,7 +507,7 @@
     {
       "title": "Goroutines by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 62},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 61},
       "targets": [
         {
           "expr": "max by (pod) (loki_vl_proxy_go_goroutines{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"})",
@@ -527,7 +521,7 @@
     {
       "title": "GC Cycles / s by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 70},
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 69},
       "targets": [
         {
           "expr": "sum by (pod) (rate(loki_vl_proxy_go_gc_cycles_total{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
@@ -541,7 +535,7 @@
     {
       "title": "Open File Descriptors by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 70},
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 69},
       "targets": [
         {
           "expr": "max by (pod) (loki_vl_proxy_process_open_fds{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"})",
@@ -555,7 +549,7 @@
     {
       "title": "PSI Pressure (60s) by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 70},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 69},
       "targets": [
         {
           "expr": "max by (pod) (loki_vl_proxy_process_pressure_cpu_some_ratio{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\",window=\"60s\"})",
@@ -587,7 +581,7 @@
     {
       "title": "Network Throughput by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 70},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 69},
       "targets": [
         {
           "expr": "sum by (pod) (rate(loki_vl_proxy_process_network_receive_bytes_total{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
@@ -605,7 +599,7 @@
     {
       "title": "Disk Throughput by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 78},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 77},
       "targets": [
         {
           "expr": "sum by (pod) (rate(loki_vl_proxy_process_disk_read_bytes_total{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
@@ -623,7 +617,7 @@
     {
       "title": "Disk Operations / s by Pod",
       "type": "timeseries",
-      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 78},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 77},
       "targets": [
         {
           "expr": "sum by (pod) (rate(loki_vl_proxy_process_disk_read_operations_total{job=~\"${job:regex}|${job:regex}-headless\",cluster=~\"${cluster:regex}\",env=~\"${env:regex}\",namespace=~\"${namespace:regex}|loki-vl-proxy\",service=~\"${service:regex}|${service:regex}-headless|\",pod=~\"${pod:regex}\"}[$__rate_interval]))",
