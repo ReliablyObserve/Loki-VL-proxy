@@ -416,6 +416,26 @@ services:
       retries: 10
       start_period: 5s
 
+  # Continuous log generator — dual-writes realistic multi-service logs to Loki + VictoriaLogs.
+  # Provides live data for Grafana Explore UI tests and Logs Drilldown pattern detection.
+  log-generator:
+    image: python:3.12-alpine
+    container_name: e2e-log-generator
+    command: python /scripts/log-generator.py
+    volumes:
+      - ./log-generator.py:/scripts/log-generator.py:ro
+    environment:
+      - LOKI_URL=http://loki:3100
+      - VL_URL=http://victorialogs:9428
+      - LOG_INTERVAL=10
+      - LOG_BATCH=8
+    depends_on:
+      loki:
+        condition: service_started
+      victorialogs:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Grafana with 3 datasources for manual side-by-side comparison
   grafana:
     image: ${GRAFANA_IMAGE:-grafana/grafana:12.4.2}
@@ -439,6 +459,7 @@ services:
       - loki-vl-proxy-tail
       - loki-vl-proxy-tail-native
       - tail-ingress
+      - log-generator
 
 volumes:
   vl-data:
