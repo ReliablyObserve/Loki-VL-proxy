@@ -4,7 +4,9 @@ import (
 	"testing"
 )
 
-func TestShouldFilterTranslatedLabel_OTelPrefixes(t *testing.T) {
+// TestShouldFilterTranslatedLabel_VLInternal verifies that only VL-internal fields are filtered,
+// not legitimate user fields that happen to match naming patterns.
+func TestShouldFilterTranslatedLabel_VLInternal(t *testing.T) {
 	p := &Proxy{
 		declaredLabelFields: []string{},
 	}
@@ -14,40 +16,25 @@ func TestShouldFilterTranslatedLabel_OTelPrefixes(t *testing.T) {
 		label     string
 		wantFilter bool
 	}{
-		// Standard OTel prefixes should be filtered
-		{"cloud_ prefix", "cloud_provider", true},
-		{"container_ prefix", "container_id", true},
-		{"k8s_ prefix", "k8s_namespace_name", true},
-		{"telemetry_ prefix", "telemetry_sdk_version", true},
-		{"process_ prefix", "process_runtime_name", true},
-		{"host_ prefix", "host_name", true},
-		{"service_ prefix", "service_name", true},
-		{"net_ prefix", "net_peer_name", true},
-		{"os_ prefix", "os_type", true},
-		{"deployment_ prefix", "deployment_environment", true},
-		{"log_ prefix", "log_file_path", true},
-		{"db_ prefix", "db_name", true},
-		{"messaging_ prefix", "messaging_system", true},
-		{"rpc_ prefix", "rpc_method", true},
-		{"url_ prefix", "url_full", true},
-		{"user_ prefix", "user_id", true},
-		{"event_ prefix", "event_name", true},
-		{"faas_ prefix", "faas_function_name", true},
-		{"http_ prefix", "http_method", true},
-		{"aws_ prefix", "aws_region", true},
-		{"azure_ prefix", "azure_resource_id", true},
-		{"gcp_ prefix", "gcp_project_id", true},
+		// VL internal fields SHOULD be filtered
+		{"_time internal field", "_time", true},
+		{"_msg internal field", "_msg", true},
+		{"_stream internal field", "_stream", true},
+		{"_stream_id internal field", "_stream_id", true},
+		{"detected_level special field", "detected_level", true},
 
-		// Non-OTel prefixes should NOT be filtered
+		// OTel-style field names should NOT be filtered - they're valid user/system fields
+		{"cloud provider field", "cloud_provider", false},
+		{"container id field", "container_id", false},
+		{"k8s namespace field", "k8s_namespace_name", false},
+		{"service name field", "service_name", false},
+		{"service namespace field", "service_namespace", false},
+
+		// Regular custom fields should NOT be filtered
 		{"custom field", "custom_field", false},
 		{"app label", "app", false},
 		{"namespace label", "namespace", false},
-		{"custom_app field", "custom_app", false},
 		{"my_field", "my_field", false},
-
-		// Edge case: similar to OTel but not exact prefix
-		{"cloudprovider (no underscore)", "cloudprovider", false},
-		{"containment (not container)", "containment", false},
 	}
 
 	for _, tt := range tests {
@@ -60,6 +47,8 @@ func TestShouldFilterTranslatedLabel_OTelPrefixes(t *testing.T) {
 	}
 }
 
+// TestShouldFilterTranslatedLabel_DeclaredFields verifies that declared fields are never
+// filtered, even if they look like VL internal fields.
 func TestShouldFilterTranslatedLabel_DeclaredFields(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -70,45 +59,38 @@ func TestShouldFilterTranslatedLabel_DeclaredFields(t *testing.T) {
 	}{
 		{
 			name:           "declared_exact_match",
-			declaredFields: []string{"container_id"},
-			label:          "container_id",
+			declaredFields: []string{"_time"},
+			label:          "_time",
 			wantFilter:     false,
-			description:    "Declared field should NOT be filtered even if it matches OTel prefix",
+			description:    "Declared field should NOT be filtered even if it's a VL internal field",
 		},
 		{
 			name:           "declared_dot_version",
-			declaredFields: []string{"container.id"},
-			label:          "container_id",
+			declaredFields: []string{"_time"},
+			label:          "_time",
 			wantFilter:     false,
-			description:    "Declared field with dots should match translated underscore version",
-		},
-		{
-			name:           "declared_underscore_version",
-			declaredFields: []string{"container_id"},
-			label:          "container_id",
-			wantFilter:     false,
-			description:    "Declared field with underscores should match exactly",
+			description:    "Declared internal field should never be filtered",
 		},
 		{
 			name:           "multiple_declared",
-			declaredFields: []string{"app", "container_id", "custom_field"},
-			label:          "container_id",
+			declaredFields: []string{"app", "_msg", "custom_field"},
+			label:          "_msg",
 			wantFilter:     false,
-			description:    "Declared field in list should NOT be filtered",
+			description:    "Declared internal field in list should NOT be filtered",
 		},
 		{
 			name:           "not_in_declared_list",
 			declaredFields: []string{"app", "custom_field"},
-			label:          "container_id",
+			label:          "_time",
 			wantFilter:     true,
-			description:    "OTel field NOT in declared list should be filtered",
+			description:    "VL internal field NOT in declared list should be filtered",
 		},
 		{
 			name:           "custom_field_not_declared",
 			declaredFields: []string{},
 			label:          "custom_app",
 			wantFilter:     false,
-			description:    "Custom field not matching OTel prefixes should NOT be filtered",
+			description:    "Custom field should NOT be filtered",
 		},
 	}
 
@@ -126,6 +108,7 @@ func TestShouldFilterTranslatedLabel_DeclaredFields(t *testing.T) {
 	}
 }
 
+// TestShouldFilterTranslatedLabel_EdgeCases tests edge case inputs for label filtering.
 func TestShouldFilterTranslatedLabel_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -139,21 +122,25 @@ func TestShouldFilterTranslatedLabel_EdgeCases(t *testing.T) {
 		// Single character labels
 		{"single_char", []string{}, "a", false},
 
-		// Very long field names
+		// Very long field names (not internal VL fields, so not filtered)
 		{"long_custom", []string{}, "very_long_custom_field_name_that_is_not_otel", false},
-		{"long_otel", []string{}, "cloud_provider_that_is_very_long_and_descriptive", true},
+		{"long_otel_like", []string{}, "cloud_provider_that_is_very_long_and_descriptive", false},
 
-		// Mixed case (Go is case-sensitive)
-		{"uppercase_prefix", []string{}, "Cloud_provider", false}, // Won't match lowercase prefix
-		{"mixed_case", []string{}, "CONTAINER_ID", false},         // Won't match lowercase prefix
+		// Mixed case (Go is case-sensitive - won't match "_time" if wrong case)
+		{"uppercase_prefix", []string{}, "Cloud_provider", false}, // Won't match internal field
+		{"mixed_case", []string{}, "CONTAINER_ID", false},         // Won't match internal field
 
-		// Multiple underscores (still match OTel prefix)
-		{"double_underscore", []string{}, "container__id", true},
-		{"trailing_underscore", []string{}, "container_", true},
+		// Multiple underscores (not internal fields, so not filtered)
+		{"double_underscore", []string{}, "container__id", false},
+		{"trailing_underscore", []string{}, "container_", false},
 
 		// Declared field with complex dot pattern
-		{"complex_dots", []string{"service.instance.id"}, "service_instance_id", false},
-		{"partial_match_not_declared", []string{"service.name"}, "service_instance_id", true},
+		{"complex_dots_declared", []string{"service.instance.id"}, "service_instance_id", false},
+		{"complex_dots_not_declared", []string{"service.name"}, "service_instance_id", false},
+
+		// Fields that look like internal fields but aren't exact matches
+		{"almost_time", []string{}, "_timex", false},
+		{"almost_msg", []string{}, "_msgx", false},
 	}
 
 	for _, tt := range tests {

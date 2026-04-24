@@ -3149,15 +3149,8 @@ func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end, s
 			}
 			// Translate dots to underscores
 			labels = p.labelTranslator.TranslateLabelsList(filtered)
-			// Filter OTel labels after translation (underscore versions)
-			finalLabels := make([]string, 0, len(labels))
-			for _, v := range labels {
-				if !p.shouldFilterTranslatedLabel(v) {
-					finalLabels = append(finalLabels, v)
-				}
-			}
-			finalLabels = appendSyntheticLabels(finalLabels)
-			p.setEndpointReadCacheWithTTL("labels", cacheKey, lokiLabelsResponse(finalLabels), CacheTTLs["labels"])
+			labels = appendSyntheticLabels(labels)
+			p.setEndpointReadCacheWithTTL("labels", cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
 			return nil, nil
 		})
 		if err != nil {
@@ -5128,17 +5121,7 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 
 	// Apply label name translation (e.g., dots → underscores)
 	labels = p.labelTranslator.TranslateLabelsList(filtered)
-
-	// Filter OTel labels after translation (underscore versions).
-	// Explicitly declared label fields (ExtraLabelFields / StreamFields) are
-	// always kept even when their prefix matches an OTel namespace.
-	finalLabels := make([]string, 0, len(labels))
-	for _, v := range labels {
-		if !p.shouldFilterTranslatedLabel(v) {
-			finalLabels = append(finalLabels, v)
-		}
-	}
-	labels = appendSyntheticLabels(finalLabels)
+	labels = appendSyntheticLabels(labels)
 
 	result := lokiLabelsResponse(labels)
 	p.setEndpointReadCacheWithTTL("labels", cacheKey, result, CacheTTLs["labels"])
@@ -12194,39 +12177,21 @@ func (p *Proxy) shouldFilterLabelField(name string) bool {
 }
 
 // shouldFilterTranslatedLabel filters labels AFTER translation (dots → underscores).
-// This checks underscore-prefixed OTel semantic convention labels.
-// Edge cases:
-// - Custom fields starting with OTel prefixes are NOT filtered (they're user-defined)
-// - Declared fields are ALWAYS preserved, even if they match OTel prefixes
-// - Both dot and underscore versions of declared fields are supported
+// Fields are never filtered based on OTel naming patterns — those are legitimate
+// field names that users may have. Only VL-internal fields are filtered.
 func (p *Proxy) shouldFilterTranslatedLabel(name string) bool {
-	// Check if this field was explicitly declared by the operator
-	// Support both underscore and dot versions of the name
-	for _, declared := range p.declaredLabelFields {
-		if declared == name {
-			return false
+	// VL internal fields should still be filtered
+	if isVLNonLokiLabelField(name) {
+		// But respect explicitly declared fields
+		for _, declared := range p.declaredLabelFields {
+			if declared == name {
+				return false
+			}
+			if strings.Contains(declared, ".") && strings.ReplaceAll(declared, ".", "_") == name {
+				return false
+			}
 		}
-		// Also check dot-to-underscore conversion (in case config has dots)
-		// Only convert if declared field contains dots (optimization)
-		if strings.Contains(declared, ".") && strings.ReplaceAll(declared, ".", "_") == name {
-			return false
-		}
-	}
-
-	// OTel semantic convention prefixes (after translation: dots become underscores)
-	// Only filter if it's a KNOWN OTel namespace, not a custom field that happens
-	// to start with an OTel-like prefix
-	otelPrefixes := [...]string{
-		"cloud_", "container_", "k8s_", "telemetry_",
-		"process_", "host_", "service_", "net_", "os_",
-		"deployment_", "log_", "db_", "messaging_",
-		"rpc_", "url_", "user_", "event_", "faas_",
-		"http_", "aws_", "azure_", "gcp_",
-	}
-	for _, prefix := range otelPrefixes {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
+		return true
 	}
 	return false
 }
