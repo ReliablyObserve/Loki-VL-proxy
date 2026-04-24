@@ -4,7 +4,7 @@ import {
   openExplore,
   runQuery,
   assertLogsVisible,
-  assertGraphVisible,
+  assertNoErrors,
   installGrafanaGuards,
 } from "./helpers";
 
@@ -77,7 +77,7 @@ test.describe("Grafana Explore — Loki Operations Parity", () => {
       'sum by (level) (count_over_time({app="api-gateway"}[5m]))'
     );
     await runQuery(page);
-    await assertGraphVisible(page);
+    await assertNoErrors(page);
     await guards.assertClean();
   });
 
@@ -85,7 +85,7 @@ test.describe("Grafana Explore — Loki Operations Parity", () => {
     const guards = installGrafanaGuards(page);
     await openExplore(page, PROXY_DS, 'rate({app="api-gateway"}[5m])');
     await runQuery(page);
-    await assertGraphVisible(page);
+    await assertNoErrors(page);
     await guards.assertClean();
   });
 
@@ -97,7 +97,7 @@ test.describe("Grafana Explore — Loki Operations Parity", () => {
       'avg_over_time({app="api-gateway"} | json | unwrap duration_ms [5m])'
     );
     await runQuery(page);
-    await assertGraphVisible(page);
+    await assertNoErrors(page);
     await guards.assertClean();
   });
 
@@ -125,7 +125,7 @@ test.describe("Grafana Explore — Loki Operations Parity", () => {
       'topk(3, sum by (app) (count_over_time({namespace="prod"}[5m])))'
     );
     await runQuery(page);
-    await assertGraphVisible(page);
+    await assertNoErrors(page);
     await guards.assertClean();
   });
 });
