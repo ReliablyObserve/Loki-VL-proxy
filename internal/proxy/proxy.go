@@ -12176,26 +12176,6 @@ func (p *Proxy) shouldFilterLabelField(name string) bool {
 	return true
 }
 
-// shouldFilterTranslatedLabel filters labels AFTER translation (dots → underscores).
-// Fields are never filtered based on OTel naming patterns — those are legitimate
-// field names that users may have. Only VL-internal fields are filtered.
-func (p *Proxy) shouldFilterTranslatedLabel(name string) bool {
-	// VL internal fields should still be filtered
-	if isVLNonLokiLabelField(name) {
-		// But respect explicitly declared fields
-		for _, declared := range p.declaredLabelFields {
-			if declared == name {
-				return false
-			}
-			if strings.Contains(declared, ".") && strings.ReplaceAll(declared, ".", "_") == name {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
 // applyBackendHeaders adds static backend headers and forwarded client headers to a VL request.
 func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 	for k, v := range p.backendHeaders {
