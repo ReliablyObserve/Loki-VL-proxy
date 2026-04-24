@@ -254,6 +254,10 @@ func translateLogQuery(logql string, labelFn LabelTranslateFunc, streamFields ..
 		remaining = rest
 
 		translated := translatePipelineStage(stage, labelFn)
+		if strings.HasPrefix(translated, errUnknownParser) {
+			parserName := strings.TrimPrefix(translated, errUnknownParser)
+			return "", fmt.Errorf("unknown pipeline stage %q — not a valid LogQL parser or label filter", parserName)
+		}
 		if translated != "" {
 			// Track parser state — after a parser, label filters become | filter
 			if isParserStage(translated) {
@@ -294,6 +298,19 @@ func translateLogQuery(logql string, labelFn LabelTranslateFunc, streamFields ..
 	}
 	return result, nil
 }
+
+// knownParsers is the set of bare-word LogQL parser names.
+// If a bare identifier stage doesn't match any of these it is an unknown parser
+// and should surface as a 400 rather than silently passing through.
+var knownParsers = map[string]bool{
+	"json": true, "logfmt": true, "unpack": true, "labels": true,
+	"pattern": true, "regexp": true, "grok": true, "clf": true,
+	"nginx": true, "apache": true, "csv": true, "decolorize": true,
+}
+
+// errUnknownParser is the sentinel prefix used to propagate unknown-parser
+// errors from translatePipelineStage through the string-returning call chain.
+const errUnknownParser = "__ERR_UNKNOWN_PARSER__:"
 
 // translatePipelineStage converts a single LogQL pipeline stage to LogsQL.
 func translatePipelineStage(stage string, labelFn LabelTranslateFunc) string {
@@ -377,8 +394,29 @@ func translatePipelineStage(stage string, labelFn LabelTranslateFunc) string {
 		return "| " + stage // proxy-side post-processing marker
 	}
 
+	// Detect unknown bare-word parsers (e.g. `| badparser`).
+	// A stage that is a bare identifier with no operator characters is very likely
+	// an attempt to invoke a named parser. If it doesn't match any known parser,
+	// return an error sentinel so the proxy can surface a 400 rather than silently
+	// passing through to VL and returning 200 with wrong results.
+	if isBareIdentifier(stage) && !knownParsers[stage] {
+		return errUnknownParser + stage
+	}
+
 	// Label filters: label op value
 	return translateLabelFilter(stage, labelFn)
+}
+
+func isBareIdentifier(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func isNoopPatternExpression(expr string) bool {

@@ -158,19 +158,18 @@ curl -s http://127.0.0.1:3002/api/health  # grafana
 
 ## Version Overrides
 
-Override default images via environment variables before `docker compose up`:
+Set environment variables before `docker compose up` to override image versions:
+
+| Variable | Default |
+|----------|---------|
+| `LOKI_IMAGE` | `grafana/loki:3.7.1` |
+| `VICTORIALOGS_IMAGE` | `victoriametrics/victoria-logs:v1.50.0` |
+| `GRAFANA_IMAGE` | `grafana/grafana:12.4.2` |
+| `PROXY_IMAGE` | `loki-vl-proxy:e2e-local` |
+| `VMAUTH_IMAGE` | `victoriametrics/vmauth:v1.138.0` |
+| `VMALERT_IMAGE` | `victoriametrics/vmalert:v1.138.0` |
+| `VICTORIAMETRICS_IMAGE` | `victoriametrics/victoria-metrics:v1.119.0` |
 
 ```bash
-export LOKI_IMAGE=grafana/loki:3.6.0
-export VICTORIALOGS_IMAGE=victoriametrics/victoria-logs:v1.49.0
-export GRAFANA_IMAGE=grafana/grafana:12.3.0
-export PROXY_IMAGE=loki-vl-proxy:my-branch
-export VMAUTH_IMAGE=victoriametrics/vmauth:v1.137.0
-export VMALERT_IMAGE=victoriametrics/vmalert:v1.137.0
-export VICTORIAMETRICS_IMAGE=victoriametrics/victoria-metrics:v1.118.0
-
-cd test/e2e-compat
-docker compose up -d --build
+LOKI_IMAGE=grafana/loki:3.6.0 docker compose up -d --build
 ```
-
-Defaults (from docker-compose.yml): `grafana/loki:3.7.1`, `victoriametrics/victoria-logs:v1.50.0`, `grafana/grafana:12.4.2`, `loki-vl-proxy:e2e-local`.

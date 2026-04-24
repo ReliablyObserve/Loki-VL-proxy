@@ -25,9 +25,13 @@ export default defineConfig({
       name: "chromium",
       use: {
         browserName: "chromium",
-        ...(explicitExecutablePath
-          ? { launchOptions: { executablePath: explicitExecutablePath } }
-          : {}),
+        launchOptions: {
+          ...(explicitExecutablePath ? { executablePath: explicitExecutablePath } : {}),
+          headless: !process.env.HEADED,
+          args: process.env.HEADED
+            ? ["--disable-focus-on-load", "--window-position=1200,0"]
+            : [],
+        },
       },
     },
   ],
