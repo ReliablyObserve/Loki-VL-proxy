@@ -39,9 +39,9 @@ func TestShouldFilterTranslatedLabel_VLInternal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := p.shouldFilterTranslatedLabel(tt.label)
+			got := p.ShouldFilterTranslatedLabel(tt.label)
 			if got != tt.wantFilter {
-				t.Errorf("shouldFilterTranslatedLabel(%q) = %v, want %v", tt.label, got, tt.wantFilter)
+				t.Errorf("ShouldFilterTranslatedLabel(%q) = %v, want %v", tt.label, got, tt.wantFilter)
 			}
 		})
 	}
@@ -99,9 +99,9 @@ func TestShouldFilterTranslatedLabel_DeclaredFields(t *testing.T) {
 			p := &Proxy{
 				declaredLabelFields: tt.declaredFields,
 			}
-			got := p.shouldFilterTranslatedLabel(tt.label)
+			got := p.ShouldFilterTranslatedLabel(tt.label)
 			if got != tt.wantFilter {
-				t.Errorf("shouldFilterTranslatedLabel(%q) with declared fields %v = %v, want %v\nDescription: %s",
+				t.Errorf("ShouldFilterTranslatedLabel(%q) with declared fields %v = %v, want %v\nDescription: %s",
 					tt.label, tt.declaredFields, got, tt.wantFilter, tt.description)
 			}
 		})
@@ -148,9 +148,9 @@ func TestShouldFilterTranslatedLabel_EdgeCases(t *testing.T) {
 			p := &Proxy{
 				declaredLabelFields: tt.declaredFields,
 			}
-			got := p.shouldFilterTranslatedLabel(tt.label)
+			got := p.ShouldFilterTranslatedLabel(tt.label)
 			if got != tt.wantFilter {
-				t.Errorf("shouldFilterTranslatedLabel(%q) with declared %v = %v, want %v",
+				t.Errorf("ShouldFilterTranslatedLabel(%q) with declared %v = %v, want %v",
 					tt.label, tt.declaredFields, got, tt.wantFilter)
 			}
 		})

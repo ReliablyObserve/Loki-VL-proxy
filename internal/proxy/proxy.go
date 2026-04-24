@@ -12176,11 +12176,13 @@ func (p *Proxy) shouldFilterLabelField(name string) bool {
 	return true
 }
 
-// shouldFilterTranslatedLabel returns true if a label should be filtered from Loki-compatible
+// ShouldFilterTranslatedLabel returns true if a label should be filtered from Loki-compatible
 // responses. Only VL-internal fields and detected_level are filtered; user/system fields
 // (including those with OTel-like naming patterns) are preserved. Declared fields are
 // always kept even if they match filter criteria.
-func (p *Proxy) shouldFilterTranslatedLabel(name string) bool {
+//
+// This is exported for testing purposes to validate label filtering logic.
+func (p *Proxy) ShouldFilterTranslatedLabel(name string) bool {
 	// VL internal fields should be filtered
 	if isVLNonLokiLabelField(name) {
 		// But respect explicitly declared fields
