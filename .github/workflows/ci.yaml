@@ -511,12 +511,14 @@ jobs:
           SCORES=$(echo "$OUTPUT" | grep -oP 'Score: \K\d+/\d+ \(\d+\.\d+%\)' || true)
           TOTAL_PASS=0
           TOTAL_ALL=0
-          while IFS= read -r line; do
-            PASS=$(echo "$line" | grep -oP '^\d+')
-            ALL=$(echo "$line" | grep -oP '/\K\d+')
-            TOTAL_PASS=$((TOTAL_PASS + PASS))
-            TOTAL_ALL=$((TOTAL_ALL + ALL))
-          done <<< "$SCORES"
+          if [ -n "$SCORES" ]; then
+            while IFS= read -r line; do
+              PASS=$(echo "$line" | grep -oP '^\d+')
+              ALL=$(echo "$line" | grep -oP '/\K\d+')
+              TOTAL_PASS=$((TOTAL_PASS + PASS))
+              TOTAL_ALL=$((TOTAL_ALL + ALL))
+            done <<< "$SCORES"
+          fi
           if [ "$TOTAL_ALL" -gt 0 ]; then
             PCT=$(echo "scale=1; $TOTAL_PASS * 100 / $TOTAL_ALL" | bc)
             echo "COMPAT_PCT=${PCT}%" >> "$GITHUB_OUTPUT"
