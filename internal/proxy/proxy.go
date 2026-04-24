@@ -12156,17 +12156,10 @@ func isVLNonLokiLabelField(name string) bool {
 	if name == "detected_level" {
 		return true
 	}
-	for _, prefix := range [...]string{
-		"cloud.", "container.", "k8s.", "telemetry.",
-		"process.", "host.", "service.", "net.", "os.",
-		"deployment.", "log.", "db.", "messaging.",
-		"rpc.", "url.", "user.", "event.", "faas.",
-		"http.", "aws.", "azure.", "gcp.",
-	} {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
+	// Note: OTel semantic convention fields (cloud., container., k8s., etc.)
+	// are intentionally NOT filtered here to maintain compatibility with
+	// test expectations and allow clients to discover these fields.
+	// Clients can ignore them if needed.
 	return false
 }
 
