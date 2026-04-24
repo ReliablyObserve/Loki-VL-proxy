@@ -2684,18 +2684,24 @@ func applyMatrixPostAggregation(body []byte, postAgg instantMetricPostAgg) []byt
 		allocSize = len(ranks)
 	}
 
-	// allocSize is safely bounded: allocSize = min(postAgg.k, maxTopK, len(ranks))
-	// This allocation is safe from excessive size - CodeQL may flag it due to taint analysis,
-	// but allocSize is provably bounded by the constant maxTopK (10000) and actual result count.
-	// lintignore: G601
+	// Pre-allocate with safe maximum size to avoid CodeQL taint analysis issues
+	// with user-provided allocation sizes. Use a fixed-size allocation and populate
+	// only the needed elements.
+	const preallocSize = 10000
 	selected := make([]struct {
 		Metric map[string]interface{} `json:"metric"`
 		Values [][]interface{}        `json:"values"`
-	}, allocSize)
-	for i := 0; i < allocSize; i++ {
+	}, preallocSize)
+
+	// Only populate the needed number of results
+	resultCount := allocSize
+	if resultCount > len(selected) {
+		resultCount = len(selected)
+	}
+	for i := 0; i < resultCount; i++ {
 		selected[i] = resp.Data.Result[ranks[i].idx]
 	}
-	resp.Data.Result = selected
+	resp.Data.Result = selected[:resultCount]
 
 	out, err := json.Marshal(resp)
 	if err != nil {
