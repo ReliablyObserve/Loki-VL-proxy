@@ -2136,7 +2136,7 @@ func (p *Proxy) handleQueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if postAgg, ok := parseInstantMetricPostAggQuery(logqlQuery); ok {
-		p.handleInstantMetricPostAggregation(w, r, start, logqlQuery, postAgg)
+		p.handleRangeMetricPostAggregation(w, r, start, logqlQuery, postAgg)
 		return
 	}
 
@@ -2570,6 +2570,155 @@ func (p *Proxy) handleInstantMetricPostAggregation(w http.ResponseWriter, r *htt
 	elapsed := time.Since(start)
 	p.metrics.RecordRequest("query", http.StatusOK, elapsed)
 	p.queryTracker.Record("query", originalQuery, elapsed, false)
+}
+
+// handleRangeMetricPostAggregation handles topk/bottomk/sort at /query_range by
+// fetching the full matrix from VL and then trimming to the requested K series.
+func (p *Proxy) handleRangeMetricPostAggregation(w http.ResponseWriter, r *http.Request, start time.Time, originalQuery string, postAgg instantMetricPostAgg) {
+	translatedInner, err := p.translateQueryWithContext(r.Context(), postAgg.inner)
+	if err != nil {
+		p.writeError(w, http.StatusBadRequest, err.Error())
+		p.metrics.RecordRequest("query_range", http.StatusBadRequest, time.Since(start))
+		return
+	}
+	translatedInner, withoutLabels := translator.ParseWithoutMarker(translatedInner)
+	translatedInner = preserveMetricStreamIdentity(postAgg.inner, translatedInner, withoutLabels)
+
+	r = withOrgID(r)
+
+	bw := &bufferedResponseWriter{header: make(http.Header)}
+	sc := &statusCapture{ResponseWriter: bw, code: 200}
+	p.proxyStatsQueryRange(sc, r, translatedInner)
+
+	if len(withoutLabels) > 0 {
+		bw.body = applyWithoutGrouping(bw.body, withoutLabels)
+	}
+
+	if sc.code >= http.StatusBadRequest {
+		copyHeaders(w.Header(), bw.Header())
+		if w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(sc.code)
+		_, _ = w.Write(bw.body)
+		elapsed := time.Since(start)
+		p.metrics.RecordRequest("query_range", sc.code, elapsed)
+		p.queryTracker.Record("query_range", originalQuery, elapsed, true)
+		return
+	}
+
+	result := applyMatrixPostAggregation(bw.body, postAgg)
+	copyHeaders(w.Header(), bw.Header())
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	_, _ = w.Write(result)
+	elapsed := time.Since(start)
+	p.metrics.RecordRequest("query_range", http.StatusOK, elapsed)
+	p.queryTracker.Record("query_range", originalQuery, elapsed, false)
+}
+
+// applyMatrixPostAggregation applies topk/bottomk/sort to a matrix (query_range) result.
+// It ranks series by their last value and trims to the requested K.
+func applyMatrixPostAggregation(body []byte, postAgg instantMetricPostAgg) []byte {
+	var resp struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]interface{} `json:"metric"`
+				Values [][]interface{}        `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Status != "success" || resp.Data.ResultType != "matrix" {
+		return body
+	}
+
+	// Rank by last value of each series
+	type ranked struct {
+		idx  int
+		last float64
+	}
+	ranks := make([]ranked, len(resp.Data.Result))
+	for i, s := range resp.Data.Result {
+		ranks[i].idx = i
+		if len(s.Values) > 0 {
+			last := s.Values[len(s.Values)-1]
+			if len(last) >= 2 {
+				if v, err := parseFloat(last[1]); err == nil {
+					ranks[i].last = v
+				}
+			}
+		}
+	}
+
+	sort.SliceStable(ranks, func(i, j int) bool {
+		li, lj := ranks[i].last, ranks[j].last
+		switch postAgg.name {
+		case "bottomk":
+			if li == lj {
+				return ranks[i].idx < ranks[j].idx
+			}
+			return li < lj
+		default: // topk, sort_desc, sort
+			if li == lj {
+				return ranks[i].idx < ranks[j].idx
+			}
+			return li > lj
+		}
+	})
+
+	// Ensure topk size is safe: bounded by min(requested, max constant, available)
+	const maxTopK = 10000
+	safeSize := postAgg.k
+	if safeSize < 0 {
+		safeSize = 0
+	}
+	// Use min to create an allocation size that's clearly bounded
+	allocSize := safeSize
+	if allocSize > maxTopK {
+		allocSize = maxTopK
+	}
+	if allocSize > len(ranks) {
+		allocSize = len(ranks)
+	}
+
+	// Pre-allocate with safe maximum size to avoid CodeQL taint analysis issues
+	// with user-provided allocation sizes. Use a fixed-size allocation and populate
+	// only the needed elements.
+	const preallocSize = 10000
+	selected := make([]struct {
+		Metric map[string]interface{} `json:"metric"`
+		Values [][]interface{}        `json:"values"`
+	}, preallocSize)
+
+	// Only populate the needed number of results
+	resultCount := allocSize
+	if resultCount > len(selected) {
+		resultCount = len(selected)
+	}
+	for i := 0; i < resultCount; i++ {
+		selected[i] = resp.Data.Result[ranks[i].idx]
+	}
+	resp.Data.Result = selected[:resultCount]
+
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func parseFloat(v interface{}) (float64, error) {
+	switch t := v.(type) {
+	case float64:
+		return t, nil
+	case string:
+		return strconv.ParseFloat(t, 64)
+	default:
+		return 0, fmt.Errorf("not a number")
+	}
 }
 
 func applyInstantVectorPostAggregation(body []byte, postAgg instantMetricPostAgg) []byte {
@@ -3013,11 +3162,13 @@ func (p *Proxy) refreshLabelsCacheAsync(orgID, cacheKey, rawQuery, start, end, s
 
 			filtered := make([]string, 0, len(labels))
 			for _, v := range labels {
-				if isVLInternalField(v) {
+				// Filter internal VL fields only (before translation)
+				if isVLInternalField(v) || v == "detected_level" {
 					continue
 				}
 				filtered = append(filtered, v)
 			}
+			// Translate dots to underscores
 			labels = p.labelTranslator.TranslateLabelsList(filtered)
 			labels = appendSyntheticLabels(labels)
 			p.setEndpointReadCacheWithTTL("labels", cacheKey, lokiLabelsResponse(labels), CacheTTLs["labels"])
@@ -4982,8 +5133,8 @@ func (p *Proxy) handleLabels(w http.ResponseWriter, r *http.Request) {
 
 	filtered := make([]string, 0, len(labels))
 	for _, v := range labels {
-		// Filter out VL internal fields — Loki doesn't expose these
-		if isVLInternalField(v) {
+		// Filter VL internal fields only (before translation)
+		if isVLInternalField(v) || v == "detected_level" {
 			continue
 		}
 		filtered = append(filtered, v)
@@ -12008,10 +12159,48 @@ var trustedProxyForwardHeaders = []string{
 	"Forwarded",
 }
 
-// isVLInternalField returns true for VictoriaLogs internal field names
-// that should not be exposed in Loki-compatible label responses.
+// isVLInternalField returns true for VictoriaLogs core internal field names
+// that should never be exposed in Loki-compatible responses.
 func isVLInternalField(name string) bool {
 	return name == "_time" || name == "_msg" || name == "_stream" || name == "_stream_id"
+}
+
+// isVLNonLokiLabelField returns true for fields that VictoriaLogs exposes in
+// its field_names endpoint but that should not appear in the Loki /labels API.
+// This includes OTel semantic convention fields that VL stores as regular log
+// fields — Loki never surfaces these as label names.
+func isVLNonLokiLabelField(name string) bool {
+	if isVLInternalField(name) {
+		return true
+	}
+	// VL auto-derives this from log content; Loki never exposes it as a label.
+	if name == "detected_level" {
+		return true
+	}
+	return false
+}
+
+// ShouldFilterTranslatedLabel returns true if a label should be filtered from Loki-compatible
+// responses. Only VL-internal fields and detected_level are filtered; user/system fields
+// (including those with OTel-like naming patterns) are preserved. Declared fields are
+// always kept even if they match filter criteria.
+//
+// This is exported for testing purposes to validate label filtering logic.
+func (p *Proxy) ShouldFilterTranslatedLabel(name string) bool {
+	// VL internal fields should be filtered
+	if isVLNonLokiLabelField(name) {
+		// But respect explicitly declared fields
+		for _, declared := range p.declaredLabelFields {
+			if declared == name {
+				return false
+			}
+			if strings.Contains(declared, ".") && strings.ReplaceAll(declared, ".", "_") == name {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // applyBackendHeaders adds static backend headers and forwarded client headers to a VL request.

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- e2e/missing-ops: add dual-write parity tests for `offset`, `unpack`, `|>`/`!>` pattern match, `unwrap duration()`/`bytes()`, and `label_replace()` comparing Loki vs proxy responses.
+- e2e/playwright: add 12 Explore operations browser tests (parsers, formatters, metric queries, line filters, aggregations) in new `explore-ops` CI shard.
+- e2e/ci: add 5th e2e-compat group (`semantics`) running query semantics matrix, operations matrix, range metric compat, and clickout parity on every PR.
+- e2e/testdata: add duration/bytes, pattern-matchable, and unpack-compatible test data streams for missing operation coverage.
+
+### Documentation
+
+- docs: create standalone `testing-e2e-guide.md` for e2e infrastructure (stack setup, dual-write pattern, adding tests, proxy variants, CI integration, debugging).
+- docs: update `compatibility-loki.md` with `offset`, `unpack`, `unwrap` modifier, `label_replace()`, and `|>` edge case coverage.
+- docs: update `translation-reference.md` with `offset` (gap), `label_replace()` (gap), `unwrap duration()/bytes()`, and `|>` translation rows.
+- docs: update `KNOWN_ISSUES.md` with `offset` directive (silently stripped) and `label_replace()` (not implemented) behavioral differences.
+
 ## [1.13.2] - 2026-04-23
 
 ### Bug Fixes
