@@ -258,12 +258,12 @@ Two new test suites validate Loki Explorer and Logs Drilldown UI comprehensivene
 #### Performance Baseline Tests
 - **File**: `test/e2e-ui/tests/performance-baseline.spec.ts` (180+ lines)
 - **Metrics Tracked**:
-  - **Explore page load**: Target <3000ms
-  - **Simple metric query response**: Target <5000ms
-  - **JSON parsed logs query**: Target <5000ms
-  - **Log entry expansion**: Target <500ms
-  - **Label selector load**: Target <1000ms
-  - **Rapid filter changes**: Target <5000ms
+  - **Explore page load**: Target &lt;\1000ms
+  - **Simple metric query response**: Target &lt;\1000ms
+  - **JSON parsed logs query**: Target &lt;\1000ms
+  - **Log entry expansion**: Target &lt;\100ms
+  - **Label selector load**: Target &lt;\1000ms
+  - **Rapid filter changes**: Target &lt;\1000ms
 
 #### Running Performance Tests
 
