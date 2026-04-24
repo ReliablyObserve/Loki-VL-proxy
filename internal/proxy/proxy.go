@@ -12159,23 +12159,6 @@ func isVLNonLokiLabelField(name string) bool {
 	return false
 }
 
-// shouldFilterLabelField returns true when the given field name should be
-// excluded from Loki-compatible label responses. It respects explicitly
-// declared label fields (ExtraLabelFields / StreamFields config) — those
-// are always surfaced regardless of their prefix.
-func (p *Proxy) shouldFilterLabelField(name string) bool {
-	if !isVLNonLokiLabelField(name) {
-		return false
-	}
-	// Do not filter fields the operator explicitly declared as label surfaces.
-	for _, declared := range p.declaredLabelFields {
-		if declared == name {
-			return false
-		}
-	}
-	return true
-}
-
 // ShouldFilterTranslatedLabel returns true if a label should be filtered from Loki-compatible
 // responses. Only VL-internal fields and detected_level are filtered; user/system fields
 // (including those with OTel-like naming patterns) are preserved. Declared fields are
