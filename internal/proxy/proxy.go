@@ -12176,6 +12176,27 @@ func (p *Proxy) shouldFilterLabelField(name string) bool {
 	return true
 }
 
+// shouldFilterTranslatedLabel returns true if a label should be filtered from Loki-compatible
+// responses. Only VL-internal fields and detected_level are filtered; user/system fields
+// (including those with OTel-like naming patterns) are preserved. Declared fields are
+// always kept even if they match filter criteria.
+func (p *Proxy) shouldFilterTranslatedLabel(name string) bool {
+	// VL internal fields should be filtered
+	if isVLNonLokiLabelField(name) {
+		// But respect explicitly declared fields
+		for _, declared := range p.declaredLabelFields {
+			if declared == name {
+				return false
+			}
+			if strings.Contains(declared, ".") && strings.ReplaceAll(declared, ".", "_") == name {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // applyBackendHeaders adds static backend headers and forwarded client headers to a VL request.
 func (p *Proxy) applyBackendHeaders(vlReq *http.Request) {
 	for k, v := range p.backendHeaders {
