@@ -2669,21 +2669,26 @@ func applyMatrixPostAggregation(body []byte, postAgg instantMetricPostAgg) []byt
 		}
 	})
 
-	// Enforce maximum size for topk results to prevent excessive allocations
+	// Ensure topk size is safe: bounded by min(requested, max constant, available)
 	const maxTopK = 10000
-	k := postAgg.k
-	if k < 0 || k > maxTopK {
-		k = maxTopK
+	safeSize := postAgg.k
+	if safeSize < 0 {
+		safeSize = 0
 	}
-	if k > len(ranks) {
-		k = len(ranks)
+	// Use min to create an allocation size that's clearly bounded
+	allocSize := safeSize
+	if allocSize > maxTopK {
+		allocSize = maxTopK
+	}
+	if allocSize > len(ranks) {
+		allocSize = len(ranks)
 	}
 
 	selected := make([]struct {
 		Metric map[string]interface{} `json:"metric"`
 		Values [][]interface{}        `json:"values"`
-	}, k)
-	for i := 0; i < k; i++ {
+	}, allocSize)
+	for i := 0; i < allocSize; i++ {
 		selected[i] = resp.Data.Result[ranks[i].idx]
 	}
 	resp.Data.Result = selected
