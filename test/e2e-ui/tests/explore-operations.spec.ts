@@ -1,9 +1,7 @@
-import { test, expect } from "@playwright/test";
+import { test } from "@playwright/test";
 import {
   PROXY_DS,
-  LOKI_DS,
   openExplore,
-  typeQuery,
   runQuery,
   assertLogsVisible,
   assertGraphVisible,
