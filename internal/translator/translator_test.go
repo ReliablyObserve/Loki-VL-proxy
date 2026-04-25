@@ -209,6 +209,16 @@ func TestTranslateLogQL(t *testing.T) {
 			logql: `{app="api"} | json | drop __error__`,
 			want:  `app:=api | unpack_json | delete __error__`,
 		},
+		{
+			name:  "bare unwrap with no field — Grafana query builder incomplete state",
+			logql: `{env="production"} | unwrap `,
+			want:  `env:=production`,
+		},
+		{
+			name:  "bare unwrap no trailing space",
+			logql: `{env="production"} | unwrap`,
+			want:  `env:=production`,
+		},
 	}
 
 	for _, tt := range tests {
