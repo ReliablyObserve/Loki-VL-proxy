@@ -7,7 +7,7 @@ Produces 10 diverse services with realistic patterns, varied labels,
 and message formats that exercise Explore, Drilldown pattern detection,
 and proxy parity regression tests.
 
-Services:
+Services (all prod/data/ml/batch/ingress-nginx namespaces, no staging to avoid test conflicts):
   api-gateway      JSON HTTP access logs  (prod, us-east-1 + us-west-2)
   payment-service  logfmt transactions    (prod, us-east-1)
   auth-service     JSON auth events       (prod, us-east-1)
@@ -560,12 +560,6 @@ def services_batch(n: int) -> list[dict]:
         "ml-serving", "ml", "us-east-1", "info",
         extra={"gpu": "nvidia-a100"},
     ), gen_ml_serving(n)))
-
-    # ── staging variant — same services, lower volume ─────────────────────
-    streams.append(stream(make_labels(
-        "api-gateway", "staging", "us-west-2", "info",
-        extra={"version": "v3-beta"},
-    ), gen_api_gateway(max(1, n // 4))))
 
     return streams
 
