@@ -421,6 +421,7 @@ services:
   log-generator:
     image: python:3.12-alpine
     container_name: e2e-log-generator
+    profiles: ["ui"]
     command: python /scripts/log-generator.py
     volumes:
       - ./log-generator.py:/scripts/log-generator.py:ro
@@ -459,7 +460,6 @@ services:
       - loki-vl-proxy-tail
       - loki-vl-proxy-tail-native
       - tail-ingress
-      - log-generator
 
 volumes:
   vl-data:
