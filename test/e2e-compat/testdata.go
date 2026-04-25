@@ -290,12 +290,11 @@ func pushStream(t *testing.T, baseTime time.Time, sd streamDef) {
 		vlLines = append(vlLines, string(j))
 	}
 
-	// Build stream fields from labels
+	// Build stream fields from labels — include ALL labels to match Loki's
+	// stream label behavior (Loki indexes every push label as a stream label)
 	streamFields := []string{}
 	for k := range sd.Labels {
-		if k != "level" { // level varies within app, not a good stream field
-			streamFields = append(streamFields, k)
-		}
+		streamFields = append(streamFields, k)
 	}
 
 	resp, err := http.Post(

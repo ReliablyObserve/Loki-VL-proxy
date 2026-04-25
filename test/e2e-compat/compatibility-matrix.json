@@ -108,19 +108,18 @@
       "runtime_profiles": [
         {
           "version": "13.0.1",
-          "profile": "current_full",
-          "run_on_pr": true,
+          "profile": "full",
           "test_regex": "^(TestDrilldownTrackScore|TestDrilldown_RuntimeFamilyContracts)$"
         },
         {
-          "version": "12.4.2",
-          "profile": "previous_smoke",
+          "version": "13.0.1",
+          "profile": "current_smoke",
           "run_on_pr": true,
           "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts|TestDrilldown_RuntimeFamilyContracts)$"
         },
         {
-          "version": "11.6.6",
-          "profile": "lts_smoke",
+          "version": "12.4.2",
+          "profile": "previous_smoke",
           "run_on_pr": true,
           "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts|TestDrilldown_RuntimeFamilyContracts)$"
         }
