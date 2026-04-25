@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- fix(e2e): add `_msg` field to all JSON-format log generators so VictoriaLogs stores the human-readable message correctly and Grafana renders JSON service logs consistently with Loki.
+
+## [1.17.1] - 2026-04-25
+
+### Fixed
+
+- fix(log-generator): split JSON log entries by their actual content `level` before pushing to VictoriaLogs streams, eliminating stream-label/content mismatch that caused `detected_level=error` filters to return `warn` entries.
+- fix(detected_fields): skip nested JSON objects and arrays from the body-scan detected fields list; `service={"name":"..."}` no longer appears as a filterable field, preventing Grafana Drilldown field breakdown from breaking.
+- fix(metrics): remove raw `level` label from metric aggregation results when `detected_level` is synthesized from it, so `sum by (detected_level)` returns only `{detected_level:"error"}` matching Loki's output; this unblocks the Drilldown include button for `detected_level` values.
+- fix(translator): silently drop bare `| unwrap` with no field name instead of returning an error; Grafana query builder emits this while the user is selecting a field.
+- fix(service-names): stop picking up logfmt-parsed document fields (e.g. `job=sync-users`) as service names when stream label inventory is available; only dotted OTel-style names are read from full field inventory in that case.
+
+## [1.17.0] - 2026-04-25
+
+### Fixed
+
+- fix(detected_fields): infer `int`/`float` types for logfmt string values so Grafana's unwrap field selector correctly lists numeric fields.
+- fix(detected_fields): strip bare `| unwrap` (without field name) from field detection queries, preventing VictoriaLogs parse errors when Grafana sends an incomplete query to the `detected_fields` endpoint.
+- fix(compat): `| json | status >= 400` no longer incorrectly rejected as a binary op on a log query by the LogQL syntax validator.
+
+## [1.16.0] - 2026-04-25
+
+### Added
+
+- feat(compat): LogQL syntax validation that returns Loki-compatible HTTP 400 errors for invalid queries (binary ops on log expressions, malformed selectors, empty queries).
+
+### Fixed
+
+- fix(compat): label filter stages like `| json | status >= 400` no longer incorrectly rejected by syntax validator.
+- fix(config): increase max_query_series from 500 to 5000 to prevent false series truncation in high-cardinality environments.
+
+### Tests
+
+- test(parity): exhaustive LogQL parity machine with 116 cases covering all LogQL operations — error parity (31 cases) and query parity (85 cases).
+
+## [1.15.0] - 2026-04-25
+
 ### Added
 
 - feat(otel): hierarchical OTel detection for detected_fields — detects OTel-instrumented services from stream labels (service.name, k8s.*, deployment.*, telemetry.*) and correctly exposes both dotted and underscore alias forms in detected_fields API.
