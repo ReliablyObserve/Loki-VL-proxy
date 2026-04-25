@@ -326,7 +326,7 @@ func ingestAllOTelCategories(t *testing.T) {
 		pushStreamToLoki(t, now, sd)
 	}
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(6 * time.Second) // VL needs time to index all category streams
 	t.Log("All OTel categories ingested")
 }
 
@@ -729,7 +729,18 @@ func TestOTelDots_ProxyUnderscores(t *testing.T) {
 	})
 
 	t.Run("label_values_telemetry_sdk_language", func(t *testing.T) {
-		values := getLabelValues(t, proxyUnderscoreURL, "telemetry_sdk_language")
+		// Retry with backoff — VL label values index may need time to warm
+		var values []string
+		for attempt := 0; attempt < 3; attempt++ {
+			values = getLabelValues(t, proxyUnderscoreURL, "telemetry_sdk_language")
+			valSet := toSet(values)
+			if valSet["go"] && valSet["python"] {
+				return // success
+			}
+			if attempt < 2 {
+				time.Sleep(3 * time.Second)
+			}
+		}
 		if len(values) == 0 {
 			t.Error("telemetry_sdk_language values should not be empty")
 		}
