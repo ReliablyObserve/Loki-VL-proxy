@@ -321,7 +321,9 @@ func translatePipelineStage(stage string, labelFn LabelTranslateFunc) string {
 
 	// Unwrap — VL doesn't need unwrap, stats functions take field names directly.
 	// | unwrap field_name → silently dropped (the field name is used in the stats function)
-	if strings.HasPrefix(stage, "unwrap ") {
+	// | unwrap (bare, no field) → also dropped; Grafana query builder emits this
+	// while the user is still typing a field name.
+	if stage == "unwrap" || strings.HasPrefix(stage, "unwrap ") {
 		return "" // drop — VL handles this implicitly
 	}
 
