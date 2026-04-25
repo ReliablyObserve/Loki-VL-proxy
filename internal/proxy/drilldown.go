@@ -1445,16 +1445,31 @@ func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map
 
 	// Post-scan OTel alias exposure: service_name is unconditionally suppressed
 	// by addDetectedField via suppressedDetectedFieldNames. For OTel data with
-	// real service.name in stream labels, explicitly add service_name as an alias
-	// so Drilldown and Explore can use both dotted and underscore forms.
+	// real service.name in stream labels, explicitly add service_name so
+	// Drilldown and Explore can use both dotted and underscore forms.
+	//
+	// In hybrid mode: both service.name and service_name are exposed.
+	// In translated mode: only service_name is exposed (no service.name in fields).
+	// In native mode: only service.name is exposed (no service_name needed).
 	if anyOTelWithServiceName {
+		// Find a source for the alias values: prefer service.name, fall back to
+		// any field that contributed OTel service name data.
+		var source *detectedFieldSummary
 		if serviceDot, ok := fields["service.name"]; ok {
-			fields["service_name"] = &detectedFieldSummary{
-				label:       "service_name",
-				typ:         serviceDot.typ,
-				values:      serviceDot.values,
-				cardinality: serviceDot.cardinality,
+			source = serviceDot
+		} else {
+			// In translated-only mode, service.name is not in fields. Use the
+			// values that were collected from stream labels during scan.
+			source = &detectedFieldSummary{
+				label: "service_name",
+				typ:   "string",
 			}
+		}
+		fields["service_name"] = &detectedFieldSummary{
+			label:       "service_name",
+			typ:         source.typ,
+			values:      source.values,
+			cardinality: source.cardinality,
 		}
 	}
 
