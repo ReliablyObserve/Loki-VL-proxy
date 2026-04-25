@@ -124,6 +124,12 @@
           "test_regex": "^(TestGrafanaDatasourceCatalogAndHealth|TestDrilldown_GrafanaResourceContracts|TestDrilldown_RuntimeFamilyContracts)$"
         }
       ],
+      "future_candidates": [
+        {
+          "version": "13.0.0",
+          "note": "Add to runtime_profiles once stable release is available. Current_family will shift to 13.x."
+        }
+      ],
       "capability_profiles": [
         {
           "profile": "grafana-runtime-v13-plus",
