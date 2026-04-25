@@ -106,9 +106,10 @@ func ingestRichTestData(t *testing.T) {
 	})
 
 	// ── Service: otel-auth-service (OTel with full semantic conventions) ──
-	// Mechanism: Loki push API + VL JSON with dotted label names
-	// This tests OTel data where resource attributes are set as stream labels
+	// VL-only: Loki does not natively support dotted stream labels in push API.
+	// OTel data reaches VL directly (via collector or jsonline), not via Loki push.
 	pushStream(t, now, streamDef{
+		VLOnly: true,
 		Labels: map[string]string{
 			"service.name":           "otel-auth-service",
 			"service.namespace":      "auth-namespace",
@@ -136,9 +137,9 @@ func ingestRichTestData(t *testing.T) {
 	})
 
 	// ── Service: otel-api-service (OTel data with minimal stream labels) ──
-	// Mechanism: OTel spans with resource attributes embedded in structured JSON
-	// Tests case where OTel attributes come from message parsing, not stream labels
+	// VL-only: OTel attributes in message JSON, not via Loki push
 	pushStream(t, now, streamDef{
+		VLOnly: true,
 		Labels: map[string]string{
 			"app": "otel-api-service", "namespace": "prod", "env": "production",
 			"cluster": "us-east-1", "level": "info",
@@ -151,9 +152,9 @@ func ingestRichTestData(t *testing.T) {
 	})
 
 	// ── Service: otel-collector-native (OTel collector with underscore-translated labels) ──
-	// Mechanism: OTel data where semantic conventions are pre-translated to underscores
-	// Tests compatibility when OTel systems use underscore naming convention
+	// VL-only: Pre-translated underscore conventions from OTel collector
 	pushStream(t, now, streamDef{
+		VLOnly: true,
 		Labels: map[string]string{
 			"service_name":           "otel-collector",
 			"service_namespace":      "observability",
@@ -249,6 +250,7 @@ func ingestRichTestData(t *testing.T) {
 type streamDef struct {
 	Labels map[string]string
 	Lines  []string
+	VLOnly bool // If true, push only to VL (not Loki) — for OTel data with dotted labels
 }
 
 func pushStream(t *testing.T, baseTime time.Time, sd streamDef) {
@@ -261,17 +263,19 @@ func pushStream(t *testing.T, baseTime time.Time, sd streamDef) {
 		values[i] = []string{fmt.Sprintf("%d", ts.UnixNano()), line}
 	}
 
-	lokiPayload := map[string]interface{}{
-		"streams": []map[string]interface{}{
-			{"stream": sd.Labels, "values": values},
-		},
-	}
-	body, _ := json.Marshal(lokiPayload)
-	resp, err := http.Post(lokiURL+"/loki/api/v1/push", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Logf("Loki push (%s): failed: %v", sd.Labels["app"], err)
-	} else {
-		resp.Body.Close()
+	if !sd.VLOnly {
+		lokiPayload := map[string]interface{}{
+			"streams": []map[string]interface{}{
+				{"stream": sd.Labels, "values": values},
+			},
+		}
+		body, _ := json.Marshal(lokiPayload)
+		resp, err := http.Post(lokiURL+"/loki/api/v1/push", "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			t.Logf("Loki push (%s): failed: %v", sd.Labels["app"], err)
+		} else {
+			resp.Body.Close()
+		}
 	}
 
 	// Push to VictoriaLogs
