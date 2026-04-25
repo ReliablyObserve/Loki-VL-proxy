@@ -347,9 +347,7 @@ func pushStreamToVL(t *testing.T, baseTime time.Time, sd streamDef) {
 
 	streamFields := []string{}
 	for k := range sd.Labels {
-		if k != "level" {
-			streamFields = append(streamFields, k)
-		}
+		streamFields = append(streamFields, k)
 	}
 
 	resp, err := http.Post(
