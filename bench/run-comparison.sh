@@ -11,6 +11,7 @@
 #   ./bench/run-comparison.sh --workloads=small        # quick smoke test
 #   ./bench/run-comparison.sh --clients=10,50          # fewer concurrency levels
 #   ./bench/run-comparison.sh --duration=60s           # longer per-level runs
+#   ./bench/run-comparison.sh --jitter=2h              # randomize time windows (realistic cache sim)
 #   ./bench/run-comparison.sh --skip-loki              # proxy only (no Loki comparison)
 #   ./bench/run-comparison.sh --version=v1.17.1        # tag results for tracking
 #   PROXY_NO_CACHE_URL=http://localhost:3199 ./bench/run-comparison.sh  # pre-started no-cache proxy

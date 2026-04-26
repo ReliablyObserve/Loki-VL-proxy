@@ -5,7 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,6 +23,11 @@ type Config struct {
 	Duration    time.Duration
 	Queries     []workload.Query
 	Verbose     bool
+	// TimeJitter, if non-zero, randomly shifts each request's time window by a
+	// uniform random amount in [-TimeJitter, 0].  Shifting only backward keeps
+	// queries valid (no future timestamps) while producing a realistic mix of
+	// cache hits (small shift → overlapping windows), partial hits, and misses.
+	TimeJitter time.Duration
 }
 
 // Result holds the outcome of one benchmark run.
@@ -69,6 +77,7 @@ func Run(ctx context.Context, cfg Config) Result {
 		go func(workerID int) {
 			defer wg.Done()
 			qi := workerID % len(cfg.Queries) // round-robin query selection
+			rng := rand.New(rand.NewSource(int64(workerID) ^ time.Now().UnixNano()))
 			for {
 				if ctx.Err() != nil || time.Now().After(deadline) {
 					return
@@ -76,9 +85,12 @@ func Run(ctx context.Context, cfg Config) Result {
 				q := cfg.Queries[qi%len(cfg.Queries)]
 				qi++
 
-				url := q.URL(cfg.TargetURL)
+				rawURL := q.URL(cfg.TargetURL)
+				if cfg.TimeJitter > 0 {
+					rawURL = applyJitter(rawURL, cfg.TimeJitter, rng)
+				}
 				start := time.Now()
-				n, err := doRequest(url)
+				n, err := doRequest(rawURL)
 				elapsed := time.Since(start)
 
 				samples <- sample{
@@ -127,6 +139,37 @@ func Run(ctx context.Context, cfg Config) Result {
 		ByQuery:     byQuery,
 		Overall:     overallSnap,
 	}
+}
+
+// applyJitter shifts the start/end/time nanosecond params of a query URL
+// backward by a uniform random amount in [0, jitter].  All three params are
+// shifted by the same offset so window sizes are preserved; shifting only
+// backward keeps every timestamp in the past (no future queries).
+func applyJitter(rawURL string, jitter time.Duration, rng *rand.Rand) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	shift := time.Duration(rng.Int63n(int64(jitter))) // uniform in [0, jitter)
+	changed := false
+	for _, key := range []string{"start", "end", "time"} {
+		v := q.Get(key)
+		if v == "" {
+			continue
+		}
+		ns, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			continue
+		}
+		q.Set(key, strconv.FormatInt(ns-shift.Nanoseconds(), 10))
+		changed = true
+	}
+	if !changed {
+		return rawURL
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func doRequest(url string) (int64, error) {

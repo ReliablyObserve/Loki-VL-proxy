@@ -58,6 +58,7 @@ func main() {
 		version      = flag.String("version", "", "Version tag attached to results (e.g. v1.17.1)")
 		doVerify     = flag.Bool("verify", false, "Before benchmarking, verify Loki and proxy return equivalent data for each query")
 		verifyStrict = flag.Bool("verify-strict", false, "Exit non-zero if any verification diff is found")
+		jitter       = flag.Duration("jitter", 0, "Per-request time-window jitter: shifts each query's start/end/time by a random amount in [0, jitter] backward. Produces a realistic mix of cache hits, partial hits, and misses. Example: --jitter=2h")
 	)
 	flag.Parse()
 
@@ -160,6 +161,8 @@ func main() {
 						Concurrency: min(conc, 10),
 						Duration:    *warmup,
 						Queries:     tgt.queries,
+						// No jitter during warmup — we want the cache populated on
+						// the exact windows the benchmark will hit later.
 					}
 					runner.Run(ctx, wCfg) // discard warmup result
 				}
@@ -180,13 +183,18 @@ func main() {
 				}
 
 				// Benchmark run.
-				fmt.Printf("  running %s (concurrency=%d duration=%s)...\n", tgt.name, conc, *duration)
+				jitterStr := ""
+				if *jitter > 0 {
+					jitterStr = fmt.Sprintf("  jitter=%s", *jitter)
+				}
+				fmt.Printf("  running %s (concurrency=%d duration=%s%s)...\n", tgt.name, conc, *duration, jitterStr)
 				cfg := runner.Config{
 					TargetURL:   tgt.url,
 					Concurrency: conc,
 					Duration:    *duration,
 					Queries:     tgt.queries,
 					Verbose:     *verbose,
+					TimeJitter:  *jitter,
 				}
 				result := runner.Run(ctx, cfg)
 				result.Workload = wl.Name

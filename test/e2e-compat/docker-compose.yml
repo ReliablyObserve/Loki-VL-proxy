@@ -41,6 +41,8 @@ services:
       # Allow high concurrency for benchmark comparisons (default 16 causes 100% errors at c≥50).
       - "-search.maxConcurrentRequests=100"
       - "-search.maxQueueDuration=30s"
+      # Cap memory to prevent OOM on concurrent long-range queries at high concurrency.
+      - "-memory.allowedPercent=60"
     volumes:
       - vl-data:/vlogs
     healthcheck:
