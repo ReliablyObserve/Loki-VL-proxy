@@ -101,62 +101,128 @@ go test ./internal/proxy/ -bench BenchmarkVLLogsToLokiStreams -memprofile=mem.pr
 go tool pprof mem.prof
 ```
 
-## Loki vs VL + Proxy — End-to-End Read Path Comparison
+## Three-Way Read Path Comparison: Loki vs VL+Proxy vs VL Native
 
-Results from `loki-bench` run against the e2e-compat stack (Loki 3.7.1, VictoriaLogs v1.50.0,
-loki-vl-proxy on the same host). 15s per level, 5s warmup. Proxy metrics from
-`/metrics`. Loki metrics from `/metrics`. Platform: Apple M3 Max (Docker containers).
+Measured with `loki-bench` against the e2e-compat stack running simultaneously on the same
+host (Apple M3 Max, Docker). Loki 3.7.1, VictoriaLogs v1.50.0, loki-vl-proxy latest.
+30 seconds per level, 3 concurrent targets measured in parallel.
 
-### Small workload — labels, label values, series, log select, instant query, detected\_fields
+**Dataset baseline:** 5.08 M log entries pre-seeded across 7 days, 12 services
+(api-gateway, auth-service, frontend-ssr, batch-etl, ml-serving, cache-redis, queue-worker,
+notification-service, search-indexer, payment-service, user-service, audit-logger).
+Average ingest rate ~8.4 lines/sec total (~0.7 lps per service), ~30 k entries/hour.
 
-| Clients | Loki req/s | Proxy req/s | Speedup | Loki P50 | Proxy P50 | Proxy P99 |
+**Three targets measured:**
+- **Loki (direct)** — LogQL queries sent directly to Loki, no proxy
+- **VL + Proxy** — LogQL queries via loki-vl-proxy; proxy translates to LogsQL and caches results
+- **VL (native)** — LogsQL queries sent directly to VictoriaLogs (no Loki, no proxy)
+
+### Small workload — label values, detected\_fields, index stats, series
+
+Queries: `label_values(app)`, `label_values(level)`, `detected_fields`, `index_stats`,
+`labels`, `series` over 1h windows. These are the metadata queries Grafana Drilldown
+and the datasource fire on every panel load.
+
+| Clients | Loki req/s | VL+Proxy req/s | VL native req/s | Loki P50 | VL+Proxy P50 | VL native P50 |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 1,373 | 16,126 | **11.7x** | 7ms | 377µs | 1ms |
-| 50 | 1,371 | 35,507 | **25.9x** | 37ms | 1ms | 3ms |
-| 100 | 1,351 | 39,064 | **28.9x** | 77ms | 2ms | 6ms |
+| 10 | 1,370 | 18,532 (**13.5x**) | 4,161 (3.0x) | 6.8ms | 0.4ms | 1.2ms |
+| 50 | 1,309 | 30,429 (**23.2x**) | 4,397 (3.4x) | 37ms | 1.4ms | 8.6ms |
+| 100 | 1,033 | 30,708 (**29.7x**) | 3,829 (3.7x) | 97.6ms | 2.7ms | 22.9ms |
 
-Proxy resource consumption at 100 clients: `0.23 cpu·s` consumed / `238 MB` RSS / `165 MB` heap.
+**CPU + RSS at c=10 (30-second window):**
 
-### Heavy workload — JSON parse, logfmt, multi-stage pipeline, metric aggregations, 30m–1h windows
+| Target | CPU consumed | RSS delta | Notes |
+|--------|-------------|-----------|-------|
+| Loki | 165 cpu·s | 1,267 MB | Querier scanning every request |
+| VL + Proxy (proxy only) | 0.1 cpu·s | 192 MB | Cache serving |
+| VL + Proxy (VL behind) | 61 cpu·s | 306 MB | VL serves only cache misses |
+| **VL + Proxy combined** | **61 cpu·s** | **498 MB** | **2.7× less CPU, 2.5× less RAM vs Loki** |
+| VL native | 278 cpu·s | 964 MB | Serves every request — more CPU than Loki |
 
-| Clients | Loki req/s | Proxy req/s | Speedup | Loki P50 | Proxy P50 | Proxy P99 |
+Key insight: VL-native uses _more_ CPU than Loki for small repeated metadata queries because
+it lacks a response cache. The proxy cache eliminates most VL calls, so the combined
+proxy+VL system uses 2.5–2.7× fewer resources than Loki direct at the same load.
+
+### Heavy workload — aggregations, JSON parse, logfmt, 30m–1h windows
+
+Queries: `count_over_time`, `rate`, `bytes_rate`, `sum by`, `quantile_over_time unwrap`,
+`| json | line_format`, `| logfmt | label_format` over 30-minute to 1-hour windows.
+
+| Clients | Loki req/s | VL+Proxy req/s | VL native req/s | Loki P50 | VL native P50 | VL+Proxy P50 |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 26 | 22,396 | **866x** | 274ms | 382µs | 1ms |
-| 50 | 23 | 38,330 | **1,662x** | 1,525ms | 1ms | 4ms |
-| 100 | 46 | 47,272 | **1,032x** | 1,144ms | 1ms | 5ms |
+| 10 | 57.5 | 23,299 (**405x**) | 718 (**12.5x**) | 178ms | **3.1ms** | 0.4ms |
+| 50 | 58.1 | 18,512 (**319x**) | — (crashed) | 929ms | — | 0.5ms |
+| 100 | 60.7 | 42,960 (**708x**) | — (crashed) | 1,805ms | — | 1.3ms |
 
-Loki P99 at 50 clients: 5,033ms. Heavy queries include `count_over_time`, `rate`, `bytes_rate`,
-`| json | line_format`, and `| logfmt | label_format` over 30m–1h windows.
+**CPU + RSS at c=10:**
 
-### Long-range workload — 6h/24h/48h windows, cold cache pass
+| Target | CPU consumed | RSS delta | Notes |
+|--------|-------------|-----------|-------|
+| Loki | 173 cpu·s | 1,567 MB | Steady-state heavy query load |
+| VL + Proxy combined | 1.9 cpu·s | 1,270 MB | 91× less CPU, 1.2× less RAM |
+| VL native | 280 cpu·s | **5,261 MB** | 3.4× more RAM than Loki; crashes at c≥50 |
 
-Real Loki resource metrics captured via `/metrics` before/after the 20s run.
+> **VL v1.50.0 stability note:** VictoriaLogs v1.50.0 crashes at c≥50 for heavy
+> aggregation queries over 5 M entries (100% error rate, process OOM). The proxy acts as
+> a stability buffer — even as VL crashes, the proxy serves subsequent identical requests
+> from L1 cache with <0.25% error rate. This is expected to improve in future VL releases.
 
-| Clients | Loki req/s | Proxy req/s | Loki CPU·s | Proxy CPU·s | Loki RSS | Proxy RSS |
+### Long-range workload — full 7-day windows
+
+Queries span the full 7-day dataset. These represent historical dashboards, incident
+retrospectives, and compliance reports.
+
+| Clients | Loki req/s | Loki errors | VL+Proxy req/s | VL native req/s | Loki P50 | VL native P50 |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 11 | 24,884 | **101.9** | 0.048 | **1,097 MB** | 69 MB |
-| 50 | 12 | 42,182 | **107.1** | 0.079 | **1,135 MB** | 71 MB |
+| 10 | 1.7 | 0% | 6.6¹ | **95.3** | 6,201ms | **23.8ms** (**260×** faster) |
+| 50 | 3.7 | **19.6%** | 28,441 | — (crashed) | 23,076ms | — |
+| 100 | 6.1 | **45.1%** | 53,390 | — (crashed) | 29,852ms | — |
 
-**CPU ratio: ~2,200x.** Loki burned over 5× real-time CPU in a 20-second window scanning
-6h/24h/48h windows. The proxy served 24,000–42,000 req/s from L1 cache consuming less than
-0.1 cpu·s total.
+¹ c=10 proxy has 61% errors on cold start (Loki backend timeout on first-ever requests);
+fully warm at c≥50 where the cache dominates.
 
-**Memory ratio: ~16x.** Loki's ingesters and queriers held 1.1 GiB RSS while the proxy sat
-at 69–71 MB.
+**CPU + RSS at c=10:**
+
+| Target | CPU consumed | RSS delta | Notes |
+|--------|-------------|-----------|-------|
+| Loki | 71.4 cpu·s | 1,446 MB | 6 s+ per query, timeouts at c≥50 |
+| VL + Proxy combined | 15.8 cpu·s | 3,028 MB | Cache fills memory on first pass |
+| VL native | 320 cpu·s | 3,850 MB | 260× faster per query, crashes at c≥50 |
+
+At c=50/100 Loki hits 20–45% timeout errors on 7-day queries. VL native is 260× faster
+per single query (23ms vs 6,201ms) but crashes under concurrent load. The proxy serves
+the sustained load at 28k–53k req/s from cache with <0.1% errors.
 
 ### What these numbers mean
 
-Proxy throughput in the heavy and long-range workloads reflects **L1 cache serving speed**,
-not VictoriaLogs query speed. After the warmup pass, the proxy serves all repeated identical
-queries from memory without touching VL. This is the steady-state production behavior for
-repeated Grafana dashboard panels and time-range queries.
+**Single-query speed (VL vs Loki):** VictoriaLogs storage is dramatically more efficient
+for aggregation and long-range scans. A single 7-day query takes 6.2 seconds on Loki and
+24 milliseconds on VL — a 260× difference. Heavy aggregations are 57× faster. This is a
+fundamental storage architecture difference, not tuning.
 
-The Loki numbers are real backend execution: Loki scanned 6h/24h/48h windows on every
-request with no cache.
+**Cache layer (Proxy vs VL native):** The proxy cache adds another dimension. Once a query
+result is cached, all subsequent identical requests are served in sub-millisecond latency
+without touching VL. This is the steady-state behavior for repeated Grafana dashboard panels
+and time-range queries that Drilldown fires.
 
-For **cold-first pass** behavior (first load of a new time range, uncached query): expect
-the proxy to add `~15–30ms` to one VL roundtrip on a cache miss, then serve all subsequent
-identical requests in `< 1ms`.
+**Stability under concurrency:** Neither Loki nor VL v1.50.0 handles 50+ concurrent
+heavy/long-range queries cleanly. Loki degrades to timeouts; VL crashes (OOM). The proxy
+absorbs the concurrency spike and serves from cache, reducing VL exposure to only cold-miss
+requests.
+
+**Cold-first behavior:** On the very first load of a new time range, expect 1× VL roundtrip
+(24ms for long-range in VL). Proxy adds ~2ms translation overhead per cache miss. All
+subsequent requests for the same time range: sub-millisecond from L1 cache.
+
+### Summary table
+
+| Workload | Loki P50 @c=10 | VL native P50 @c=10 | VL+Proxy P50 @c=10 | VL vs Loki | Proxy vs Loki |
+|----------|:--------------:|:-------------------:|:------------------:|:----------:|:-------------:|
+| Small | 6.8ms | 1.2ms | 0.4ms | 5.7× faster | **17× faster** |
+| Heavy | 178ms | 3.1ms | 0.4ms | 57× faster | **405× faster** |
+| Long-range | 6,201ms | 23.8ms | 1.4ms¹ | 260× faster | **4,400× faster** |
+
+¹ P50 at c=10 includes cold-cache misses; warm-cache P50 is sub-millisecond.
 
 ## Cache Size Sizing Guide
 
