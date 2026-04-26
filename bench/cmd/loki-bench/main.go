@@ -30,6 +30,7 @@ import (
 	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/metricscrape"
 	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/report"
 	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/runner"
+	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/verify"
 	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/workload"
 )
 
@@ -55,6 +56,8 @@ func main() {
 		skipProxyNocache  = flag.Bool("skip-proxy-no-cache", false, "Skip no-cache proxy target")
 		verbose      = flag.Bool("verbose", false, "Print per-request errors")
 		version      = flag.String("version", "", "Version tag attached to results (e.g. v1.17.1)")
+		doVerify     = flag.Bool("verify", false, "Before benchmarking, verify Loki and proxy return equivalent data for each query")
+		verifyStrict = flag.Bool("verify-strict", false, "Exit non-zero if any verification diff is found")
 	)
 	flag.Parse()
 
@@ -70,6 +73,35 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	if *doVerify {
+		fmt.Println("─── Data Verification ───────────────────────────────────────")
+		anyFailed := false
+		for _, wl := range workloads {
+			results := verify.Run(ctx, *lokiURL, *proxyURL, wl.Queries, 30*time.Second)
+			for _, r := range results {
+				if r.Passed {
+					fmt.Printf("  ✓ %-40s  loki == proxy\n", r.QueryName)
+				} else {
+					anyFailed = true
+					fmt.Printf("  ✗ %-40s  MISMATCH\n", r.QueryName)
+					for _, d := range r.Diffs {
+						fmt.Printf("      %s:\n        loki:  %s\n        proxy: %s\n", d.Field, d.Loki, d.Proxy)
+					}
+					if r.LokiErr != nil {
+						fmt.Printf("      loki error: %v\n", r.LokiErr)
+					}
+					if r.ProxyErr != nil {
+						fmt.Printf("      proxy error: %v\n", r.ProxyErr)
+					}
+				}
+			}
+		}
+		fmt.Println()
+		if *verifyStrict && anyFailed {
+			fatalf("verify-strict: one or more queries mismatched — see above")
+		}
+	}
 
 	// VL-native workloads use LogsQL syntax and VL-specific endpoints.
 	vlWorkloads := workload.VLByName(workloadNames, now)

@@ -238,6 +238,7 @@ type runtimeOptions struct {
 	cacheTTL                    time.Duration
 	cacheMax                    int
 	cacheMaxBytes               int
+	cacheDisabled               bool
 	compatCacheEnabled          bool
 	compatCacheMaxPercent       int
 	diskCfg                     cache.DiskCacheConfig
@@ -324,6 +325,7 @@ func run(
 	cacheTTL := fs.Duration("cache-ttl", 60*time.Second, "Cache TTL for label/metadata queries")
 	cacheMax := fs.Int("cache-max", 10000, "Maximum cache entries")
 	cacheMaxBytes := fs.Int("cache-max-bytes", defaultCacheMaxBytes, "Maximum in-memory L1 cache size in bytes")
+	cacheDisabled := fs.Bool("cache-disabled", false, "Disable the in-memory cache entirely (all requests pass through to the backend; useful for testing and cold-path measurement)")
 	compatCacheEnabled := fs.Bool("compat-cache-enabled", true, "Enable the safe Tier0 compatibility-edge response cache for cacheable GET read endpoints")
 	compatCacheMaxPercent := fs.Int("compat-cache-max-percent", defaultCompatCachePercent, "Percent of -cache-max-bytes reserved for the Tier0 compatibility-edge cache (0 disables, max 50)")
 
@@ -547,6 +549,7 @@ func run(
 		cacheTTL:              *cacheTTL,
 		cacheMax:              *cacheMax,
 		cacheMaxBytes:         *cacheMaxBytes,
+		cacheDisabled:         *cacheDisabled,
 		compatCacheEnabled:    *compatCacheEnabled,
 		compatCacheMaxPercent: *compatCacheMaxPercent,
 		diskCfg: cache.DiskCacheConfig{
@@ -717,7 +720,11 @@ func run(
 	return nil
 }
 
-func buildCacheLayer(ttl time.Duration, maxEntries, maxBytes int, diskCfg cache.DiskCacheConfig, logger *slog.Logger) (*cache.Cache, func(), error) {
+func buildCacheLayer(ttl time.Duration, maxEntries, maxBytes int, disabled bool, diskCfg cache.DiskCacheConfig, logger *slog.Logger) (*cache.Cache, func(), error) {
+	if disabled {
+		c := cache.NewDisabled()
+		return c, func() {}, nil
+	}
 	if maxEntries <= 0 {
 		return nil, nil, fmt.Errorf("cache-max must be greater than 0")
 	}
@@ -783,7 +790,7 @@ func buildCompatCacheLayer(ttl time.Duration, maxEntries, primaryMaxBytes int, e
 }
 
 func buildRuntime(opts runtimeOptions, logger *slog.Logger, notify signalNotifier, newPusher otlpPusherFactory) (*runtimeState, error) {
-	cacheLayer, cacheCleanup, err := buildCacheLayer(opts.cacheTTL, opts.cacheMax, opts.cacheMaxBytes, opts.diskCfg, logger)
+	cacheLayer, cacheCleanup, err := buildCacheLayer(opts.cacheTTL, opts.cacheMax, opts.cacheMaxBytes, opts.cacheDisabled, opts.diskCfg, logger)
 	if err != nil {
 		return nil, fmt.Errorf("open disk cache: %w", err)
 	}
