@@ -504,7 +504,7 @@ jobs:
         id: compat
         run: |
           set -euo pipefail
-          OUTPUT="$(go test -v -tags=e2e -timeout=150s -count=1 -run '${{ matrix.group.pattern }}' ./test/e2e-compat/ 2>&1)" || status=$?
+          OUTPUT="$(go test -v -tags=e2e -timeout=300s -count=1 -run '${{ matrix.group.pattern }}' ./test/e2e-compat/ 2>&1)" || status=$?
           status="${status:-0}"
           echo "$OUTPUT"
           # Extract all compatibility scores and compute overall

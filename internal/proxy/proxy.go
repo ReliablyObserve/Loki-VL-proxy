@@ -365,8 +365,10 @@ type Config struct {
 	MaxConcurrent     int                      // max concurrent backend queries (0=unlimited)
 	RatePerSecond     float64                  // per-client rate limit (0=unlimited)
 	RateBurst         int                      // per-client burst size
-	CBFailThreshold   int                      // circuit breaker failure threshold
-	CBOpenDuration    time.Duration            // circuit breaker open duration
+	CBFailThreshold   int                      // circuit breaker: failures within window before opening
+	CBOpenDuration    time.Duration            // circuit breaker: how long to stay open before probing
+	CBWindowDuration  time.Duration            // circuit breaker: sliding window for failure counting (default 30s)
+	CoalescerDisabled bool                     // disable singleflight coalescing; every request makes its own backend call
 	TenantMap         map[string]TenantMapping // string org ID → VL account/project
 	AuthEnabled       bool
 	AllowGlobalTenant bool
@@ -815,6 +817,13 @@ func filterPublishedLimits(limits map[string]any, allowlist []string) map[string
 	return filtered
 }
 
+func newCoalescer(disabled bool) *mw.Coalescer {
+	if disabled {
+		return mw.NewCoalescerDisabled()
+	}
+	return mw.NewCoalescer()
+}
+
 func New(cfg Config) (*Proxy, error) {
 	u, err := url.Parse(cfg.BackendURL)
 	if err != nil {
@@ -873,6 +882,10 @@ func New(cfg Config) (*Proxy, error) {
 	cbOpen := cfg.CBOpenDuration
 	if cbOpen == 0 {
 		cbOpen = 10 * time.Second
+	}
+	cbWindow := cfg.CBWindowDuration
+	if cbWindow <= 0 {
+		cbWindow = 30 * time.Second
 	}
 
 	// Build HTTP client optimized for high-concurrency single-backend proxying.
@@ -1109,9 +1122,9 @@ func New(cfg Config) (*Proxy, error) {
 		log:                                   logger,
 		metrics:                               proxyMetrics,
 		queryTracker:                          metrics.NewQueryTracker(10000),
-		coalescer:                             mw.NewCoalescer(),
+		coalescer:                             newCoalescer(cfg.CoalescerDisabled),
 		limiter:                               mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
-		breaker:                               mw.NewCircuitBreaker(cbFail, 3, cbOpen),
+		breaker:                               mw.NewCircuitBreaker(cbFail, 3, cbOpen, cbWindow),
 		tenantMap:                             cfg.TenantMap,
 		authEnabled:                           cfg.AuthEnabled,
 		allowGlobalTenant:                     cfg.AllowGlobalTenant,
@@ -2951,9 +2964,12 @@ func (p *Proxy) snapshotDeclaredLabelFields() []string {
 
 func (p *Proxy) vlGetMetadataCoalesced(ctx context.Context, path string, params url.Values) (int, []byte, error) {
 	key := "vlmeta:get:" + getOrgID(ctx) + ":" + path + "?" + params.Encode()
-	status, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
-		return p.vlGet(ctx, path, params)
+	status, _, body, err := p.coalescer.DoWithGuard(key, p.breaker.Allow, func() (*http.Response, error) {
+		return p.vlGetInner(ctx, path, params)
 	})
+	if errors.Is(err, mw.ErrGuardRejected) {
+		return 0, nil, fmt.Errorf("circuit breaker open — backend unavailable")
+	}
 	if err != nil {
 		return 0, nil, err
 	}
@@ -8644,11 +8660,10 @@ func (p *Proxy) ValidateBackendVersionCompatibility(ctx context.Context) error {
 	return nil
 }
 
-func (p *Proxy) vlGet(ctx context.Context, path string, params url.Values) (*http.Response, error) {
-	if !p.breaker.Allow() {
-		return nil, fmt.Errorf("circuit breaker open — backend unavailable")
-	}
-
+// vlGetInner executes a GET against VL without checking the circuit breaker.
+// Callers must either hold a breaker.Allow() token or use DoWithGuard (which
+// enforces the guard before fn is called).
+func (p *Proxy) vlGetInner(ctx context.Context, path string, params url.Values) (*http.Response, error) {
 	u := *p.backend
 	u.Path = path
 	u.RawQuery = params.Encode()
@@ -8684,11 +8699,16 @@ func (p *Proxy) vlGet(ctx context.Context, path string, params url.Values) (*htt
 	return resp, nil
 }
 
-func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*http.Response, error) {
+func (p *Proxy) vlGet(ctx context.Context, path string, params url.Values) (*http.Response, error) {
 	if !p.breaker.Allow() {
 		return nil, fmt.Errorf("circuit breaker open — backend unavailable")
 	}
+	return p.vlGetInner(ctx, path, params)
+}
 
+// vlPostInner executes a POST against VL without checking the circuit breaker.
+// Callers must either hold a breaker.Allow() token or use DoWithGuard.
+func (p *Proxy) vlPostInner(ctx context.Context, path string, params url.Values) (*http.Response, error) {
 	u := *p.backend
 	u.Path = path
 
@@ -8724,6 +8744,13 @@ func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*ht
 	return resp, nil
 }
 
+func (p *Proxy) vlPost(ctx context.Context, path string, params url.Values) (*http.Response, error) {
+	if !p.breaker.Allow() {
+		return nil, fmt.Errorf("circuit breaker open — backend unavailable")
+	}
+	return p.vlPostInner(ctx, path, params)
+}
+
 // vlGetCoalesced wraps vlGet with request coalescing.
 func (p *Proxy) vlGetCoalesced(ctx context.Context, key, path string, params url.Values) ([]byte, error) {
 	status, body, err := p.vlGetCoalescedWithStatus(ctx, key, path, params)
@@ -8740,22 +8767,30 @@ func (p *Proxy) vlGetCoalesced(ctx context.Context, key, path string, params url
 	return body, nil
 }
 
-// vlGetCoalescedWithStatus wraps vlGet with request coalescing and returns status + body.
+// vlGetCoalescedWithStatus wraps vlGetInner with request coalescing and a CB guard.
+// When the circuit breaker is open and a request for the same key is already
+// in-flight, this call joins the in-flight rather than failing immediately.
 func (p *Proxy) vlGetCoalescedWithStatus(ctx context.Context, key, path string, params url.Values) (int, []byte, error) {
-	status, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
-		return p.vlGet(ctx, path, params)
+	status, _, body, err := p.coalescer.DoWithGuard(key, p.breaker.Allow, func() (*http.Response, error) {
+		return p.vlGetInner(ctx, path, params)
 	})
+	if errors.Is(err, mw.ErrGuardRejected) {
+		return 0, nil, fmt.Errorf("circuit breaker open — backend unavailable")
+	}
 	if err != nil {
 		return 0, nil, err
 	}
 	return status, body, nil
 }
 
-// vlPostCoalesced wraps vlPost with request coalescing and returns status + body.
+// vlPostCoalesced wraps vlPostInner with request coalescing and a CB guard.
 func (p *Proxy) vlPostCoalesced(ctx context.Context, key, path string, params url.Values) (int, []byte, error) {
-	status, _, body, err := p.coalescer.Do(key, func() (*http.Response, error) {
-		return p.vlPost(ctx, path, params)
+	status, _, body, err := p.coalescer.DoWithGuard(key, p.breaker.Allow, func() (*http.Response, error) {
+		return p.vlPostInner(ctx, path, params)
 	})
+	if errors.Is(err, mw.ErrGuardRejected) {
+		return 0, nil, fmt.Errorf("circuit breaker open — backend unavailable")
+	}
 	if err != nil {
 		return 0, nil, err
 	}
@@ -12201,6 +12236,9 @@ func statusFromUpstreamErr(err error) int {
 	if err == nil {
 		return http.StatusBadGateway
 	}
+	if errors.Is(err, mw.ErrGuardRejected) {
+		return http.StatusServiceUnavailable
+	}
 	if isCanceledErr(err) {
 		return 499
 	}
@@ -12214,6 +12252,9 @@ func statusFromUpstreamErr(err error) int {
 	lower := strings.ToLower(err.Error())
 	if strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "timeout") {
 		return http.StatusGatewayTimeout
+	}
+	if strings.Contains(lower, "circuit breaker") {
+		return http.StatusServiceUnavailable
 	}
 	return http.StatusBadGateway
 }

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bench(pprof): `loki-bench` captures CPU, heap, alloc, and goroutine profiles from proxy `/debug/pprof/*` endpoints during each run; profiles written to `bench/results/pprof/<workload>-c<N>-<target>-<type>.pprof` for flamegraph analysis.
+- bench(cache-disabled): added `-cache-disabled` flag to the proxy so `run-comparison.sh` can spawn a confirmed zero-cache target without TTL tricks; this is the fourth target in the 4-way comparison (`loki`, `proxy-warm`, `proxy-cold`, `vl-native`).
+- bench(verify): added `--verify` flag to `loki-bench` for cross-target result correctness validation before benchmarking.
+
+### Fixed
+
+- fix(circuitbreaker): replace consecutive failure counting with a sliding time-window (default 30 s, tunable via `-cb-window-duration`); sporadic slow-query connection resets from VictoriaLogs no longer trip the breaker during cold-cache warmup — only a burst of N failures within the window opens the circuit.
+- fix(circuitbreaker): couple circuit breaker with request coalescing via `DoWithGuard`; when the breaker is open the CB probe starts one in-flight call and all simultaneous identical requests join it rather than each failing with 503 — eliminates retry amplification under VL load. Circuit breaker errors now return HTTP 503 (Service Unavailable) instead of 502.
+- feat(coalescer): add `-coalescer-disabled` flag to bypass singleflight for benchmarking raw translation overhead; coalescer remains active by default even with `-cache-disabled` to protect VL from thundering-herd.
+
 ## [1.17.4] - 2026-04-26
 
 ### Performance
@@ -20,6 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - fix(e2e): add `_msg` field to all JSON-format log generators so VictoriaLogs stores the human-readable message correctly and Grafana renders JSON service logs consistently with Loki.
+
+### Observability
+
+- dashboard/ops: regroup the packaged metrics dashboard into explicit SLO/SLI health, client→proxy→VL operational, and deep proxy internals sections for faster incident triage and tuning.
+
+### Documentation
+
+- docs: comprehensive README rewrite focused on production-readiness, cost comparison, quick setup, and strongest capabilities.
+- docs/ops: document the new dashboard structure and triage flow in observability and operations guides.
+- docs(bench): update benchmarks.md with 4-way comparison results (warm/cold proxy, VL native, Loki), Apple M5 Pro hardware spec, warmup design notes, and VictoriaLogs long-range tuning guide.
+
+### Performance
+
+- bench: warmup phase now runs at full benchmark concurrency with the same jitter as the real run, so the proxy cache is populated across the same time-window space the benchmark will query; warmup time is never counted in results.
+- e2e(vl): add VictoriaLogs block-cache and memory tuning flags to docker-compose (`-blockcache.missesBeforeCaching=1`, `-internStringCacheExpireDuration=15m`, `-memory.allowedPercent=75`) to improve repeated-query performance.
 
 ## [1.17.1] - 2026-04-25
 
@@ -904,6 +931,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Observability
 
 - improve app-scoped metrics compatibility for dashboard/runtime process telemetry by keeping `loki_vl_proxy_*` metric families consistently queryable across scrape and OTLP flows
+
+### Observability
+
+- redesign the packaged metrics dashboard into explicit attribution rows for `client-side Loki`, `proxy internals`, and `backend-side VictoriaLogs`, with deeper drilldown-discovery, peer-cache, query-range tuning, and per-pod resource skew visibility
+
+### Documentation
+
+- refresh README with recent delivery highlights and an operational visibility model that maps incident triage to client/proxy/backend perspectives
+- expand observability guidance with a row-by-row dashboard playbook for fast root-cause attribution
 
 ## [0.27.34] - 2026-04-11
 
