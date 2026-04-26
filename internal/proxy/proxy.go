@@ -9986,7 +9986,7 @@ func metadataFieldMap(fields map[string]string) map[string]string {
 
 func (p *Proxy) classifyEntryFields(entry map[string]interface{}, originalQuery string) (map[string]string, map[string]string, map[string]string) {
 	stream := parseStreamLabels(asString(entry["_stream"]))
-	labels := make(map[string]string, len(stream)+4)
+	labels := make(map[string]string, len(stream))
 	for k, v := range stream {
 		labels[k] = v
 	}

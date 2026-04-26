@@ -222,7 +222,7 @@ func buildEntryLabels(entry map[string]interface{}) map[string]string {
 	// parseStreamLabels returns a cached read-only map — copy into a fresh map
 	// before adding entry fields so the cache is not mutated.
 	stream := parseStreamLabels(asString(entry["_stream"]))
-	labels := make(map[string]string, len(stream)+4)
+	labels := make(map[string]string, len(stream))
 	for k, v := range stream {
 		labels[k] = v
 	}
@@ -242,7 +242,7 @@ func buildEntryLabels(entry map[string]interface{}) map[string]string {
 func buildDetectedLabels(entry map[string]interface{}) map[string]string {
 	// parseStreamLabels returns a cached read-only map — copy before mutating.
 	stream := parseStreamLabels(asString(entry["_stream"]))
-	labels := make(map[string]string, len(stream)+4)
+	labels := make(map[string]string, len(stream))
 	for k, v := range stream {
 		labels[k] = v
 	}
