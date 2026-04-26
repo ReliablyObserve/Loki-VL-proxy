@@ -368,6 +368,7 @@ type Config struct {
 	CBFailThreshold   int                      // circuit breaker: failures within window before opening
 	CBOpenDuration    time.Duration            // circuit breaker: how long to stay open before probing
 	CBWindowDuration  time.Duration            // circuit breaker: sliding window for failure counting (default 30s)
+	CoalescerDisabled bool                     // disable singleflight coalescing; every request makes its own backend call
 	TenantMap         map[string]TenantMapping // string org ID → VL account/project
 	AuthEnabled       bool
 	AllowGlobalTenant bool
@@ -816,6 +817,13 @@ func filterPublishedLimits(limits map[string]any, allowlist []string) map[string
 	return filtered
 }
 
+func newCoalescer(disabled bool) *mw.Coalescer {
+	if disabled {
+		return mw.NewCoalescerDisabled()
+	}
+	return mw.NewCoalescer()
+}
+
 func New(cfg Config) (*Proxy, error) {
 	u, err := url.Parse(cfg.BackendURL)
 	if err != nil {
@@ -1114,7 +1122,7 @@ func New(cfg Config) (*Proxy, error) {
 		log:                                   logger,
 		metrics:                               proxyMetrics,
 		queryTracker:                          metrics.NewQueryTracker(10000),
-		coalescer:                             mw.NewCoalescer(),
+		coalescer:                             newCoalescer(cfg.CoalescerDisabled),
 		limiter:                               mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
 		breaker:                               mw.NewCircuitBreaker(cbFail, 3, cbOpen, cbWindow),
 		tenantMap:                             cfg.TenantMap,

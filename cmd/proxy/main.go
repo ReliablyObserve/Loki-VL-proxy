@@ -167,6 +167,7 @@ type proxyRuntimeConfig struct {
 	peerHotReadAheadMaxObjectBytes      int
 	peerHotReadAheadTenantFairShare     int
 	peerHotReadAheadErrorBackoff        time.Duration
+	coalescerDisabled                   bool
 }
 
 type otlpRuntimeConfig struct {
@@ -329,6 +330,7 @@ func run(
 	cacheMax := fs.Int("cache-max", 10000, "Maximum cache entries")
 	cacheMaxBytes := fs.Int("cache-max-bytes", defaultCacheMaxBytes, "Maximum in-memory L1 cache size in bytes")
 	cacheDisabled := fs.Bool("cache-disabled", false, "Disable the in-memory cache entirely (all requests pass through to the backend; useful for testing and cold-path measurement)")
+	coalescerDisabled := fs.Bool("coalescer-disabled", false, "Disable request coalescing (singleflight); every concurrent request makes its own backend call — useful with -cache-disabled to measure raw translation overhead")
 	compatCacheEnabled := fs.Bool("compat-cache-enabled", true, "Enable the safe Tier0 compatibility-edge response cache for cacheable GET read endpoints")
 	compatCacheMaxPercent := fs.Int("compat-cache-max-percent", defaultCompatCachePercent, "Percent of -cache-max-bytes reserved for the Tier0 compatibility-edge cache (0 disables, max 50)")
 
@@ -675,6 +677,7 @@ func run(
 			peerHotReadAheadMaxObjectBytes:      *peerHotReadAheadMaxObjectBytes,
 			peerHotReadAheadTenantFairShare:     *peerHotReadAheadTenantFairShare,
 			peerHotReadAheadErrorBackoff:        *peerHotReadAheadErrorBackoff,
+			coalescerDisabled:                   *coalescerDisabled,
 		},
 		otlpCfg: otlpRuntimeConfig{
 			endpoint:              envCfg.otlpEndpoint,
@@ -1444,6 +1447,7 @@ func buildProxyConfig(cfg proxyRuntimeConfig) (proxy.Config, error) {
 		CBFailThreshold:                    cfg.cbFailThreshold,
 		CBOpenDuration:                     cfg.cbOpenDuration,
 		CBWindowDuration:                   cfg.cbWindowDuration,
+		CoalescerDisabled:                  cfg.coalescerDisabled,
 		BackendMinVersion:                  cfg.backendMinVersion,
 		BackendAllowUnsupportedVersion:     cfg.backendAllowUnsupportedVersion,
 		BackendVersionCheckTimeout:         cfg.backendVersionCheckTimeout,

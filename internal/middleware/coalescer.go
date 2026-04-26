@@ -20,10 +20,15 @@ var ErrGuardRejected = errors.New("guard rejected: no in-flight call to join")
 // Coalescer deduplicates identical concurrent requests.
 // When N clients send the same query simultaneously, only 1 request
 // goes to the backend. All N clients share the single response.
+//
+// When disabled (NewCoalescerDisabled), Do and DoWithGuard call fn directly
+// without singleflight deduplication — every request is a separate backend call.
+// This is used for benchmarking to isolate raw translation overhead from coalescing gains.
 type Coalescer struct {
 	group          singleflight.Group
 	inflightMu     sync.Mutex
 	inflight       map[string]int // reference count of goroutines inside DoWithGuard for each key
+	disabled       bool          // when true, bypass singleflight (raw passthrough)
 	ActiveShared   atomic.Int64  // requests currently sharing a coalesced result
 	CoalescedTotal atomic.Int64  // total coalesced (deduplicated) requests
 }
@@ -31,6 +36,15 @@ type Coalescer struct {
 func NewCoalescer() *Coalescer {
 	return &Coalescer{
 		inflight: make(map[string]int),
+	}
+}
+
+// NewCoalescerDisabled returns a Coalescer that calls fn directly without
+// deduplication. Every concurrent request makes its own backend call.
+func NewCoalescerDisabled() *Coalescer {
+	return &Coalescer{
+		inflight: make(map[string]int),
+		disabled: true,
 	}
 }
 
@@ -42,7 +56,12 @@ type coalescedResponse struct {
 
 // Do executes the request, deduplicating identical concurrent requests.
 // The key should uniquely identify the request (e.g., method + path + query).
+// When the coalescer is disabled, fn is called directly for every request.
 func (c *Coalescer) Do(key string, fn func() (*http.Response, error)) (int, http.Header, []byte, error) {
+	if c.disabled {
+		return c.callDirect(fn)
+	}
+
 	result, err, shared := c.group.Do(key, func() (interface{}, error) {
 		resp, err := fn()
 		if err != nil {
@@ -77,6 +96,20 @@ func (c *Coalescer) Do(key string, fn func() (*http.Response, error)) (int, http
 	return cr.status, cr.headers, cr.body, nil
 }
 
+// callDirect calls fn without singleflight — used when coalescer is disabled.
+func (c *Coalescer) callDirect(fn func() (*http.Response, error)) (int, http.Header, []byte, error) {
+	resp, err := fn()
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return resp.StatusCode, resp.Header.Clone(), body, nil
+}
+
 // DoWithGuard is like Do but couples the circuit breaker with request coalescing.
 //
 // If a call for key is already in-flight (another goroutine is running fn for
@@ -90,6 +123,13 @@ func (c *Coalescer) Do(key string, fn func() (*http.Response, error)) (int, http
 //
 // Typical usage: pass p.breaker.Allow as guard and vlGetInner (no CB check) as fn.
 func (c *Coalescer) DoWithGuard(key string, guard func() bool, fn func() (*http.Response, error)) (int, http.Header, []byte, error) {
+	if c.disabled {
+		if !guard() {
+			return 0, nil, nil, ErrGuardRejected
+		}
+		return c.callDirect(fn)
+	}
+
 	c.inflightMu.Lock()
 	count := c.inflight[key]
 	if count == 0 && !guard() {
