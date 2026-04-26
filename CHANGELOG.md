@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - bench(cache-disabled): added `-cache-disabled` flag to the proxy so `run-comparison.sh` can spawn a confirmed zero-cache target without TTL tricks; this is the fourth target in the 4-way comparison (`loki`, `proxy-warm`, `proxy-cold`, `vl-native`).
 - bench(verify): added `--verify` flag to `loki-bench` for cross-target result correctness validation before benchmarking.
 
+### Fixed
+
+- fix(circuitbreaker): replace consecutive failure counting with a sliding time-window (default 30 s, tunable via `-cb-window-duration`); sporadic slow-query connection resets from VictoriaLogs no longer trip the breaker during cold-cache warmup — only a burst of N failures within the window opens the circuit.
+
 ### Performance
 
 - perf(proxy): cache parsed stream label maps by `_stream` string value to eliminate redundant label parsing on repeated log entries; copy on write to prevent cache mutation bugs.
