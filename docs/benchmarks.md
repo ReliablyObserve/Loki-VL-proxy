@@ -419,8 +419,8 @@ barely affects storage engine RSS. A typical production VL instance for 1 TB/day
 |-------|:---:|:---:|:---:|:---:|
 | 1 GB/day | 16 vCPU / 32 GB | 2 vCPU / 4 GB | 0.1 vCPU / 1.5 GB | ~3% |
 | 50 GB/day | 64 vCPU / 128 GB | 8 vCPU / 16 GB | 0.2 vCPU / 3 GB | ~5% |
-| 1 TB/day | 431 vCPU / 857 GB | 32 vCPU / 64 GB | 0.5 vCPU / 6 GB | **<1%** |
-| 10 TB/day | 1,221 vCPU / 2,235 GB | 80 vCPU / 160 GB | 1 vCPU / 12 GB | **<0.5%** |
+| 1 TB/day | 431 vCPU / 857 GB | 32 vCPU / 64 GB | 0.5 vCPU / 6 GB | **\<1%** |
+| 10 TB/day | 1,221 vCPU / 2,235 GB | 80 vCPU / 160 GB | 1 vCPU / 12 GB | **\<0.5%** |
 
 At 1 TB/day the proxy fleet consumes under 1% of Loki's resource footprint. At 10 TB/day it is
 below measurement noise. The proxy's response cache further reduces VL load — at steady-state,
