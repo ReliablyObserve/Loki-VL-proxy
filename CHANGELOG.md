@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - docs: comprehensive README rewrite focused on production-readiness, cost comparison, quick setup, and strongest capabilities.
 - docs/ops: document the new dashboard structure and triage flow in observability and operations guides.
+- docs(bench): update benchmarks.md with 4-way comparison results (warm/cold proxy, VL native, Loki), Apple M5 Pro hardware spec, warmup design notes, and VictoriaLogs long-range tuning guide.
+
+### Performance
+
+- bench: warmup phase now runs at full benchmark concurrency with the same jitter as the real run, so the proxy cache is populated across the same time-window space the benchmark will query; warmup time is never counted in results.
+- e2e(vl): add VictoriaLogs block-cache and memory tuning flags to docker-compose (`-blockcache.missesBeforeCaching=1`, `-internStringCacheExpireDuration=15m`, `-memory.allowedPercent=75`) to improve repeated-query performance.
 
 ## [1.17.1] - 2026-04-25
 

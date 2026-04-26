@@ -65,6 +65,15 @@ services:
       # the circuit breaker on every label/series request. The mem_limit + maxQueryDuration
       # guards are sufficient protection without this flag.
       - "-search.maxQueryDuration=60s"
+      # Cache tuning: cache from the first miss (default=2) to maximise hit rate
+      # for repeated benchmark runs and warm-cache proxy measurements.
+      - "-blockcache.missesBeforeCaching=1"
+      # Intern short strings (labels, field names) for up to 15 min to reduce GC
+      # pressure during high-concurrency scans (default 5 min).
+      - "-internStringCacheExpireDuration=15m"
+      # Allow VL to use up to 75% of host RAM for its in-process caches before
+      # evicting. Higher than the default 60% is safe given the 5 g mem_limit cap.
+      - "-memory.allowedPercent=75"
     volumes:
       - vl-data:/vlogs
     healthcheck:
