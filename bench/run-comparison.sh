@@ -23,6 +23,7 @@ VL_URL="${VL_URL:-http://localhost:9428}"
 LOKI_METRICS="${LOKI_METRICS:-}"
 PROXY_METRICS="${PROXY_METRICS:-http://localhost:3100/metrics}"
 VL_METRICS="${VL_METRICS:-}"
+VL_DIRECT_URL="${VL_DIRECT_URL:-}"
 
 # Auto-detect Loki metrics if available.
 if [ -z "$LOKI_METRICS" ]; then
@@ -40,6 +41,14 @@ if [ -z "$VL_METRICS" ]; then
   fi
 fi
 
+# Auto-detect VL native LogsQL API for 3-way comparison.
+if [ -z "$VL_DIRECT_URL" ]; then
+  if curl -sf "$VL_URL/select/logsql/field_names?query=*" -o /dev/null 2>/dev/null; then
+    VL_DIRECT_URL="$VL_URL"
+    echo "✓ VictoriaLogs native LogsQL detected at $VL_DIRECT_URL (3-way comparison enabled)"
+  fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/results}"
@@ -50,6 +59,7 @@ echo "════════════════════════�
 echo " Loki target:   $LOKI_URL"
 echo " Proxy target:  $PROXY_URL"
 echo " VL backend:    ${VL_URL:-not configured}"
+echo " VL native:     ${VL_DIRECT_URL:-not configured (2-way only)}"
 echo " Loki metrics:  ${LOKI_METRICS:-not configured}"
 echo " Proxy metrics: ${PROXY_METRICS:-not configured}"
 echo " VL metrics:    ${VL_METRICS:-not configured}"
@@ -92,6 +102,7 @@ mkdir -p "$OUTPUT_DIR"
   --loki="$LOKI_URL" \
   --proxy="$PROXY_URL" \
   --vl="$VL_URL" \
+  --vl-direct="${VL_DIRECT_URL}" \
   --loki-metrics="$LOKI_METRICS" \
   --proxy-metrics="$PROXY_METRICS" \
   --vl-metrics="$VL_METRICS" \

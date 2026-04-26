@@ -1,13 +1,14 @@
-// loki-bench: read-path performance comparison between Loki (direct) and
-// VictoriaLogs via loki-vl-proxy. Measures throughput, latency percentiles,
-// CPU/memory overhead, and network efficiency across configurable concurrency
-// levels and workload types.
+// loki-bench: read-path performance comparison between Loki (direct),
+// VictoriaLogs via loki-vl-proxy, and VictoriaLogs native LogsQL API.
+// Measures throughput, latency percentiles, CPU/memory overhead, and
+// network efficiency across configurable concurrency levels and workloads.
 //
 // Usage:
 //
 //	loki-bench \
 //	  --loki=http://localhost:3101 \
 //	  --proxy=http://localhost:3100 \
+//	  --vl-direct=http://localhost:9428 \
 //	  --loki-metrics=http://localhost:3101/metrics \
 //	  --proxy-metrics=http://localhost:3100/metrics \
 //	  --workloads=small,heavy,long_range \
@@ -36,7 +37,8 @@ func main() {
 	var (
 		lokiURL      = flag.String("loki", "http://localhost:3101", "Loki direct API base URL")
 		proxyURL     = flag.String("proxy", "http://localhost:3100", "loki-vl-proxy base URL")
-		vlURL        = flag.String("vl", "", "VictoriaLogs direct API base URL (optional; used for resource tracking only)")
+		vlURL        = flag.String("vl", "", "VictoriaLogs API base URL (optional; for resource tracking)")
+		vlDirectURL  = flag.String("vl-direct", "", "VictoriaLogs native LogsQL API URL (optional; enables 3-way comparison)")
 		lokiMetrics  = flag.String("loki-metrics", "", "Loki /metrics URL for resource tracking (optional)")
 		proxyMetrics = flag.String("proxy-metrics", "", "Proxy /metrics URL for resource tracking (optional)")
 		vlMetrics    = flag.String("vl-metrics", "", "VictoriaLogs /metrics URL for resource tracking (optional)")
@@ -47,6 +49,7 @@ func main() {
 		warmup       = flag.Duration("warmup", 5*time.Second, "Warmup duration before each run (warms proxy cache)")
 		skipLoki     = flag.Bool("skip-loki", false, "Skip Loki target (benchmark proxy only)")
 		skipProxy    = flag.Bool("skip-proxy", false, "Skip proxy target (benchmark Loki only)")
+		skipVLDirect = flag.Bool("skip-vl-direct", false, "Skip VL-direct target (LogsQL native benchmark)")
 		verbose      = flag.Bool("verbose", false, "Print per-request errors")
 		version      = flag.String("version", "", "Version tag attached to results (e.g. v1.17.1)")
 	)
@@ -65,29 +68,46 @@ func main() {
 
 	ctx := context.Background()
 
+	// VL-native workloads use LogsQL syntax and VL-specific endpoints.
+	vlWorkloads := workload.VLByName(workloadNames, now)
+
 	var records []report.RunRecord
 
-	for _, wl := range workloads {
+	for i, wl := range workloads {
 		for _, conc := range concurrencies {
 			// vlMetricsURL is scraped alongside proxy runs to show VL backend resource impact.
 			vlMetricsURL := *vlMetrics
 			if vlMetricsURL == "" && *vlURL != "" {
 				vlMetricsURL = *vlURL + "/metrics"
 			}
+			// For vl_direct runs, we also scrape VL metrics (it IS the target).
+			vlDirectMetrics := vlMetricsURL
+			if vlDirectMetrics == "" && *vlDirectURL != "" {
+				vlDirectMetrics = *vlDirectURL + "/metrics"
+			}
 
-			targets := []struct {
+			// VL-direct workload queries (LogsQL) for this workload slot.
+			var vlDirectQueries []workload.Query
+			if i < len(vlWorkloads) {
+				vlDirectQueries = vlWorkloads[i].Queries
+			}
+
+			type target struct {
 				name       string
 				url        string
+				queries    []workload.Query
 				metricsURL string
-				vlMetrics  string // VL backend metrics to capture alongside this target
+				vlMetrics  string
 				skip       bool
-			}{
-				{"loki", *lokiURL, *lokiMetrics, "", *skipLoki},
-				{"proxy", *proxyURL, *proxyMetrics, vlMetricsURL, *skipProxy},
+			}
+			targets := []target{
+				{"loki", *lokiURL, wl.Queries, *lokiMetrics, "", *skipLoki},
+				{"proxy", *proxyURL, wl.Queries, *proxyMetrics, vlMetricsURL, *skipProxy},
+				{"vl_direct", *vlDirectURL, vlDirectQueries, vlDirectMetrics, "", *skipVLDirect || *vlDirectURL == ""},
 			}
 
 			for _, tgt := range targets {
-				if tgt.skip {
+				if tgt.skip || tgt.url == "" || len(tgt.queries) == 0 {
 					continue
 				}
 
@@ -101,7 +121,7 @@ func main() {
 						TargetURL:   tgt.url,
 						Concurrency: min(conc, 10),
 						Duration:    *warmup,
-						Queries:     wl.Queries,
+						Queries:     tgt.queries,
 					}
 					runner.Run(ctx, wCfg) // discard warmup result
 				}
@@ -127,7 +147,7 @@ func main() {
 					TargetURL:   tgt.url,
 					Concurrency: conc,
 					Duration:    *duration,
-					Queries:     wl.Queries,
+					Queries:     tgt.queries,
 					Verbose:     *verbose,
 				}
 				result := runner.Run(ctx, cfg)
