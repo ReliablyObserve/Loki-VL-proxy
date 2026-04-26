@@ -60,11 +60,11 @@ services:
       - "-search.maxQueueDuration=60s"
       # Cap individual query execution time. Default is 30s; long-range queries
       # that hit the memory limit get cancelled rather than hanging indefinitely.
+      # NOTE: -search.maxQueryTimeRange is intentionally omitted. It rejects queries
+      # with no time range (the proxy omits bounds on metadata queries), which trips
+      # the circuit breaker on every label/series request. The mem_limit + maxQueryDuration
+      # guards are sufficient protection without this flag.
       - "-search.maxQueryDuration=60s"
-      # Reject queries spanning more than 72h to bound per-query memory.
-      # Our longest workload query is 72h so nothing is rejected in practice,
-      # but this protects against runaway user queries in production.
-      - "-search.maxQueryTimeRange=72h"
     volumes:
       - vl-data:/vlogs
     healthcheck:
