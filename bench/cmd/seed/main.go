@@ -19,10 +19,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -289,30 +289,7 @@ func genLine(svc service, ts time.Time) string {
 }
 
 func buildStreams(ts time.Time, linesPerService int) []map[string]interface{} {
-	streams := make([]map[string]interface{}, 0, len(services))
-	for _, svc := range services {
-		values := make([][]string, 0, linesPerService)
-		for i := 0; i < linesPerService; i++ {
-			jitter := time.Duration(rand.Int63n(int64(time.Second * 29)))
-			entryTS := fmt.Sprintf("%d", ts.Add(jitter).UnixNano())
-			line := genLine(svc, ts.Add(jitter))
-			values = append(values, []string{entryTS, line})
-		}
-		streams = append(streams, map[string]interface{}{
-			"stream": map[string]string{
-				"app":        svc.app,
-				"namespace":  svc.namespace,
-				"job":        svc.namespace + "/" + svc.app,
-				"env":        svc.env,
-				"region":     svc.region,
-				"cluster":    svc.cluster,
-				"version":    svc.version,
-				"log_format": svc.format,
-			},
-			"values": values,
-		})
-	}
-	return streams
+	return buildStreamsFor(ts, linesPerService, services)
 }
 
 func pushLoki(lokiURL string, streams []map[string]interface{}) error {
@@ -344,25 +321,61 @@ func pushVL(vlURL string, streams []map[string]interface{}) error {
 }
 
 func main() {
-	lokiURL := flag.String("loki", "http://localhost:3101", "Loki push URL")
-	vlURL := flag.String("vl", "http://localhost:9428", "VictoriaLogs push URL")
-	days := flag.Int("days", 3, "Number of historical days to seed")
-	linesPerBatch := flag.Int("lines-per-batch", 200, "Log lines per service per time step")
-	batchInterval := flag.Duration("batch-interval", 30*time.Second, "Time step between batches")
-	skipLoki := flag.Bool("skip-loki", false, "Skip Loki ingestion")
-	skipVL := flag.Bool("skip-vl", false, "Skip VictoriaLogs ingestion")
+	lokiURL       := flag.String("loki", "http://localhost:3101", "Loki push URL")
+	vlURL         := flag.String("vl", "http://localhost:9428", "VictoriaLogs push URL")
+	days          := flag.Int("days", 7, "Days of historical data to seed")
+	serviceCount  := flag.Int("services", 12, "Number of service streams (cycles through built-in pool; add more regions for >12)")
+	ratePerSvc    := flag.Float64("rate", 0, "Target log lines/sec per service (overrides --lines-per-batch when set)")
+	linesPerBatch := flag.Int("lines-per-batch", 21, "Lines per service per time step (ignored when --rate is set)")
+	batchInterval := flag.Duration("batch-interval", 30*time.Second, "Simulated time step between push batches")
+	skipLoki      := flag.Bool("skip-loki", false, "Skip Loki ingestion")
+	skipVL        := flag.Bool("skip-vl", false, "Skip VictoriaLogs ingestion")
 	flag.Parse()
+
+	// When --rate is given, derive lines-per-batch from the target rate.
+	if *ratePerSvc > 0 {
+		computed := int(math.Round(*ratePerSvc * batchInterval.Seconds()))
+		if computed < 1 {
+			computed = 1
+		}
+		*linesPerBatch = computed
+	}
+
+	// Build the active service list by cycling through the built-in pool.
+	activeServices := make([]service, *serviceCount)
+	for i := range activeServices {
+		activeServices[i] = services[i%len(services)]
+		// Give duplicate services a unique region/cluster suffix so they form distinct streams.
+		if i >= len(services) {
+			activeServices[i].region = fmt.Sprintf("eu-west-%d", (i/len(services))+1)
+			activeServices[i].cluster = fmt.Sprintf("eks-eu-%d", (i/len(services))+1)
+		}
+	}
 
 	end := time.Now().Add(-time.Minute)
 	start := end.Add(-time.Duration(*days) * 24 * time.Hour)
 
 	totalBatches := int(end.Sub(start) / *batchInterval)
-	totalLines := totalBatches * *linesPerBatch * len(services)
-	fmt.Printf("Seeding %d days from %s to %s\n", *days, start.Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04"))
-	fmt.Printf("  %d batches × %d lines × %d streams = ~%d total log lines\n",
-		totalBatches, *linesPerBatch, len(services), totalLines)
-	fmt.Printf("  targets: loki=%v  vl=%v\n\n", !*skipLoki, !*skipVL)
+	totalLines := totalBatches * *linesPerBatch * len(activeServices)
+	linesPerHour := float64(*linesPerBatch) * float64(len(activeServices)) * (3600.0 / batchInterval.Seconds())
+	linesPerMin := linesPerHour / 60.0
+	effectiveRate := float64(*linesPerBatch) / batchInterval.Seconds()
 
+	fmt.Printf("═══════════════════════════════════════════════════════════\n")
+	fmt.Printf(" Seed Configuration\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════\n")
+	fmt.Printf("  Period:        %d days  (%s → %s)\n", *days, start.Format("2006-01-02 15:04"), end.Format("2006-01-02 15:04"))
+	fmt.Printf("  Services:      %d streams\n", len(activeServices))
+	fmt.Printf("  Rate/service:  %.1f lines/sec  (~%.0f lines/min per service)\n",
+		effectiveRate, effectiveRate*60)
+	fmt.Printf("  Total rate:    %.0f lines/sec  (~%.0f/min  ~%.0f/hr)\n",
+		effectiveRate*float64(len(activeServices)), linesPerMin, linesPerHour)
+	fmt.Printf("  Total volume:  ~%s lines  (%d batches × %d lines × %d streams)\n",
+		fmtCount(totalLines), totalBatches, *linesPerBatch, len(activeServices))
+	fmt.Printf("  Targets:       loki=%v  vl=%v\n", !*skipLoki, !*skipVL)
+	fmt.Printf("═══════════════════════════════════════════════════════════\n\n")
+
+	startWall := time.Now()
 	var pushed, errCount, batchesOK int
 	reportEvery := totalBatches / 20
 	if reportEvery < 1 {
@@ -370,7 +383,7 @@ func main() {
 	}
 
 	for ts := start; ts.Before(end); ts = ts.Add(*batchInterval) {
-		streams := buildStreams(ts, *linesPerBatch)
+		streams := buildStreamsFor(ts, *linesPerBatch, activeServices)
 
 		if !*skipLoki {
 			if err := pushLoki(*lokiURL, streams); err != nil {
@@ -385,21 +398,67 @@ func main() {
 			}
 		}
 
-		pushed += *linesPerBatch * len(services)
+		pushed += *linesPerBatch * len(activeServices)
 		batchesOK++
 
 		if batchesOK%reportEvery == 0 {
+			elapsed := time.Since(startWall)
+			wallRate := float64(pushed) / elapsed.Seconds()
+			eta := time.Duration(float64(totalLines-pushed)/wallRate) * time.Second
 			pct := float64(ts.Sub(start)) / float64(end.Sub(start)) * 100
-			rate := float64(pushed) / time.Since(start.Add(-*batchInterval*time.Duration(batchesOK))).Seconds()
-			fmt.Printf("  %.0f%% done — %s — %d lines pushed, %.0f lines/s, %d errors\n",
-				pct, ts.Format("2006-01-02 15:04"), pushed, rate, errCount)
+			fmt.Printf("  %.0f%% — %s — %s lines pushed  %.0f lines/s wall  ETA %s  errors=%d\n",
+				pct, ts.Format("2006-01-02 15:04"),
+				fmtCount(pushed), wallRate, eta.Truncate(time.Second), errCount)
 		}
 	}
 
-	fmt.Printf("\nDone. %d lines pushed across %d batches. Errors: %d.\n",
-		pushed, batchesOK, errCount)
-	fmt.Printf("Both backends have %s of dense data from %d service streams (%d services × %d regions).\n",
-		strings.TrimSuffix((*batchInterval * time.Duration(batchesOK)).Truncate(time.Minute).String(), "0s"),
-		len(services), 10, 2)
-	fmt.Println("\nNow run: ./run-comparison.sh --workloads=small,heavy,long_range")
+	elapsed := time.Since(startWall)
+	fmt.Printf("\n═══════════════════════════════════════════════════════════\n")
+	fmt.Printf(" Seed Complete\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════\n")
+	fmt.Printf("  Lines pushed:  %s across %d batches\n", fmtCount(pushed), batchesOK)
+	fmt.Printf("  Wall time:     %s  (%.0f lines/s effective)\n",
+		elapsed.Truncate(time.Second), float64(pushed)/elapsed.Seconds())
+	fmt.Printf("  Errors:        %d\n", errCount)
+	fmt.Printf("  Data shape:    %d services  %.1f lines/sec/svc  %.0f lines/hr total\n",
+		len(activeServices), effectiveRate, linesPerHour)
+	fmt.Printf("\nNow run: ./bench/run-comparison.sh --workloads=small,heavy,long_range\n")
+}
+
+func fmtCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// buildStreamsFor is like buildStreams but uses a configurable service list.
+func buildStreamsFor(ts time.Time, linesPerSvc int, svcs []service) []map[string]interface{} {
+	streams := make([]map[string]interface{}, 0, len(svcs))
+	for _, svc := range svcs {
+		values := make([][]string, 0, linesPerSvc)
+		for i := 0; i < linesPerSvc; i++ {
+			lineTS := ts.Add(time.Duration(i) * time.Second / time.Duration(linesPerSvc))
+			line := genLine(svc, lineTS)
+			values = append(values, []string{fmt.Sprintf("%d", lineTS.UnixNano()), line})
+		}
+		streams = append(streams, map[string]interface{}{
+			"stream": map[string]string{
+				"app":        svc.app,
+				"namespace":  svc.namespace,
+				"job":        svc.namespace + "/" + svc.app,
+				"env":        svc.env,
+				"region":     svc.region,
+				"cluster":    svc.cluster,
+				"version":    svc.version,
+				"log_format": svc.format,
+			},
+			"values": values,
+		})
+	}
+	return streams
 }

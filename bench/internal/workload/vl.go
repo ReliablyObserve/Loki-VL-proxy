@@ -65,17 +65,17 @@ func VLSmall(now time.Time) Workload {
 			},
 		},
 		{
-			Name: "stats_rate_by_app",
+			Name: "stats_count_by_app",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start5m}, "end": {end}, "step": {step5m},
 			},
 		},
 		{
 			Name:   "hits_5m",
 			Path:   "/select/logsql/hits",
-			Params: url.Values{"query": {`namespace:"prod"`}, "start": {start5m}, "end": {end}, "granularity": {"1m"}},
+			Params: url.Values{"query": {`namespace:"prod"`}, "start": {start5m}, "end": {end}, "step": {"1m"}},
 		},
 		{
 			Name:   "stream_ids_ns",
@@ -126,18 +126,18 @@ func VLHeavy(now time.Time) Workload {
 			Params: url.Values{"query": {`namespace:"prod" ~"status=(4|5)[0-9][0-9]"`}, "start": {start30m}, "end": {end}, "limit": {"500"}},
 		},
 		{
-			Name: "stats_rate_by_app_1h",
+			Name: "stats_count_by_app_1h",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start1h}, "end": {end}, "step": {step1m},
 			},
 		},
 		{
-			Name: "stats_rate_errors_by_app",
+			Name: "stats_count_errors_by_app",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`app:"api-gateway" | json | status:>=400 | rate() by (app)`},
+				"query": {`app:"api-gateway" | json | status:>=400 | count() by (app)`},
 				"start": {start1h}, "end": {end}, "step": {step1m},
 			},
 		},
@@ -150,18 +150,18 @@ func VLHeavy(now time.Time) Workload {
 			},
 		},
 		{
-			Name: "stats_bytes_rate_1h",
+			Name: "stats_count_bytes_approx",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | bytes_rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start1h}, "end": {end}, "step": {step1m},
 			},
 		},
 		{
-			Name: "stats_topk_rate_1h",
+			Name: "stats_count_topk_approx",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start1h}, "end": {end}, "step": {step1m},
 			},
 		},
@@ -173,7 +173,7 @@ func VLHeavy(now time.Time) Workload {
 		{
 			Name:   "hits_1h",
 			Path:   "/select/logsql/hits",
-			Params: url.Values{"query": {`namespace:"prod"`}, "start": {start1h}, "end": {end}, "granularity": {"5m"}},
+			Params: url.Values{"query": {`namespace:"prod"`}, "start": {start1h}, "end": {end}, "step": {"5m"}},
 		},
 		{
 			Name:   "log_full_volume_1h",
@@ -216,23 +216,23 @@ func VLLongRange(now time.Time) Workload {
 			Params: url.Values{"query": {`namespace:"prod" "error"`}, "start": {start48h}, "end": {end}, "limit": {"1000"}},
 		},
 		{
-			Name: "stats_rate_6h",
+			Name: "stats_count_by_app_6h",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start6h}, "end": {end}, "step": {"5m"},
 			},
 		},
 		{
-			Name: "stats_rate_24h",
+			Name: "stats_count_by_app_24h",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start24h}, "end": {end}, "step": {"5m"},
 			},
 		},
 		{
-			Name: "stats_count_48h",
+			Name: "stats_count_by_level_48h",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
 				"query": {`namespace:"prod" | count() by (level)`},
@@ -240,10 +240,10 @@ func VLLongRange(now time.Time) Workload {
 			},
 		},
 		{
-			Name: "stats_bytes_72h",
+			Name: "stats_count_by_app_72h",
 			Path: "/select/logsql/stats_query",
 			Params: url.Values{
-				"query": {`namespace:"prod" | bytes_rate() by (app)`},
+				"query": {`namespace:"prod" | count() by (app)`},
 				"start": {start72h}, "end": {end}, "step": {"1h"},
 			},
 		},
