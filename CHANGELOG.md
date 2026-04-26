@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bench(pprof): `loki-bench` captures CPU, heap, alloc, and goroutine profiles from proxy `/debug/pprof/*` endpoints during each run; profiles written to `bench/results/pprof/<workload>-c<N>-<target>-<type>.pprof` for flamegraph analysis.
+- bench(cache-disabled): added `-cache-disabled` flag to the proxy so `run-comparison.sh` can spawn a confirmed zero-cache target without TTL tricks; this is the fourth target in the 4-way comparison (`loki`, `proxy-warm`, `proxy-cold`, `vl-native`).
+- bench(verify): added `--verify` flag to `loki-bench` for cross-target result correctness validation before benchmarking.
+
 ### Performance
 
 - perf(proxy): cache parsed stream label maps by `_stream` string value to eliminate redundant label parsing on repeated log entries; copy on write to prevent cache mutation bugs.
