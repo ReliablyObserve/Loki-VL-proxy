@@ -178,6 +178,50 @@ request IDs, user IDs, IP addresses) do not create stream explosion: they
 remain ordinary indexed fields instead of becoming label-cardinality problems
 that force smaller chunks and index bloat.
 
+### Real-Life Tested VL + Proxy Combined Envelope
+
+The [Cost Model](cost-model.md) page documents a real-life tested VictoriaLogs
+deployment running `310 GiB/day` raw ingest with `800 M` total entries at
+`54.9x` compression. The measured process envelope for that deployment:
+
+| Component | Cores | Memory |
+|---|---:|---:|
+| `vlstorage` | `1.0` | `5.0 GiB` |
+| `vlinsert` | `0.1` | `0.6 GiB` |
+| `vlselect` | `0.1` | `0.25 GiB` |
+| **VL service total** | **`1.2`** | **`5.85 GiB`** |
+
+Note: that snapshot was taken at `0 rps` read traffic, so `vlselect` is at
+its write-path floor. Under active read load, add roughly `0.1–0.3` cores
+and `0.25–1.0 GiB` to `vlselect` proportional to query volume. This does
+not change the order-of-magnitude ratio versus Loki's published floor.
+
+Adding the proxy layer on top of that real baseline:
+
+| Component | Cores (typical) | Memory (typical) |
+|---|---|---|
+| VictoriaLogs service (measured) | `1.2` | `5.85 GiB` |
+| loki-vl-proxy, cache warm, low traffic | `< 0.01` | `~30–50 MB` |
+| loki-vl-proxy, 50 concurrent clients | `~0.05` | `~100–150 MB` |
+| loki-vl-proxy, 500 concurrent clients | `~0.1–0.2` | up to `256 MB` (default L1 cap) |
+
+Combined VL + proxy versus Loki's published compute floor at the same
+`~310 GiB/day` ingest scale:
+
+| Layer | Cores | Memory |
+|---|---:|---:|
+| VictoriaLogs service (measured) | `1.2` | `5.85 GiB` |
+| loki-vl-proxy (read load, default config) | `~0.1–0.2` | `~0.15–0.26 GiB` |
+| **Combined VL + proxy** | **`~1.4`** | **`~6.1 GiB`** |
+| **Loki published floor (`<3 TB/day`)** | **`38`** | **`59 GiB`** |
+| **Ratio (Loki / VL + proxy)** | **`~27x`** | **`~9.7x`** |
+
+To measure actual proxy overhead in your environment, run `loki-bench` from the
+project's `bench/` directory against a live proxy+VL stack and compare
+before/after `/metrics` scrapes for `process_cpu_seconds_total` and
+`process_resident_memory_bytes`. See [bench/README.md](../bench/README.md) for
+usage.
+
 ### Loki replication and cross-zone write costs
 
 The Loki zone-aware replication documentation explicitly states that
