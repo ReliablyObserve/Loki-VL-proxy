@@ -36,8 +36,10 @@ func main() {
 	var (
 		lokiURL      = flag.String("loki", "http://localhost:3101", "Loki direct API base URL")
 		proxyURL     = flag.String("proxy", "http://localhost:3100", "loki-vl-proxy base URL")
+		vlURL        = flag.String("vl", "", "VictoriaLogs direct API base URL (optional; used for resource tracking only)")
 		lokiMetrics  = flag.String("loki-metrics", "", "Loki /metrics URL for resource tracking (optional)")
 		proxyMetrics = flag.String("proxy-metrics", "", "Proxy /metrics URL for resource tracking (optional)")
+		vlMetrics    = flag.String("vl-metrics", "", "VictoriaLogs /metrics URL for resource tracking (optional)")
 		workloadList = flag.String("workloads", "small,heavy,long_range", "Comma-separated workloads: small,heavy,long_range")
 		clientList   = flag.String("clients", "10,50,100,500", "Comma-separated concurrency levels")
 		duration     = flag.Duration("duration", 30*time.Second, "Test duration per concurrency level per workload")
@@ -67,14 +69,21 @@ func main() {
 
 	for _, wl := range workloads {
 		for _, conc := range concurrencies {
+			// vlMetricsURL is scraped alongside proxy runs to show VL backend resource impact.
+			vlMetricsURL := *vlMetrics
+			if vlMetricsURL == "" && *vlURL != "" {
+				vlMetricsURL = *vlURL + "/metrics"
+			}
+
 			targets := []struct {
 				name       string
 				url        string
 				metricsURL string
+				vlMetrics  string // VL backend metrics to capture alongside this target
 				skip       bool
 			}{
-				{"loki", *lokiURL, *lokiMetrics, *skipLoki},
-				{"proxy", *proxyURL, *proxyMetrics, *skipProxy},
+				{"loki", *lokiURL, *lokiMetrics, "", *skipLoki},
+				{"proxy", *proxyURL, *proxyMetrics, vlMetricsURL, *skipProxy},
 			}
 
 			for _, tgt := range targets {
@@ -97,12 +106,18 @@ func main() {
 					runner.Run(ctx, wCfg) // discard warmup result
 				}
 
-				// Snapshot before.
-				var resBefore metricscrape.ResourceSnapshot
+				// Snapshot before (target + VL backend if configured).
+				var resBefore, vlBefore metricscrape.ResourceSnapshot
 				if tgt.metricsURL != "" {
 					resBefore, err = metricscrape.Scrape(tgt.metricsURL)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "  warn: resource scrape before: %v\n", err)
+					}
+				}
+				if tgt.vlMetrics != "" {
+					vlBefore, err = metricscrape.Scrape(tgt.vlMetrics)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  warn: vl resource scrape before: %v\n", err)
 					}
 				}
 
@@ -119,14 +134,21 @@ func main() {
 				result.Workload = wl.Name
 
 				// Snapshot after.
-				var resAfter metricscrape.ResourceSnapshot
+				var resAfter, vlAfter metricscrape.ResourceSnapshot
 				if tgt.metricsURL != "" {
 					resAfter, err = metricscrape.Scrape(tgt.metricsURL)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "  warn: resource scrape after: %v\n", err)
 					}
 				}
+				if tgt.vlMetrics != "" {
+					vlAfter, err = metricscrape.Scrape(tgt.vlMetrics)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  warn: vl resource scrape after: %v\n", err)
+					}
+				}
 				delta := resBefore.Delta(resAfter)
+				vlDelta := vlBefore.Delta(vlAfter)
 
 				// Print quick summary.
 				s := result.Overall
@@ -139,6 +161,10 @@ func main() {
 				if tgt.metricsURL != "" {
 					fmt.Printf("  ✓ cpu=%.3f s  rss=%.0f MB  heap=%.0f MB  gc_cycles=%.0f\n",
 						delta.CPUSeconds, delta.MemRSSBytes/1e6, delta.HeapInUseBytes/1e6, delta.GCCycles)
+				}
+				if tgt.vlMetrics != "" {
+					fmt.Printf("  ✓ vl backend: cpu=%.3f s  rss=%.0f MB  heap=%.0f MB\n",
+						vlDelta.CPUSeconds, vlDelta.MemRSSBytes/1e6, vlDelta.HeapInUseBytes/1e6)
 				}
 
 				records = append(records, report.RunRecord{
@@ -153,6 +179,9 @@ func main() {
 					ResourceBefore: resBefore,
 					ResourceAfter:  resAfter,
 					ResourceDelta:  delta,
+					VLBefore:       vlBefore,
+					VLAfter:        vlAfter,
+					VLDelta:        vlDelta,
 				})
 			}
 		}

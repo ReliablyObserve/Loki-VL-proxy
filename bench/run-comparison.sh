@@ -19,14 +19,24 @@ set -euo pipefail
 
 LOKI_URL="${LOKI_URL:-http://localhost:3101}"
 PROXY_URL="${PROXY_URL:-http://localhost:3100}"
+VL_URL="${VL_URL:-http://localhost:9428}"
 LOKI_METRICS="${LOKI_METRICS:-}"
 PROXY_METRICS="${PROXY_METRICS:-http://localhost:3100/metrics}"
+VL_METRICS="${VL_METRICS:-}"
 
 # Auto-detect Loki metrics if available.
 if [ -z "$LOKI_METRICS" ]; then
   if curl -sf "$LOKI_URL/metrics" -o /dev/null 2>/dev/null; then
     LOKI_METRICS="$LOKI_URL/metrics"
     echo "✓ Loki metrics detected at $LOKI_METRICS"
+  fi
+fi
+
+# Auto-detect VictoriaLogs metrics if available.
+if [ -z "$VL_METRICS" ]; then
+  if curl -sf "$VL_URL/metrics" -o /dev/null 2>/dev/null; then
+    VL_METRICS="$VL_URL/metrics"
+    echo "✓ VictoriaLogs metrics detected at $VL_METRICS"
   fi
 fi
 
@@ -39,16 +49,17 @@ echo " loki-vl-proxy Read Performance Benchmark"
 echo "════════════════════════════════════════════════════════════"
 echo " Loki target:   $LOKI_URL"
 echo " Proxy target:  $PROXY_URL"
+echo " VL backend:    ${VL_URL:-not configured}"
 echo " Loki metrics:  ${LOKI_METRICS:-not configured}"
 echo " Proxy metrics: ${PROXY_METRICS:-not configured}"
+echo " VL metrics:    ${VL_METRICS:-not configured}"
 echo " Output:        $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════"
 echo
 
 # Build the tool.
 echo "Building loki-bench..."
-cd "$REPO_ROOT"
-go build -o /tmp/loki-bench ./bench/cmd/loki-bench/
+(cd "$SCRIPT_DIR" && go build -o /tmp/loki-bench ./cmd/loki-bench/)
 echo "✓ Built /tmp/loki-bench"
 echo
 
@@ -80,8 +91,10 @@ mkdir -p "$OUTPUT_DIR"
 /tmp/loki-bench \
   --loki="$LOKI_URL" \
   --proxy="$PROXY_URL" \
+  --vl="$VL_URL" \
   --loki-metrics="$LOKI_METRICS" \
   --proxy-metrics="$PROXY_METRICS" \
+  --vl-metrics="$VL_METRICS" \
   --output="$OUTPUT_DIR" \
   "$@"
 

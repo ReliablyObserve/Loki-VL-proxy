@@ -50,7 +50,7 @@ Shapes that now return HTTP 400:
 |---|---|
 | Binary operation on log/pipeline expressions | `{app="x"} == {app="y"}`, `count_over_time({app="x"}[5m]) + {app="y"}` |
 | Malformed stream selector | `{app=}`, unclosed `{app="x"` |
-| Empty query or missing stream selector | bare `| json` with no `{...}` prefix |
+| Empty query or missing stream selector | bare `| json` with no stream-selector prefix |
 
 The `-patterns-enabled` flag defaults to `true` and controls whether pattern-match line filters (`|>` / `!>`) are accepted.
 
@@ -64,11 +64,11 @@ A bare `| unwrap` with no field name (emitted by the Grafana query builder while
 
 ### v1.17.1 — Metric Label Pollution Fix
 
-When `detected_level` is synthesized from the `level` label in metric aggregation results (for example `sum by (detected_level)`), the raw `level` label is now removed from the result series. Before this fix `sum by (detected_level)` returned `{detected_level:"error", level:"error"}`; after it returns only `{detected_level:"error"}`, matching Loki's output.
+When `detected_level` is synthesized from the `level` label in metric aggregation results (for example `sum by (detected_level)`), the raw `level` label is now removed from the result series. Before this fix `sum by (detected_level)` returned a series with both `detected_level` and `level` set to `"error"`; after it returns only `detected_level="error"`, matching Loki's output.
 
 ### v1.17.1 — Nested JSON Objects Excluded From detected_fields
 
-Nested JSON objects (for example `service={"name":"api-gateway"}`) are now skipped during the detected_fields body scan. Before this fix these appeared as filterable fields with a raw JSON string as their value, which broke the Grafana Drilldown field breakdown panel.
+Nested JSON objects (for example a field whose value is itself a JSON object such as `service.name = "api-gateway"` encoded as an object) are now skipped during the detected_fields body scan. Before this fix these appeared as filterable fields with a raw JSON string as their value, which broke the Grafana Drilldown field breakdown panel.
 
 ## Edge Cases Covered
 

@@ -18,17 +18,21 @@ import (
 
 // RunRecord holds a full benchmark run for one target × workload × concurrency.
 type RunRecord struct {
-	Timestamp   time.Time
-	Version     string // optional version tag
-	Target      string // "loki" | "proxy"
-	TargetURL   string
+	Timestamp    time.Time
+	Version      string // optional version tag
+	Target       string // "loki" | "proxy"
+	TargetURL    string
 	WorkloadName string
-	Concurrency int
-	Duration    time.Duration
-	Result      runner.Result
+	Concurrency  int
+	Duration     time.Duration
+	Result       runner.Result
 	ResourceBefore metricscrape.ResourceSnapshot
 	ResourceAfter  metricscrape.ResourceSnapshot
 	ResourceDelta  metricscrape.Delta
+	// VL backend resource deltas captured alongside proxy runs.
+	VLBefore metricscrape.ResourceSnapshot
+	VLAfter  metricscrape.ResourceSnapshot
+	VLDelta  metricscrape.Delta
 }
 
 // ComparisonRow holds Loki vs Proxy stats for one metric at one concurrency level.
@@ -245,6 +249,40 @@ func WriteText(w io.Writer, records []RunRecord) {
 				p.proxy.ResourceDelta.NetRxBytes/1e6, p.proxy.ResourceDelta.NetTxBytes/1e6)
 		}
 		printRow("Network I/O", lNet, pNet, na)
+
+		// VL backend resource breakdown (captured alongside proxy runs).
+		if p.proxy != nil && p.proxy.VLDelta.CPUSeconds > 0 {
+			fmt.Fprintf(w, "%s\n", strings.Repeat("─", 90))
+			fmt.Fprintf(w, "  VictoriaLogs Backend (during proxy run)\n")
+			fmt.Fprintf(w, "%s\n", strings.Repeat("─", 90))
+			printRow("VL CPU consumed", na, fmt.Sprintf("%.3f cpu·s", p.proxy.VLDelta.CPUSeconds), na)
+			printRow("VL RSS Memory", na, fmtMB(p.proxy.VLDelta.MemRSSBytes), na)
+			printRow("VL Heap In-Use", na, fmtMB(p.proxy.VLDelta.HeapInUseBytes), na)
+			// Combined proxy+VL vs Loki.
+			if p.loki != nil {
+				combinedCPU := p.proxy.ResourceDelta.CPUSeconds + p.proxy.VLDelta.CPUSeconds
+				combinedRSS := p.proxy.ResourceDelta.MemRSSBytes + p.proxy.VLDelta.MemRSSBytes
+				lCPU := p.loki.ResourceDelta.CPUSeconds
+				lRSS := p.loki.ResourceDelta.MemRSSBytes
+				fmt.Fprintf(w, "%s\n", strings.Repeat("─", 90))
+				fmt.Fprintf(w, "  Summary: Loki vs VL+Proxy Combined\n")
+				fmt.Fprintf(w, "%s\n", strings.Repeat("─", 90))
+				printRow("Total CPU (proxy+VL)",
+					fmt.Sprintf("%.3f cpu·s", lCPU),
+					fmt.Sprintf("%.3f cpu·s", combinedCPU),
+					func() string {
+						if lCPU == 0 { return na }
+						return fmt.Sprintf("%.2fx less", lCPU/combinedCPU)
+					}())
+				printRow("Total RSS (proxy+VL)",
+					fmtMB(lRSS),
+					fmtMB(combinedRSS),
+					func() string {
+						if lRSS == 0 { return na }
+						return fmt.Sprintf("%.2fx less", lRSS/combinedRSS)
+					}())
+			}
+		}
 
 		// Per-query breakdown
 		if p.proxy != nil && len(p.proxy.Result.ByQuery) > 0 {

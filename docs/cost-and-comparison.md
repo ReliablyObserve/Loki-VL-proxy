@@ -219,7 +219,7 @@ Combined VL + proxy versus Loki's published compute floor at the same
 To measure actual proxy overhead in your environment, run `loki-bench` from the
 project's `bench/` directory against a live proxy+VL stack and compare
 before/after `/metrics` scrapes for `process_cpu_seconds_total` and
-`process_resident_memory_bytes`. See [bench/README.md](../bench/README.md) for
+`process_resident_memory_bytes`. See `bench/README.md` in the repository root for
 usage.
 
 ### Loki replication and cross-zone write costs
