@@ -1,0 +1,232 @@
+// loki-bench: read-path performance comparison between Loki (direct) and
+// VictoriaLogs via loki-vl-proxy. Measures throughput, latency percentiles,
+// CPU/memory overhead, and network efficiency across configurable concurrency
+// levels and workload types.
+//
+// Usage:
+//
+//	loki-bench \
+//	  --loki=http://localhost:3101 \
+//	  --proxy=http://localhost:3100 \
+//	  --loki-metrics=http://localhost:3101/metrics \
+//	  --proxy-metrics=http://localhost:3100/metrics \
+//	  --workloads=small,heavy,long_range \
+//	  --clients=10,50,100,500 \
+//	  --duration=30s \
+//	  --output=results/
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/metricscrape"
+	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/report"
+	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/runner"
+	"github.com/ReliablyObserve/Loki-VL-proxy/bench/internal/workload"
+)
+
+func main() {
+	var (
+		lokiURL      = flag.String("loki", "http://localhost:3101", "Loki direct API base URL")
+		proxyURL     = flag.String("proxy", "http://localhost:3100", "loki-vl-proxy base URL")
+		lokiMetrics  = flag.String("loki-metrics", "", "Loki /metrics URL for resource tracking (optional)")
+		proxyMetrics = flag.String("proxy-metrics", "", "Proxy /metrics URL for resource tracking (optional)")
+		workloadList = flag.String("workloads", "small,heavy,long_range", "Comma-separated workloads: small,heavy,long_range")
+		clientList   = flag.String("clients", "10,50,100,500", "Comma-separated concurrency levels")
+		duration     = flag.Duration("duration", 30*time.Second, "Test duration per concurrency level per workload")
+		outputDir    = flag.String("output", "results", "Output directory for JSON and markdown reports")
+		warmup       = flag.Duration("warmup", 5*time.Second, "Warmup duration before each run (warms proxy cache)")
+		skipLoki     = flag.Bool("skip-loki", false, "Skip Loki target (benchmark proxy only)")
+		skipProxy    = flag.Bool("skip-proxy", false, "Skip proxy target (benchmark Loki only)")
+		verbose      = flag.Bool("verbose", false, "Print per-request errors")
+		version      = flag.String("version", "", "Version tag attached to results (e.g. v1.17.1)")
+	)
+	flag.Parse()
+
+	concurrencies, err := parseInts(*clientList)
+	if err != nil {
+		fatalf("--clients: %v", err)
+	}
+	workloadNames := splitTrim(*workloadList)
+	now := time.Now()
+	workloads := workload.ByName(workloadNames, now)
+	if len(workloads) == 0 {
+		fatalf("no matching workloads (available: small,heavy,long_range)")
+	}
+
+	ctx := context.Background()
+
+	var records []report.RunRecord
+
+	for _, wl := range workloads {
+		for _, conc := range concurrencies {
+			targets := []struct {
+				name       string
+				url        string
+				metricsURL string
+				skip       bool
+			}{
+				{"loki", *lokiURL, *lokiMetrics, *skipLoki},
+				{"proxy", *proxyURL, *proxyMetrics, *skipProxy},
+			}
+
+			for _, tgt := range targets {
+				if tgt.skip {
+					continue
+				}
+
+				fmt.Printf("\n▶ workload=%-12s  concurrency=%4d  target=%s\n",
+					wl.Name, conc, tgt.name)
+
+				// Warmup phase (warms caches, esp. proxy window cache).
+				if *warmup > 0 {
+					fmt.Printf("  warming up for %s...\n", *warmup)
+					wCfg := runner.Config{
+						TargetURL:   tgt.url,
+						Concurrency: min(conc, 10),
+						Duration:    *warmup,
+						Queries:     wl.Queries,
+					}
+					runner.Run(ctx, wCfg) // discard warmup result
+				}
+
+				// Snapshot before.
+				var resBefore metricscrape.ResourceSnapshot
+				if tgt.metricsURL != "" {
+					resBefore, err = metricscrape.Scrape(tgt.metricsURL)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  warn: resource scrape before: %v\n", err)
+					}
+				}
+
+				// Benchmark run.
+				fmt.Printf("  running %s (concurrency=%d duration=%s)...\n", tgt.name, conc, *duration)
+				cfg := runner.Config{
+					TargetURL:   tgt.url,
+					Concurrency: conc,
+					Duration:    *duration,
+					Queries:     wl.Queries,
+					Verbose:     *verbose,
+				}
+				result := runner.Run(ctx, cfg)
+				result.Workload = wl.Name
+
+				// Snapshot after.
+				var resAfter metricscrape.ResourceSnapshot
+				if tgt.metricsURL != "" {
+					resAfter, err = metricscrape.Scrape(tgt.metricsURL)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  warn: resource scrape after: %v\n", err)
+					}
+				}
+				delta := resBefore.Delta(resAfter)
+
+				// Print quick summary.
+				s := result.Overall
+				fmt.Printf("  ✓ throughput=%.0f req/s  p50=%s  p90=%s  p99=%s  errors=%.2f%%  bytes=%.1f KB/req\n",
+					s.Throughput,
+					fmtDur(s.P50), fmtDur(s.P90), fmtDur(s.P99),
+					s.ErrorRate*100,
+					float64(s.TotalBytes)/float64(max(s.Count, 1))/1e3,
+				)
+				if tgt.metricsURL != "" {
+					fmt.Printf("  ✓ cpu=%.3f s  rss=%.0f MB  heap=%.0f MB  gc_cycles=%.0f\n",
+						delta.CPUSeconds, delta.MemRSSBytes/1e6, delta.HeapInUseBytes/1e6, delta.GCCycles)
+				}
+
+				records = append(records, report.RunRecord{
+					Timestamp:      now,
+					Version:        *version,
+					Target:         tgt.name,
+					TargetURL:      tgt.url,
+					WorkloadName:   wl.Name,
+					Concurrency:    conc,
+					Duration:       *duration,
+					Result:         result,
+					ResourceBefore: resBefore,
+					ResourceAfter:  resAfter,
+					ResourceDelta:  delta,
+				})
+			}
+		}
+	}
+
+	// Write outputs.
+	fmt.Printf("\n%s\n", strings.Repeat("═", 90))
+	report.WriteText(os.Stdout, records)
+
+	ts := now.Format("2006-01-02T15-04-05")
+	jsonPath := filepath.Join(*outputDir, fmt.Sprintf("bench-%s.json", ts))
+	mdPath := filepath.Join(*outputDir, fmt.Sprintf("bench-%s.md", ts))
+
+	if err := report.WriteJSON(jsonPath, records); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: write JSON: %v\n", err)
+	} else {
+		fmt.Printf("JSON results: %s\n", jsonPath)
+	}
+	if err := report.WriteMarkdown(mdPath, records); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: write markdown: %v\n", err)
+	} else {
+		fmt.Printf("Markdown results: %s\n", mdPath)
+	}
+}
+
+func parseInts(s string) ([]int, error) {
+	parts := splitTrim(s)
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("not an integer: %q", p)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func splitTrim(s string) []string {
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func fmtDur(d time.Duration) string {
+	if d == 0 {
+		return "—"
+	}
+	if d < time.Millisecond {
+		return fmt.Sprintf("%.0fµs", float64(d.Microseconds()))
+	}
+	return fmt.Sprintf("%.1fms", float64(d.Milliseconds()))
+}
+
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "loki-bench: "+format+"\n", args...)
+	os.Exit(1)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
