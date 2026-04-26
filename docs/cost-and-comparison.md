@@ -178,49 +178,84 @@ request IDs, user IDs, IP addresses) do not create stream explosion: they
 remain ordinary indexed fields instead of becoming label-cardinality problems
 that force smaller chunks and index bloat.
 
-### Real-Life Tested VL + Proxy Combined Envelope
+### VL + Proxy Combined Envelope (Reference Estimates)
 
-The [Cost Model](cost-model.md) page documents a real-life tested VictoriaLogs
-deployment running `310 GiB/day` raw ingest with `800 M` total entries at
-`54.9x` compression. The measured process envelope for that deployment:
+:::caution Not a 1:1 controlled comparison
+The table below mixes three independent data sources that were **not measured
+simultaneously against the same workload**. Treat it as a directional reference,
+not a benchmark result. Run `loki-bench` (see below) to get real 1:1 numbers
+from your own environment.
+:::
 
-| Component | Cores | Memory |
-|---|---:|---:|
-| `vlstorage` | `1.0` | `5.0 GiB` |
-| `vlinsert` | `0.1` | `0.6 GiB` |
-| `vlselect` | `0.1` | `0.25 GiB` |
-| **VL service total** | **`1.2`** | **`5.85 GiB`** |
+**Source 1 — VL service envelope** (real, from [Cost Model](cost-model.md)):
+A production VictoriaLogs deployment running `310 GiB/day` raw ingest,
+`800 M` total entries, `54.9x` compression. Process snapshot **at 0 rps read
+traffic**, so `vlselect` reflects only the write-path floor.
 
-Note: that snapshot was taken at `0 rps` read traffic, so `vlselect` is at
-its write-path floor. Under active read load, add roughly `0.1–0.3` cores
-and `0.25–1.0 GiB` to `vlselect` proportional to query volume. This does
-not change the order-of-magnitude ratio versus Loki's published floor.
+| Component | Cores | Memory | Source |
+|---|---:|---:|---|
+| `vlstorage` | `1.0` | `5.0 GiB` | measured |
+| `vlinsert` | `0.1` | `0.6 GiB` | measured |
+| `vlselect` (0 read rps) | `0.1` | `0.25 GiB` | measured — floor only |
+| **VL total** | **`1.2`** | **`5.85 GiB`** | |
 
-Adding the proxy layer on top of that real baseline:
+Under active read load `vlselect` grows. Use `loki-bench` to measure the actual
+delta in your workload.
 
-| Component | Cores (typical) | Memory (typical) |
+**Source 2 — Proxy overhead** (estimated from bench tool, not co-located with Source 1):
+
+| Scenario | Proxy Cores | Proxy Memory |
 |---|---|---|
-| VictoriaLogs service (measured) | `1.2` | `5.85 GiB` |
-| loki-vl-proxy, cache warm, low traffic | `< 0.01` | `~30–50 MB` |
-| loki-vl-proxy, 50 concurrent clients | `~0.05` | `~100–150 MB` |
-| loki-vl-proxy, 500 concurrent clients | `~0.1–0.2` | up to `256 MB` (default L1 cap) |
+| cache warm, idle | `< 0.01` | `~30–50 MB` |
+| 50 concurrent clients | `~0.05` | `~100–150 MB` |
+| 500 concurrent clients | `~0.1–0.2` | up to `256 MB` (default L1 cap) |
 
-Combined VL + proxy versus Loki's published compute floor at the same
-`~310 GiB/day` ingest scale:
+**Source 3 — Loki floor** (published spec, not measured):
+Grafana's published compute floor for a scalable Loki deployment handling
+`<3 TB/day` is `38 vCPU / 59 GiB`. This is a *minimum recommended* spec for a
+multi-component cluster, not a measured P50 operating point.
+
+**Estimated combined ratio** (directional only):
 
 | Layer | Cores | Memory |
 |---|---:|---:|
-| VictoriaLogs service (measured) | `1.2` | `5.85 GiB` |
+| VictoriaLogs service (measured, 0 read rps) | `1.2` | `5.85 GiB` |
 | loki-vl-proxy (read load, default config) | `~0.1–0.2` | `~0.15–0.26 GiB` |
 | **Combined VL + proxy** | **`~1.4`** | **`~6.1 GiB`** |
 | **Loki published floor (`<3 TB/day`)** | **`38`** | **`59 GiB`** |
-| **Ratio (Loki / VL + proxy)** | **`~27x`** | **`~9.7x`** |
+| **Estimated ratio (Loki / VL + proxy)** | **`~27x`** | **`~9.7x`** |
 
-To measure actual proxy overhead in your environment, run `loki-bench` from the
-project's `bench/` directory against a live proxy+VL stack and compare
-before/after `/metrics` scrapes for `process_cpu_seconds_total` and
-`process_resident_memory_bytes`. See `bench/README.md` in the repository root for
-usage.
+These ratios will differ in your environment because: (a) VL measured at 0 read
+rps; (b) Loki's `38 vCPU` is a sizing floor, not a steady-state P50; (c) proxy
+overhead scales with workload shape and cache hit rate.
+
+### Getting Real 1:1 Numbers
+
+`loki-bench` runs Loki, VL+proxy, and VL native (LogsQL) against the same
+workload simultaneously and reports resource deltas from each service's
+`/metrics` endpoint:
+
+```bash
+# Start the e2e stack with both Loki and VL
+cd test/e2e-compat && docker compose up -d
+
+# Seed realistic data (3 days, dense)
+go run ./bench/cmd/seed/ \
+  --loki=http://localhost:3101 \
+  --vl=http://localhost:9428 \
+  --days=3 --lines-per-batch=200
+
+# Run 3-way comparison
+./bench/run-comparison.sh \
+  --workloads=small,heavy,long_range \
+  --clients=10,50,100,500 \
+  --duration=60s
+```
+
+With `--vl-direct` (auto-detected when VL is reachable), the report adds a
+**VL native (LogsQL)** column showing raw VL throughput and resource use
+alongside VL+proxy — so you can isolate exactly what the translation and
+caching layer costs.
 
 ### Loki replication and cross-zone write costs
 
