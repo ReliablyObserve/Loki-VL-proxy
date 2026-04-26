@@ -162,10 +162,16 @@ Queries: `count_over_time`, `rate`, `bytes_rate`, `sum by`, `quantile_over_time 
 | VL + Proxy combined | 1.9 cpu·s | 1,270 MB | 91× less CPU, 1.2× less RAM |
 | VL native | 280 cpu·s | **5,261 MB** | 3.4× more RAM than Loki; crashes at c≥50 |
 
-> **VL v1.50.0 stability note:** VictoriaLogs v1.50.0 crashes at c≥50 for heavy
-> aggregation queries over 5 M entries (100% error rate, process OOM). The proxy acts as
-> a stability buffer — even as VL crashes, the proxy serves subsequent identical requests
-> from L1 cache with <0.25% error rate. This is expected to improve in future VL releases.
+> **VL v1.50.0 concurrent query limit:** VictoriaLogs defaults to
+> `-search.maxConcurrentRequests=16`. At c≥50, requests beyond 16 are rejected immediately
+> (not queued), producing 100% error rate in the bench. This is not an OOM crash — it is
+> VL's own concurrency protection. The bench confirmed this with
+> `vl_concurrent_select_limit_reached_total=285,330` after the run.
+>
+> For bench comparability, add `-search.maxConcurrentRequests=100 -search.maxQueueDuration=30s`
+> to VL (already done in `test/e2e-compat/docker-compose.yml`). The proxy acts as a
+> natural concurrency buffer in production: only cache-miss requests reach VL, so real
+> VL concurrency is always much lower than client-facing concurrency.
 
 ### Long-range workload — full 7-day windows
 
@@ -213,6 +219,35 @@ requests.
 **Cold-first behavior:** On the very first load of a new time range, expect 1× VL roundtrip
 (24ms for long-range in VL). Proxy adds ~2ms translation overhead per cache miss. All
 subsequent requests for the same time range: sub-millisecond from L1 cache.
+
+### Warm cache vs cold cache (proxy overhead isolation)
+
+The bench supports a 4-way comparison by running a second proxy instance with cache
+disabled (`-cache-max=0`). This isolates the proxy's translation overhead and raw VL
+query latency through the Loki-compatible API:
+
+| Mode | What it measures |
+|------|-----------------|
+| `proxy (warm)` | Production steady-state: repeated queries served from L1 cache |
+| `proxy (cold)` | First-load path: every request hits VL; shows translation overhead + VL speed |
+| `vl_direct` | Pure VL LogsQL performance with no proxy layer |
+
+The delta between `proxy (cold)` and `vl_direct` is the pure proxy overhead per request:
+LogQL→LogsQL translation (~5µs) + HTTP round-trip + response envelope conversion.
+
+To run the 4-way comparison, build the proxy binary and pass it to the script:
+
+```bash
+# Build proxy for host-side no-cache instance
+go build -o /tmp/loki-vl-proxy ./cmd/proxy/
+
+# Run full 4-way comparison (auto-spawns no-cache proxy on port 3199)
+PROXY_BINARY=/tmp/loki-vl-proxy ./bench/run-comparison.sh
+
+# Or start no-cache proxy manually and pass its URL
+./loki-vl-proxy -listen=:3199 -backend=http://localhost:9428 -cache-max=0 -cache-max-bytes=0 &
+PROXY_NO_CACHE_URL=http://localhost:3199 ./bench/run-comparison.sh
+```
 
 ### Summary table
 
@@ -264,11 +299,15 @@ rate(loki_vl_proxy_cache_hits_total[5m])
 
 Rule of thumb: `L1 size = (unique active queries per hour) × (average response size)`.
 
-### Running the full Loki vs VL+proxy comparison
+### Running the full comparison
 
 ```bash
 # Full suite: all workloads, 10/50/100/500 clients, 30s per level
 ./bench/run-comparison.sh
+
+# 4-way comparison (warm proxy + cold proxy + VL native + Loki)
+go build -o /tmp/loki-vl-proxy ./cmd/proxy/
+PROXY_BINARY=/tmp/loki-vl-proxy ./bench/run-comparison.sh
 
 # Quick smoke test
 ./bench/run-comparison.sh --workloads=small --clients=10,50 --duration=10s
@@ -276,9 +315,12 @@ Rule of thumb: `L1 size = (unique active queries per hour) × (average response 
 # Long-range only (exercises window splitting, prefilter, cache warm)
 ./bench/run-comparison.sh --workloads=long_range --clients=10,50,100 --duration=60s
 
-# Cold vs warm pass: run long_range twice and compare JSON output
-./bench/run-comparison.sh --workloads=long_range --version=cold --output=bench/results/cold
-./bench/run-comparison.sh --workloads=long_range --version=warm --output=bench/results/warm
+# Compute workload (CPU-intensive: rate math, quantile_over_time, division, topk)
+./bench/run-comparison.sh --workloads=compute --clients=10,50 --duration=30s
+
+# VL with raised concurrency limit (required for c≥50 VL-direct tests)
+# Add to VictoriaLogs: -search.maxConcurrentRequests=100 -search.maxQueueDuration=30s
+# Already set in test/e2e-compat/docker-compose.yml
 ```
 
 See `bench/README.md` in the repository root for all flags and output format.

@@ -38,18 +38,21 @@ func main() {
 		lokiURL      = flag.String("loki", "http://localhost:3101", "Loki direct API base URL")
 		proxyURL     = flag.String("proxy", "http://localhost:3100", "loki-vl-proxy base URL")
 		vlURL        = flag.String("vl", "", "VictoriaLogs API base URL (optional; for resource tracking)")
-		vlDirectURL  = flag.String("vl-direct", "", "VictoriaLogs native LogsQL API URL (optional; enables 3-way comparison)")
-		lokiMetrics  = flag.String("loki-metrics", "", "Loki /metrics URL for resource tracking (optional)")
-		proxyMetrics = flag.String("proxy-metrics", "", "Proxy /metrics URL for resource tracking (optional)")
-		vlMetrics    = flag.String("vl-metrics", "", "VictoriaLogs /metrics URL for resource tracking (optional)")
-		workloadList = flag.String("workloads", "small,heavy,long_range", "Comma-separated workloads: small,heavy,long_range")
-		clientList   = flag.String("clients", "10,50,100,500", "Comma-separated concurrency levels")
-		duration     = flag.Duration("duration", 30*time.Second, "Test duration per concurrency level per workload")
-		outputDir    = flag.String("output", "results", "Output directory for JSON and markdown reports")
-		warmup       = flag.Duration("warmup", 5*time.Second, "Warmup duration before each run (warms proxy cache)")
-		skipLoki     = flag.Bool("skip-loki", false, "Skip Loki target (benchmark proxy only)")
-		skipProxy    = flag.Bool("skip-proxy", false, "Skip proxy target (benchmark Loki only)")
-		skipVLDirect = flag.Bool("skip-vl-direct", false, "Skip VL-direct target (LogsQL native benchmark)")
+		vlDirectURL       = flag.String("vl-direct", "", "VictoriaLogs native LogsQL API URL (optional; enables 3-way comparison)")
+		proxyNoCacheURL   = flag.String("proxy-no-cache", "", "loki-vl-proxy instance started with cache disabled (enables cold-cache comparison)")
+		lokiMetrics       = flag.String("loki-metrics", "", "Loki /metrics URL for resource tracking (optional)")
+		proxyMetrics      = flag.String("proxy-metrics", "", "Proxy /metrics URL for resource tracking (optional)")
+		proxyNoCacheMetrics = flag.String("proxy-no-cache-metrics", "", "No-cache proxy /metrics URL (optional)")
+		vlMetrics         = flag.String("vl-metrics", "", "VictoriaLogs /metrics URL for resource tracking (optional)")
+		workloadList      = flag.String("workloads", "small,heavy,long_range", "Comma-separated workloads: small,heavy,long_range")
+		clientList        = flag.String("clients", "10,50,100,500", "Comma-separated concurrency levels")
+		duration          = flag.Duration("duration", 30*time.Second, "Test duration per concurrency level per workload")
+		outputDir         = flag.String("output", "results", "Output directory for JSON and markdown reports")
+		warmup            = flag.Duration("warmup", 5*time.Second, "Warmup duration before each run (warms proxy cache)")
+		skipLoki          = flag.Bool("skip-loki", false, "Skip Loki target (benchmark proxy only)")
+		skipProxy         = flag.Bool("skip-proxy", false, "Skip proxy target (benchmark Loki only)")
+		skipVLDirect      = flag.Bool("skip-vl-direct", false, "Skip VL-direct target (LogsQL native benchmark)")
+		skipProxyNocache  = flag.Bool("skip-proxy-no-cache", false, "Skip no-cache proxy target")
 		verbose      = flag.Bool("verbose", false, "Print per-request errors")
 		version      = flag.String("version", "", "Version tag attached to results (e.g. v1.17.1)")
 	)
@@ -99,11 +102,13 @@ func main() {
 				metricsURL string
 				vlMetrics  string
 				skip       bool
+				noWarmup   bool // skip warmup (no-cache proxy — warmup has no benefit)
 			}
 			targets := []target{
-				{"loki", *lokiURL, wl.Queries, *lokiMetrics, "", *skipLoki},
-				{"proxy", *proxyURL, wl.Queries, *proxyMetrics, vlMetricsURL, *skipProxy},
-				{"vl_direct", *vlDirectURL, vlDirectQueries, vlDirectMetrics, "", *skipVLDirect || *vlDirectURL == ""},
+				{"loki", *lokiURL, wl.Queries, *lokiMetrics, "", *skipLoki, false},
+				{"proxy", *proxyURL, wl.Queries, *proxyMetrics, vlMetricsURL, *skipProxy, false},
+				{"proxy_nocache", *proxyNoCacheURL, wl.Queries, *proxyNoCacheMetrics, vlMetricsURL, *skipProxyNocache || *proxyNoCacheURL == "", true},
+				{"vl_direct", *vlDirectURL, vlDirectQueries, vlDirectMetrics, "", *skipVLDirect || *vlDirectURL == "", false},
 			}
 
 			for _, tgt := range targets {
@@ -115,7 +120,8 @@ func main() {
 					wl.Name, conc, tgt.name)
 
 				// Warmup phase (warms caches, esp. proxy window cache).
-				if *warmup > 0 {
+				// Skipped for no-cache targets where warmup provides no benefit.
+				if *warmup > 0 && !tgt.noWarmup {
 					fmt.Printf("  warming up for %s...\n", *warmup)
 					wCfg := runner.Config{
 						TargetURL:   tgt.url,

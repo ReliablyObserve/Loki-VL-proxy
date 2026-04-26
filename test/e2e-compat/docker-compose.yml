@@ -38,6 +38,9 @@ services:
       # Keep enough history for long-range Drilldown regressions (>24h).
       - "-retentionPeriod=7d"
       - "-httpListenAddr=:9428"
+      # Allow high concurrency for benchmark comparisons (default 16 causes 100% errors at c≥50).
+      - "-search.maxConcurrentRequests=100"
+      - "-search.maxQueueDuration=30s"
     volumes:
       - vl-data:/vlogs
     healthcheck:
