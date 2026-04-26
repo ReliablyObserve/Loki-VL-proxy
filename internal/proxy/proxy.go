@@ -365,8 +365,9 @@ type Config struct {
 	MaxConcurrent     int                      // max concurrent backend queries (0=unlimited)
 	RatePerSecond     float64                  // per-client rate limit (0=unlimited)
 	RateBurst         int                      // per-client burst size
-	CBFailThreshold   int                      // circuit breaker failure threshold
-	CBOpenDuration    time.Duration            // circuit breaker open duration
+	CBFailThreshold   int                      // circuit breaker: failures within window before opening
+	CBOpenDuration    time.Duration            // circuit breaker: how long to stay open before probing
+	CBWindowDuration  time.Duration            // circuit breaker: sliding window for failure counting (default 30s)
 	TenantMap         map[string]TenantMapping // string org ID → VL account/project
 	AuthEnabled       bool
 	AllowGlobalTenant bool
@@ -874,6 +875,10 @@ func New(cfg Config) (*Proxy, error) {
 	if cbOpen == 0 {
 		cbOpen = 10 * time.Second
 	}
+	cbWindow := cfg.CBWindowDuration
+	if cbWindow <= 0 {
+		cbWindow = 30 * time.Second
+	}
 
 	// Build HTTP client optimized for high-concurrency single-backend proxying.
 	// Go defaults (MaxIdleConnsPerHost=2) cause ephemeral port exhaustion under load.
@@ -1111,7 +1116,7 @@ func New(cfg Config) (*Proxy, error) {
 		queryTracker:                          metrics.NewQueryTracker(10000),
 		coalescer:                             mw.NewCoalescer(),
 		limiter:                               mw.NewRateLimiter(maxConcurrent, ratePerSec, rateBurst),
-		breaker:                               mw.NewCircuitBreaker(cbFail, 3, cbOpen),
+		breaker:                               mw.NewCircuitBreaker(cbFail, 3, cbOpen, cbWindow),
 		tenantMap:                             cfg.TenantMap,
 		authEnabled:                           cfg.AuthEnabled,
 		allowGlobalTenant:                     cfg.AllowGlobalTenant,

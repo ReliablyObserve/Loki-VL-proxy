@@ -141,7 +141,7 @@ func TestRateLimiter_ConcurrentLimit(t *testing.T) {
 
 // TestCircuitBreaker_StartsClose verifies initial state is closed.
 func TestCircuitBreaker_StartsClosed(t *testing.T) {
-	cb := NewCircuitBreaker(3, 2, 1*time.Second)
+	cb := NewCircuitBreaker(3, 2, 1*time.Second, 5*time.Second)
 	if cb.State() != "closed" {
 		t.Errorf("expected closed, got %s", cb.State())
 	}
@@ -152,7 +152,7 @@ func TestCircuitBreaker_StartsClosed(t *testing.T) {
 
 // TestCircuitBreaker_OpensAfterFailures verifies transition to open state.
 func TestCircuitBreaker_OpensAfterFailures(t *testing.T) {
-	cb := NewCircuitBreaker(3, 2, 100*time.Millisecond)
+	cb := NewCircuitBreaker(3, 2, 100*time.Millisecond, 5*time.Second)
 
 	// Record 3 failures → should open
 	cb.RecordFailure()
@@ -178,7 +178,7 @@ func TestCircuitBreaker_OpensAfterFailures(t *testing.T) {
 
 // TestCircuitBreaker_TransitionsToHalfOpen verifies recovery probing.
 func TestCircuitBreaker_TransitionsToHalfOpen(t *testing.T) {
-	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond)
+	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, 5*time.Second)
 
 	cb.RecordFailure() // opens
 	if cb.State() != "open" {
@@ -207,7 +207,7 @@ func TestCircuitBreaker_TransitionsToHalfOpen(t *testing.T) {
 // TestCircuitBreaker_HalfOpenFailureReopens verifies that a failure
 // during half-open reopens the circuit.
 func TestCircuitBreaker_HalfOpenFailureReopens(t *testing.T) {
-	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond)
+	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, 5*time.Second)
 
 	cb.RecordFailure() // opens
 	time.Sleep(60 * time.Millisecond)
@@ -219,19 +219,39 @@ func TestCircuitBreaker_HalfOpenFailureReopens(t *testing.T) {
 	}
 }
 
-// TestCircuitBreaker_SuccessResets verifies success resets failure count.
-func TestCircuitBreaker_SuccessResets(t *testing.T) {
-	cb := NewCircuitBreaker(3, 2, 1*time.Second)
+// TestCircuitBreaker_SuccessDoesNotResetWindow verifies that success does not
+// clear accumulated failures from the sliding window. A burst of failures
+// within the window still trips the breaker even if successes intervene.
+func TestCircuitBreaker_SuccessDoesNotResetWindow(t *testing.T) {
+	cb := NewCircuitBreaker(3, 2, 1*time.Second, 5*time.Second)
 
 	cb.RecordFailure()
 	cb.RecordFailure()
-	cb.RecordSuccess() // should reset failures to 0
+	cb.RecordSuccess() // does NOT clear the 2 failures already in the window
 
-	// 2 more failures — should NOT open (only 2, not 3)
+	// 3rd failure within the window → should open (2 old + 1 new = 3 >= threshold)
+	cb.RecordFailure()
+	if cb.State() != "open" {
+		t.Errorf("expected open (failures persist in window despite success), got %s", cb.State())
+	}
+}
+
+// TestCircuitBreaker_WindowExpiry verifies that failures older than windowDuration
+// are pruned and no longer count toward the threshold.
+func TestCircuitBreaker_WindowExpiry(t *testing.T) {
+	cb := NewCircuitBreaker(3, 2, 1*time.Second, 50*time.Millisecond)
+
+	cb.RecordFailure()
+	cb.RecordFailure()
+
+	// Wait for the window to expire
+	time.Sleep(60 * time.Millisecond)
+
+	// 2 more failures after expiry — old ones are pruned, only 2 active
 	cb.RecordFailure()
 	cb.RecordFailure()
 	if cb.State() != "closed" {
-		t.Errorf("expected closed (reset after success), got %s", cb.State())
+		t.Errorf("expected closed (old failures expired from window), got %s", cb.State())
 	}
 }
 
@@ -334,7 +354,7 @@ func TestRateLimiter_TokenRefill(t *testing.T) {
 
 // TestCircuitBreaker_State verifies state string output.
 func TestCircuitBreaker_StateStrings(t *testing.T) {
-	cb := NewCircuitBreaker(1, 1, 50*time.Millisecond)
+	cb := NewCircuitBreaker(1, 1, 50*time.Millisecond, 5*time.Second)
 
 	if cb.State() != "closed" {
 		t.Errorf("expected closed, got %s", cb.State())
@@ -447,7 +467,7 @@ func requireEventuallyMiddleware(t *testing.T, timeout time.Duration, cond func(
 // TestCircuitBreaker_HalfOpenLimitsProbes verifies that half-open state
 // only allows successThreshold probe requests, not unlimited.
 func TestCircuitBreaker_HalfOpenLimitsProbes(t *testing.T) {
-	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond)
+	cb := NewCircuitBreaker(1, 2, 50*time.Millisecond, 5*time.Second)
 	cb.RecordFailure() // opens
 
 	time.Sleep(60 * time.Millisecond)
@@ -468,7 +488,7 @@ func TestCircuitBreaker_HalfOpenLimitsProbes(t *testing.T) {
 
 // TestCircuitBreaker_AllowOpenTimeout verifies requests rejected while open.
 func TestCircuitBreaker_AllowOpenTimeout(t *testing.T) {
-	cb := NewCircuitBreaker(1, 1, 100*time.Millisecond)
+	cb := NewCircuitBreaker(1, 1, 100*time.Millisecond, 5*time.Second)
 	cb.RecordFailure() // opens
 
 	// Should be rejected
