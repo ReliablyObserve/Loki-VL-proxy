@@ -1,6 +1,6 @@
 # Benchmarks
 
-Measured on Apple M3 Max (14 cores), Go 1.26.2, `-benchmem`.
+Measured on Apple M5 Pro (18 cores, 64 GB RAM), macOS 26.4.1, Go 1.26.2 darwin/arm64, `-benchmem`.
 
 ## Per-Request Latency
 
@@ -105,8 +105,9 @@ go tool pprof mem.prof
 
 ## Four-Way Read Path Comparison: Loki vs VL+Proxy vs VL Native
 
-Measured with `loki-bench` against the e2e-compat stack on an Apple M3 Max (14 cores),
-Docker Desktop 4.x. Loki 3.7.1, VictoriaLogs v1.50.0, loki-vl-proxy latest.
+Measured with `loki-bench` against the e2e-compat stack on an Apple M5 Pro
+(18 cores, 64 GB RAM), macOS 26.4.1, Go 1.26.2, Docker Desktop 29.4.0
+(17.3 GiB allocated to Docker). Loki 3.7.1, VictoriaLogs v1.50.0, loki-vl-proxy latest.
 30 seconds per level, --jitter=2h (randomised time windows per worker for realistic
 cache hit/partial-hit/miss mix). Dataset: ~5M log entries across 12 services, 7-day window.
 
