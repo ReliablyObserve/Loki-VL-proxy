@@ -29,10 +29,10 @@ func ensureDataIngested(t *testing.T) {
 // waitForLokiMetricData polls until Loki returns non-empty results for a basic
 // metric query. Stream queries are immediately queryable from the ingester, but
 // metric queries (count_over_time etc.) need chunks to be sealed. This is a
-// known Loki ingester behavior: poll for up to 30 seconds before failing.
+// known Loki ingester behavior: GHA runners can be slow, so poll up to 90s.
 func waitForLokiMetricData(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	probe := url.Values{}
 	probe.Set("query", `count_over_time({app="api-gateway"}[5m])`)
 	probe.Set("start", fmt.Sprintf("%d", time.Now().Add(-10*time.Minute).UnixNano()))
@@ -48,7 +48,7 @@ func waitForLokiMetricData(t *testing.T) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Log("warning: Loki metric data not available after 30s — metric query parity tests may show Loki returning empty")
+	t.Log("warning: Loki metric data not available after 90s — metric query parity tests may show Loki returning empty")
 }
 
 // =============================================================================
