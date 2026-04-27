@@ -9751,12 +9751,13 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Full deterministic sort within each stream: primary by timestamp,
-		// secondary by log content.
+		// Only tie-break entries with identical nanosecond timestamps by message
+		// content. Different-timestamp entries are left in VL's returned order
+		// (which already reflects the requested direction: ascending/descending).
 		sort.SliceStable(se.Values, func(i, j int) bool {
 			ti, tj := se.Values[i][0], se.Values[j][0]
 			if ti != tj {
-				return ti < tj
+				return false
 			}
 			return se.Values[i][1] < se.Values[j][1]
 		})
@@ -9873,8 +9874,9 @@ func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, c
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Full deterministic sort within each stream: primary by timestamp,
-		// secondary by log content.
+		// Only tie-break entries with identical nanosecond timestamps by message
+		// content. Different-timestamp entries are left in VL's returned order
+		// (which already reflects the requested direction: ascending/descending).
 		sort.SliceStable(se.Values, func(i, j int) bool {
 			vi, _ := se.Values[i].([]interface{})
 			vj, _ := se.Values[j].([]interface{})
@@ -9884,7 +9886,7 @@ func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, c
 			ti, _ := vi[0].(string)
 			tj, _ := vj[0].(string)
 			if ti != tj {
-				return ti < tj
+				return false
 			}
 			msgi, _ := vi[1].(string)
 			msgj, _ := vj[1].(string)
