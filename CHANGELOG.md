@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-04-27
+
 ### Changed
 
 - docs: restructure website sidebar navigation and add SEO landing pages; update marketing numbers to reflect current deployment scale.
