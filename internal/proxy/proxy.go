@@ -9744,13 +9744,15 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 		se.Values = append(se.Values, []string{tsNanos, msg})
 	}
 
+	// Sort streams by key for stable cross-stream ordering. VL returns entries
+	// in non-deterministic stream order; without this, same-timestamp entries
+	// from different streams reorder between requests.
+	sort.Strings(streamOrder)
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Full deterministic sort: primary by timestamp, secondary by log
-		// content. VL's internal ordering is not stable across requests when
-		// multiple entries share the same second-precision timestamp, so we
-		// always sort rather than relying on VL's return order.
+		// Full deterministic sort within each stream: primary by timestamp,
+		// secondary by log content.
 		sort.SliceStable(se.Values, func(i, j int) bool {
 			ti, tj := se.Values[i][0], se.Values[j][0]
 			if ti != tj {
@@ -9867,11 +9869,12 @@ func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, c
 		return nil, nil, err
 	}
 
+	sort.Strings(streamOrder)
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Full deterministic sort: primary by timestamp, secondary by log
-		// content. VL's internal ordering is not stable across requests.
+		// Full deterministic sort within each stream: primary by timestamp,
+		// secondary by log content.
 		sort.SliceStable(se.Values, func(i, j int) bool {
 			vi, _ := se.Values[i].([]interface{})
 			vj, _ := se.Values[j].([]interface{})
