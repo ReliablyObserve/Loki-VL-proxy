@@ -9747,12 +9747,16 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Stable secondary sort within same-nanosecond timestamps.
+		// Full deterministic sort: primary by timestamp, secondary by log
+		// content. VL's internal ordering is not stable across requests when
+		// multiple entries share the same second-precision timestamp, so we
+		// always sort rather than relying on VL's return order.
 		sort.SliceStable(se.Values, func(i, j int) bool {
-			if se.Values[i][0] == se.Values[j][0] {
-				return se.Values[i][1] < se.Values[j][1]
+			ti, tj := se.Values[i][0], se.Values[j][0]
+			if ti != tj {
+				return ti < tj
 			}
-			return false // preserve VL's time-sorted order
+			return se.Values[i][1] < se.Values[j][1]
 		})
 		result = append(result, map[string]interface{}{
 			"stream": se.Labels,
@@ -9866,17 +9870,22 @@ func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, c
 	result := make([]map[string]interface{}, 0, len(streamMap))
 	for _, key := range streamOrder {
 		se := streamMap[key]
-		// Stable secondary sort within same-nanosecond timestamps so that
-		// repeated refreshes return entries in the same order.
+		// Full deterministic sort: primary by timestamp, secondary by log
+		// content. VL's internal ordering is not stable across requests.
 		sort.SliceStable(se.Values, func(i, j int) bool {
 			vi, _ := se.Values[i].([]interface{})
 			vj, _ := se.Values[j].([]interface{})
-			if len(vi) >= 2 && len(vj) >= 2 && vi[0] == vj[0] {
-				msgi, _ := vi[1].(string)
-				msgj, _ := vj[1].(string)
-				return msgi < msgj
+			if len(vi) < 2 || len(vj) < 2 {
+				return false
 			}
-			return false // preserve VL's time-sorted order
+			ti, _ := vi[0].(string)
+			tj, _ := vj[0].(string)
+			if ti != tj {
+				return ti < tj
+			}
+			msgi, _ := vi[1].(string)
+			msgj, _ := vj[1].(string)
+			return msgi < msgj
 		})
 		result = append(result, map[string]interface{}{
 			"stream": se.Labels,

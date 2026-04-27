@@ -463,6 +463,34 @@ func asString(value interface{}) string {
 	}
 }
 
+// scanStreamLabelNames returns the set of label names found in _stream fields
+// across all NDJSON entries. Unlike scanDetectedLabels, it does NOT include
+// serviceNameSourceFields, so it accurately represents what VL indexed as
+// stream labels vs. auto-extracted body fields.
+func scanStreamLabelNames(body []byte, lt *LabelTranslator) map[string]struct{} {
+	names := map[string]struct{}{}
+	for _, rawLine := range bytes.Split(body, []byte{'\n'}) {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		for key := range parseStreamLabels(asString(entry["_stream"])) {
+			lokiLabel := key
+			if lt != nil {
+				if t := lt.ToLoki(key); t != "" {
+					lokiLabel = t
+				}
+			}
+			names[lokiLabel] = struct{}{}
+		}
+	}
+	return names
+}
+
 func scanDetectedLabels(body []byte, lt *LabelTranslator) ([]map[string]interface{}, map[string]struct{}) {
 	summaries := scanDetectedLabelSummaries(body, lt)
 
@@ -1470,7 +1498,9 @@ func (p *Proxy) detectFieldsFromBody(body []byte) ([]map[string]interface{}, map
 }
 
 func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map[string][]string, map[string]*detectedFieldSummary) {
-	_, labelNames := scanDetectedLabels(body, p.labelTranslator)
+	// Use stream-label-only set so that VL auto-extracted body fields sharing
+	// a name with a serviceNameSourceField (e.g. "job") are not suppressed.
+	labelNames := scanStreamLabelNames(body, p.labelTranslator)
 	fields := make(map[string]*detectedFieldSummary)
 
 	// Track OTel presence across ALL entries in the batch.
@@ -1511,13 +1541,18 @@ func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map
 			}
 		}
 
+		// Use only the actual _stream labels for field-exposure checks so that
+		// VL auto-extracted body fields (e.g. "job", "container") that share a
+		// name with a serviceNameSourceField are not incorrectly suppressed.
+		rawStreamLabels := parseStreamLabels(asString(entry["_stream"]))
+
 		for key, value := range entry {
 			// Skip indexed labels that should not appear as detected fields
 			if key == "app" || key == "cluster" || key == "namespace" {
 				continue
 			}
 
-			if !shouldExposeStructuredField(key, streamLabels, p.labelTranslator) {
+			if !shouldExposeStructuredField(key, rawStreamLabels, p.labelTranslator) {
 				continue
 			}
 			stringValue, ok := stringifyEntryValue(value)
