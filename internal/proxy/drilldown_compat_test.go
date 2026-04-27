@@ -2163,6 +2163,186 @@ func TestFetchNativeFieldValues_MixedHitsStillFiltersZeros(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// parsers inference: VL auto-extracted JSON body fields
+// =============================================================================
+
+// TestDetectFieldSummaries_VLAutoExtractedFieldsGetJSONParser guards that
+// top-level VL fields auto-extracted from JSON log bodies (not in _stream,
+// not dotted OTel names) receive parsers:["json"] and jsonPath:[field].
+// Without this, Grafana Drilldown uses label_values (stream-label path)
+// instead of detected_field/values, showing repeated field names as values.
+func TestDetectFieldSummaries_VLAutoExtractedFieldsGetJSONParser(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"values":[]}`))
+		case "/select/logsql/query":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			// VL auto-extracted: _msg is the inner plain-text message, but
+			// confidence/latency_ms/model came from the original JSON body.
+			_, _ = w.Write([]byte(`{"_time":"2026-04-04T17:18:49Z","_msg":"inference ok 330ms","_stream":"{app=\"ml-serving\",cluster=\"us-east-1\",service_name=\"ml-serving\"}","app":"ml-serving","cluster":"us-east-1","service_name":"ml-serving","confidence":"0.9295","latency_ms":"330","model":"rec-v3"}` + "\n"))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newCompatTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?query=%7Bapp%3D%22ml-serving%22%7D&start=1&end=2", nil)
+	p.handleDetectedFields(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	fields, _ := resp["fields"].([]interface{})
+	byLabel := make(map[string]map[string]interface{}, len(fields))
+	for _, f := range fields {
+		obj := f.(map[string]interface{})
+		byLabel[obj["label"].(string)] = obj
+	}
+
+	for _, name := range []string{"confidence", "latency_ms", "model"} {
+		f, ok := byLabel[name]
+		if !ok {
+			t.Errorf("expected field %q in detected_fields, got labels: %v", name, func() []string {
+				keys := make([]string, 0, len(byLabel))
+				for k := range byLabel {
+					keys = append(keys, k)
+				}
+				return keys
+			}())
+			continue
+		}
+		parsers, _ := f["parsers"].([]interface{})
+		if len(parsers) == 0 || parsers[0] != "json" {
+			t.Errorf("VL auto-extracted field %q must have parsers:[\"json\"], got %v", name, f["parsers"])
+		}
+		jp, _ := f["jsonPath"].([]interface{})
+		if len(jp) == 0 {
+			t.Errorf("VL auto-extracted field %q must have jsonPath:[%q], got %v", name, name, f["jsonPath"])
+		}
+	}
+
+	// Stream labels must keep parsers:null
+	for _, name := range []string{"service_name"} {
+		if f, ok := byLabel[name]; ok {
+			if f["parsers"] != nil {
+				t.Errorf("stream label %q must have parsers:null, got %v", name, f["parsers"])
+			}
+		}
+	}
+}
+
+// TestDetectFieldSummaries_DottedOTelFieldsKeepNullParsers guards that
+// OTel dotted-name fields (service.name, k8s.pod.name) are NOT inferred as
+// json-parser fields. They are structured metadata, not JSON body fields.
+func TestDetectFieldSummaries_DottedOTelFieldsKeepNullParsers(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"values":[]}`))
+		case "/select/logsql/query":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(`{"_time":"2026-04-04T17:18:49Z","_msg":"trace ok","_stream":"{app=\"otel-svc\",service.name=\"otel-svc\"}","app":"otel-svc","service.name":"otel-svc","k8s.pod.name":"pod-123","confidence":"0.85"}` + "\n"))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newCompatTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?query=%7Bapp%3D%22otel-svc%22%7D&start=1&end=2", nil)
+	p.handleDetectedFields(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	fields, _ := resp["fields"].([]interface{})
+	byLabel := make(map[string]map[string]interface{}, len(fields))
+	for _, f := range fields {
+		obj := f.(map[string]interface{})
+		byLabel[obj["label"].(string)] = obj
+	}
+
+	// OTel dotted fields must keep parsers:null
+	for _, name := range []string{"service.name", "k8s.pod.name"} {
+		if f, ok := byLabel[name]; ok {
+			if f["parsers"] != nil {
+				t.Errorf("OTel dotted field %q must keep parsers:null (not json), got %v", name, f["parsers"])
+			}
+		}
+	}
+
+	// But plain scalar fields like confidence (no dot) must get parsers:["json"]
+	if f, ok := byLabel["confidence"]; ok {
+		parsers, _ := f["parsers"].([]interface{})
+		if len(parsers) == 0 || parsers[0] != "json" {
+			t.Errorf("field confidence must have parsers:[\"json\"], got %v", f["parsers"])
+		}
+	}
+}
+
+// TestDetectFieldSummaries_LogfmtMsgFieldsKeepLogfmtParser guards that fields
+// detected from logfmt _msg content keep parsers:["logfmt"], not overridden to
+// "json" by the VL auto-extraction inference.
+func TestDetectFieldSummaries_LogfmtMsgFieldsKeepLogfmtParser(t *testing.T) {
+	vlBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/select/logsql/field_names":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"values":[]}`))
+		case "/select/logsql/query":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			// Logfmt log: _msg is logfmt, amount is NOT a top-level VL field
+			_, _ = w.Write([]byte(`{"_time":"2026-04-04T17:18:49Z","_msg":"level=info msg=\"payment processed\" amount=42.50 currency=USD","_stream":"{app=\"payment-service\"}","app":"payment-service"}` + "\n"))
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer vlBackend.Close()
+
+	p := newCompatTestProxy(t, vlBackend.URL)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/loki/api/v1/detected_fields?query=%7Bapp%3D%22payment-service%22%7D&start=1&end=2", nil)
+	p.handleDetectedFields(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	fields, _ := resp["fields"].([]interface{})
+	byLabel := make(map[string]map[string]interface{}, len(fields))
+	for _, f := range fields {
+		obj := f.(map[string]interface{})
+		byLabel[obj["label"].(string)] = obj
+	}
+
+	if f, ok := byLabel["amount"]; ok {
+		parsers, _ := f["parsers"].([]interface{})
+		if len(parsers) == 0 || parsers[0] != "logfmt" {
+			t.Errorf("logfmt-detected field 'amount' must keep parsers:[\"logfmt\"], got %v", f["parsers"])
+		}
+	} else {
+		t.Errorf("expected 'amount' in detected_fields for logfmt log, got %v", byLabel)
+	}
+}
+
 func streamsDebug(streams []map[string]interface{}) []string {
 	out := make([]string, len(streams))
 	for i, s := range streams {

@@ -1615,6 +1615,32 @@ func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map
 		}
 	}
 
+	// Post-process: fields detected only via VL top-level auto-extracted path
+	// (no parser assigned) and NOT true stream labels get parsers:["json"].
+	//
+	// Why: VictoriaLogs auto-extracts JSON body fields to top-level indexed
+	// fields and replaces _msg with the inner message string. The proxy scans
+	// VL NDJSON output and sees plain-text _msg, so JSON-origin fields are not
+	// detected via _msg parsing. Loki sees the original JSON body and marks them
+	// parsers:["json"]. We match that so Grafana Drilldown uses the correct
+	// detected_field/values endpoint rather than label_values (stream-label only).
+	//
+	// Dotted-name fields (e.g. service.name, k8s.pod.name) are excluded: those
+	// are OTel structured metadata, not JSON body fields, and must keep parsers:null.
+	for _, summary := range fields {
+		if len(summary.parsers) == 0 && !strings.ContainsAny(summary.label, ".") {
+			if _, isStreamLabel := labelNames[summary.label]; !isStreamLabel {
+				if summary.parsers == nil {
+					summary.parsers = map[string]struct{}{}
+				}
+				summary.parsers["json"] = struct{}{}
+				if len(summary.jsonPath) == 0 {
+					summary.jsonPath = []string{summary.label}
+				}
+			}
+		}
+	}
+
 	names := make([]string, 0, len(fields))
 	for label, summary := range fields {
 		summary.cardinality = len(summary.values)
