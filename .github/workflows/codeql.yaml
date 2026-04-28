@@ -15,11 +15,14 @@ on:
     - cron: "0 6 * * 1"  # Weekly Monday 6am UTC
 
 permissions:
-  security-events: write
+  contents: read
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
