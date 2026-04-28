@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix(security): VL backend credentials are not broadcast to ruler/alerts backends — `alertingBackendGetWithParams` previously called `applyBackendHeaders`, which applied `p.backendHeaders` (containing the VL `Authorization` from `-backend-basic-auth`) to requests to the ruler and alerts backends. These are separate services; VL credentials should not cross that trust boundary. A new `applyAlertingBackendHeaders` helper sets only `Accept-Encoding` and telemetry headers on alerting-backend requests.
 - fix(security): proxy-set hardening headers are no longer overwritten by backend responses — `copyBackendHeaders` (new, replaces `copyHeaders` on the client-response path) skips `X-Content-Type-Options`, `X-Frame-Options`, `Cross-Origin-Resource-Policy`, `Cache-Control`, `Pragma`, and `Expires` when copying backend headers to the client, so security headers set by the `withSecurityHeaders` middleware cannot be silently erased by whatever the backend returns.
 
+## [1.21.1] - 2026-04-28
+
 ### Fixed
 
 - fix(proxy): deterministic log stream ordering for multi-window queries — `groupQueryRangeWindowEntries` now sorts streams by canonical label key and sorts per-stream values ascending by timestamp before emitting the response; previously Go map iteration produced random stream order on every request, causing visible shuffling in Grafana for time ranges spanning more than one query-split interval (default 15 minutes).
