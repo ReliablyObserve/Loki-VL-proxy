@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.1] - 2026-04-28
+
 ### Fixed
 
 - fix(proxy): deterministic log stream ordering for multi-window queries — `groupQueryRangeWindowEntries` now sorts streams by canonical label key and sorts per-stream values ascending by timestamp before emitting the response; previously Go map iteration produced random stream order on every request, causing visible shuffling in Grafana for time ranges spanning more than one query-split interval (default 15 minutes).
