@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- docs: restructure website sidebar navigation and add SEO landing pages; update marketing numbers to reflect current deployment scale.
 - docs: update KNOWN_ISSUES, translation-reference, configuration, and roadmap to reflect features shipped through v1.21.x — remove stale "not implemented" entries for `label_replace`, `label_join`, `group()`, add CB tuning flags and `count_values()` error behavior.
+
+## [1.21.0] - 2026-04-27
+
+### Changed
+
+- docs: restructure website sidebar navigation and add SEO landing pages; update marketing numbers to reflect current deployment scale.
 
 ## [1.20.0] - 2026-04-27
 
