@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- fix(security): Docker image switched from `alpine:3.22.2` to `gcr.io/distroless/static-debian12:nonroot` — Alpine's openssl, musl, zlib, and busybox packages carried 20+ unfixed CVEs (several CRITICAL/HIGH: CVE-2026-40200, CVE-2026-28387, CVE-2026-28388, CVE-2026-28389, CVE-2026-31789, CVE-2026-22184, et al). The statically-linked Go binary requires no libc or system packages; distroless provides only CA certificates and runs as a non-root user by default, eliminating all OS-layer CVE exposure.
+- fix(security): website `uuid` transitive dependency forced to `>=14.0.0` via npm `overrides` — `webpack-dev-server` → `sockjs` depended on `uuid@^8.3.2` which is missing a buffer bounds check in `v3`/`v5`/`v6` when the `buf` parameter is provided (GitHub Advisory).
+
+### Changed
+
+- ci: semgrep action updated from deprecated `returntocorp/semgrep@v1` to `semgrep/semgrep-action@v1` — the `returntocorp` organisation was renamed to `semgrep`; the old tag no longer resolves, breaking the `Heavy / semgrep` CI job.
+
 ## [1.22.0] - 2026-04-28
 
 ### Fixed
