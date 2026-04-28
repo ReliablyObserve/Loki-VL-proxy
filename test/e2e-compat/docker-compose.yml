@@ -163,8 +163,8 @@ services:
     container_name: e2e-proxy
     ports:
       - "3100:3100"
-    volumes:
-      - proxy-cache:/cache
+    tmpfs:
+      - /cache
     command:
       - "-listen=:3100"
       - "-backend=http://victorialogs:9428"
@@ -203,8 +203,8 @@ services:
     container_name: e2e-proxy-patterns-autodetect
     ports:
       - "3110:3100"
-    volumes:
-      - proxy-patterns-cache:/cache
+    tmpfs:
+      - /cache
     command:
       - "-listen=:3100"
       - "-backend=http://victorialogs:9428"
@@ -511,5 +511,3 @@ services:
 volumes:
   vl-data:
   vm-data:
-  proxy-cache:
-  proxy-patterns-cache:
