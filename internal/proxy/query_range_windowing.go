@@ -222,7 +222,7 @@ func (p *Proxy) proxyLogQueryWindowed(w http.ResponseWriter, r *http.Request, lo
 		r.FormValue("step"),
 		collected,
 	)
-	streams := groupQueryRangeWindowEntries(collected)
+	streams := groupQueryRangeWindowEntries(collected, r.FormValue("direction"))
 	p.metrics.RecordQueryRangeWindowMergeDuration(time.Since(mergeStart))
 
 	if len(p.derivedFields) > 0 {
@@ -768,7 +768,7 @@ func (p *Proxy) vlLogsToLokiWindowEntries(body []byte, originalQuery string, cat
 	return entries
 }
 
-func groupQueryRangeWindowEntries(entries []queryRangeWindowEntry) []map[string]interface{} {
+func groupQueryRangeWindowEntries(entries []queryRangeWindowEntry, direction string) []map[string]interface{} {
 	type streamEntry struct {
 		labels map[string]string
 		values []interface{}
@@ -798,9 +798,10 @@ func groupQueryRangeWindowEntries(entries []queryRangeWindowEntry) []map[string]
 	out := make([]map[string]interface{}, 0, len(streams))
 	for _, k := range keys {
 		stream := streams[k]
-		// Sort values within each stream by timestamp so that entries from
-		// parallel window fetches are always in ascending timestamp order,
-		// regardless of which goroutine finished first.
+		// Sort values within each stream by timestamp to stabilise window
+		// boundaries from parallel fetches. Forward = ascending; backward
+		// (default) = descending to match Loki's newest-first contract.
+		forward := direction == "forward"
 		sort.SliceStable(stream.values, func(i, j int) bool {
 			vi, _ := stream.values[i].([]interface{})
 			vj, _ := stream.values[j].([]interface{})
@@ -809,7 +810,10 @@ func groupQueryRangeWindowEntries(entries []queryRangeWindowEntry) []map[string]
 			}
 			ti, _ := vi[0].(string)
 			tj, _ := vj[0].(string)
-			return ti < tj
+			if forward {
+				return ti < tj
+			}
+			return ti > tj
 		})
 		out = append(out, map[string]interface{}{
 			"stream": stream.labels,

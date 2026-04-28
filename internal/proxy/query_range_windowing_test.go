@@ -36,51 +36,61 @@ func TestGroupQueryRangeWindowEntries_DeterministicOrder(t *testing.T) {
 		{Stream: map[string]string{"app": "a", "env": "prod"}, Value: []interface{}{"1700000000000000002", "line-a2"}},
 	}
 
-	// Run many times to expose any non-determinism.
-	var first []map[string]interface{}
-	for i := 0; i < 50; i++ {
-		result := groupQueryRangeWindowEntries(entries)
-		if first == nil {
-			first = result
-			continue
-		}
-		if len(result) != len(first) {
-			t.Fatalf("iteration %d: stream count changed: got %d want %d", i, len(result), len(first))
-		}
-		for s := range result {
-			r := result[s]["stream"].(map[string]string)
-			f := first[s]["stream"].(map[string]string)
-			if !reflect.DeepEqual(r, f) {
-				t.Fatalf("iteration %d: stream[%d] labels changed: got %v want %v", i, s, r, f)
+	for _, dir := range []string{"forward", ""} {
+		dir := dir
+		t.Run("direction="+dir, func(t *testing.T) {
+			// Run many times to expose any non-determinism.
+			var first []map[string]interface{}
+			for i := 0; i < 50; i++ {
+				result := groupQueryRangeWindowEntries(entries, dir)
+				if first == nil {
+					first = result
+					continue
+				}
+				if len(result) != len(first) {
+					t.Fatalf("iteration %d: stream count changed: got %d want %d", i, len(result), len(first))
+				}
+				for s := range result {
+					r := result[s]["stream"].(map[string]string)
+					f := first[s]["stream"].(map[string]string)
+					if !reflect.DeepEqual(r, f) {
+						t.Fatalf("iteration %d: stream[%d] labels changed: got %v want %v", i, s, r, f)
+					}
+					rv := result[s]["values"].([]interface{})
+					fv := first[s]["values"].([]interface{})
+					if len(rv) != len(fv) {
+						t.Fatalf("iteration %d: stream[%d] value count changed", i, s)
+					}
+				}
 			}
-			rv := result[s]["values"].([]interface{})
-			fv := first[s]["values"].([]interface{})
-			if len(rv) != len(fv) {
-				t.Fatalf("iteration %d: stream[%d] value count changed", i, s)
-			}
-		}
-	}
 
-	// Verify stream order is ascending by canonical key.
-	var streamKeys []string
-	for _, s := range first {
-		streamKeys = append(streamKeys, canonicalLabelsKey(s["stream"].(map[string]string)))
-	}
-	if !sort.StringsAreSorted(streamKeys) {
-		t.Errorf("streams not sorted by canonical key: %v", streamKeys)
-	}
-
-	// Verify per-stream values are sorted ascending by timestamp.
-	for _, s := range first {
-		vals := s["values"].([]interface{})
-		for i := 1; i < len(vals); i++ {
-			prev := vals[i-1].([]interface{})[0].(string)
-			cur := vals[i].([]interface{})[0].(string)
-			if prev > cur {
-				t.Errorf("stream %v: value[%d] timestamp %s > value[%d] timestamp %s (not ascending)",
-					s["stream"], i-1, prev, i, cur)
+			// Verify stream order is ascending by canonical key.
+			var streamKeys []string
+			for _, s := range first {
+				streamKeys = append(streamKeys, canonicalLabelsKey(s["stream"].(map[string]string)))
 			}
-		}
+			if !sort.StringsAreSorted(streamKeys) {
+				t.Errorf("streams not sorted by canonical key: %v", streamKeys)
+			}
+
+			// Verify per-stream values are sorted by timestamp in direction order.
+			forward := dir == "forward"
+			for _, s := range first {
+				vals := s["values"].([]interface{})
+				for i := 1; i < len(vals); i++ {
+					prev := vals[i-1].([]interface{})[0].(string)
+					cur := vals[i].([]interface{})[0].(string)
+					if forward && prev > cur {
+						t.Errorf("stream %v: value[%d] timestamp %s > value[%d] timestamp %s (not ascending)",
+							s["stream"], i-1, prev, i, cur)
+					}
+					if !forward && prev < cur {
+						t.Errorf("stream %v: value[%d] timestamp %s < value[%d] timestamp %s (not descending)",
+							s["stream"], i-1, prev, i, cur)
+					}
+				}
+			}
+		})
 	}
 }
 
