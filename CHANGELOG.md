@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - ci: semgrep action updated from deprecated `returntocorp/semgrep@v1` to `semgrep/semgrep-action@v1` — the `returntocorp` organisation was renamed to `semgrep`; the old tag no longer resolves, breaking the `Heavy / semgrep` CI job.
+- ci: `github/codeql-action` bumped from `v3` to `v4` across `codeql.yaml`, `security-pr.yaml`, and `security-heavy.yaml` — v3 is scheduled for deprecation December 2026; affects Scorecard SAST check score.
+- ci: Dockerfile `USER nonroot` instruction added explicitly — Trivy `DS-0002` flags Dockerfiles without a USER statement even when the distroless base image already defaults to UID 65532; the explicit declaration satisfies the static check.
 
 ## [1.22.0] - 2026-04-28
 
