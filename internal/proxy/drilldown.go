@@ -12,11 +12,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const unknownServiceName = "unknown_service"
 const detectedFieldsSampleLimit = 500
+
+// vlStreamEntry unmarshals only the _stream field from NDJSON log entries,
+// avoiding the cost of allocating a full map[string]interface{} when only
+// the stream label string is needed.
+type vlStreamEntry struct {
+	Stream string `json:"_stream"`
+}
 
 var suppressedDetectedFieldNames = map[string]struct{}{
 	"timestamp_end":          {},
@@ -336,27 +344,37 @@ func buildEntryLabels(entry map[string]interface{}) map[string]string {
 	return labels
 }
 
-func buildDetectedLabels(entry map[string]interface{}) map[string]string {
-	// parseStreamLabels returns a cached read-only map — copy before mutating.
+// detectedLabelsBufPool pools map[string]string for fillDetectedLabels callers
+// that iterate the result immediately and discard it within the same loop tick.
+var detectedLabelsBufPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]string, 16)
+	},
+}
+
+// fillDetectedLabels fills buf with stream labels for entry. Buf is cleared
+// before filling; callers must not retain the map past the next fillDetectedLabels call on the same buf.
+func fillDetectedLabels(entry map[string]interface{}, buf map[string]string) {
+	for k := range buf {
+		delete(buf, k)
+	}
 	stream := parseStreamLabels(asString(entry["_stream"]))
-	labels := make(map[string]string, len(stream))
 	for k, v := range stream {
-		labels[k] = v
+		buf[k] = v
 	}
 	for _, key := range serviceNameSourceFields {
-		if _, ok := labels[key]; ok {
+		if _, ok := buf[key]; ok {
 			continue
 		}
 		if value, ok := stringifyEntryValue(entry[key]); ok && strings.TrimSpace(value) != "" {
-			labels[key] = value
+			buf[key] = value
 		}
 	}
 	if value, ok := stringifyEntryValue(entry["level"]); ok && strings.TrimSpace(value) != "" {
-		labels["level"] = value
+		buf["level"] = value
 	}
-	ensureDetectedLevel(labels)
-	ensureSyntheticServiceName(labels)
-	return labels
+	ensureDetectedLevel(buf)
+	ensureSyntheticServiceName(buf)
 }
 
 func shouldExposeStructuredField(key string, streamLabels map[string]string, lt *LabelTranslator) bool {
@@ -377,16 +395,26 @@ func shouldExposeStructuredField(key string, streamLabels map[string]string, lt 
 
 func scanNativeStreamLabelSet(body []byte) map[string]string {
 	labels := make(map[string]string)
-	for _, rawLine := range bytes.Split(body, []byte{'\n'}) {
-		line := strings.TrimSpace(string(rawLine))
-		if line == "" {
+	start := 0
+	for start < len(body) {
+		end := start
+		for end < len(body) && body[end] != '\n' {
+			end++
+		}
+		line := bytes.TrimSpace(body[start:end])
+		if end < len(body) {
+			start = end + 1
+		} else {
+			start = len(body)
+		}
+		if len(line) == 0 {
 			continue
 		}
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		var entry vlStreamEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		for key, value := range parseStreamLabels(asString(entry["_stream"])) {
+		for key, value := range parseStreamLabels(entry.Stream) {
 			if strings.TrimSpace(value) == "" {
 				continue
 			}
@@ -474,16 +502,26 @@ func asString(value interface{}) string {
 // auto-extracted body fields.
 func scanStreamLabelNames(body []byte, lt *LabelTranslator) map[string]struct{} {
 	names := map[string]struct{}{}
-	for _, rawLine := range bytes.Split(body, []byte{'\n'}) {
-		line := strings.TrimSpace(string(rawLine))
-		if line == "" {
+	start := 0
+	for start < len(body) {
+		end := start
+		for end < len(body) && body[end] != '\n' {
+			end++
+		}
+		line := bytes.TrimSpace(body[start:end])
+		if end < len(body) {
+			start = end + 1
+		} else {
+			start = len(body)
+		}
+		if len(line) == 0 {
 			continue
 		}
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		var entry vlStreamEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		for key := range parseStreamLabels(asString(entry["_stream"])) {
+		for key := range parseStreamLabels(entry.Stream) {
 			lokiLabel := key
 			if lt != nil {
 				if t := lt.ToLoki(key); t != "" {
@@ -499,28 +537,37 @@ func scanStreamLabelNames(body []byte, lt *LabelTranslator) map[string]struct{} 
 func scanDetectedLabelSummaries(body []byte, lt *LabelTranslator) map[string]*detectedLabelSummary {
 	summaries := map[string]*detectedLabelSummary{}
 
+	labelBuf := detectedLabelsBufPool.Get().(map[string]string)
+	defer func() {
+		for k := range labelBuf {
+			delete(labelBuf, k)
+		}
+		detectedLabelsBufPool.Put(labelBuf)
+	}()
+
 	startIdx := 0
 	for startIdx < len(body) {
 		endIdx := startIdx
 		for endIdx < len(body) && body[endIdx] != '\n' {
 			endIdx++
 		}
-		line := strings.TrimSpace(string(body[startIdx:endIdx]))
+		line := bytes.TrimSpace(body[startIdx:endIdx])
 		if endIdx < len(body) {
 			startIdx = endIdx + 1
 		} else {
 			startIdx = len(body)
 		}
-		if line == "" {
+		if len(line) == 0 {
 			continue
 		}
 
 		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
 
-		labels := buildDetectedLabels(entry)
+		fillDetectedLabels(entry, labelBuf)
+		labels := labelBuf
 		delete(labels, "detected_level")
 
 		for key, value := range labels {
@@ -1393,6 +1440,11 @@ type vlStreamsResponse struct {
 	} `json:"values"`
 }
 
+type detectNativeResult struct {
+	fields map[string]*detectedFieldSummary
+	err    error
+}
+
 func (p *Proxy) detectFields(ctx context.Context, query, start, end string, lineLimit int) ([]map[string]interface{}, map[string][]string, error) {
 	if lineLimit > maxDetectedScanLines {
 		lineLimit = maxDetectedScanLines
@@ -1400,17 +1452,30 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 	if cachedFields, cachedValues, ok := p.getCachedDetectedFields(ctx, query, start, end, lineLimit); ok {
 		return cachedFields, cachedValues, nil
 	}
-	nativeFields, err := p.detectNativeFields(ctx, query, start, end)
-	if err != nil {
-		nativeFields = nil
-	}
+
+	// Start native field detection in parallel with the log scan to eliminate
+	// sequential round-trip overhead. Previously: 2× VL RTT. Now: 1× VL RTT.
+	// Native fields provide OTel/stream-label metadata; the log scan samples
+	// actual log lines to infer field names and types.
+	nativeCh := make(chan detectNativeResult, 1)
+	go func() {
+		fields, err := p.detectNativeFields(ctx, query, start, end)
+		nativeCh <- detectNativeResult{fields: fields, err: err}
+	}()
+
+	// Use detectedFieldsSampleLimit as a safe conservative scan size.
+	// When native fields exist they would cap the scan at this limit anyway,
+	// and without native fields it is still enough for reliable field detection.
 	scanLimit := lineLimit
-	if len(nativeFields) > 0 && scanLimit > detectedFieldsSampleLimit {
+	if scanLimit > detectedFieldsSampleLimit {
 		scanLimit = detectedFieldsSampleLimit
 	}
+
 	candidates := fieldDetectionQueryCandidates(query)
 	hadScanFailure := false
 	var lastErr error
+	var scanBody []byte
+
 	for _, candidate := range candidates {
 		logsqlQuery, err := p.translateQuery(candidate)
 		if err != nil {
@@ -1436,10 +1501,10 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 			continue
 		}
 
-		body, _ := io.ReadAll(resp.Body)
+		rawBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode >= http.StatusInternalServerError {
-			msg := strings.TrimSpace(string(body))
+			msg := strings.TrimSpace(string(rawBody))
 			if msg == "" {
 				msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
 			}
@@ -1448,26 +1513,36 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 			continue
 		}
 		if resp.StatusCode >= http.StatusBadRequest {
-			msg := strings.TrimSpace(string(body))
+			msg := strings.TrimSpace(string(rawBody))
 			if msg == "" {
 				msg = fmt.Sprintf("VL backend returned %d", resp.StatusCode)
 			}
+			// Collect native result before returning so the goroutine doesn't leak.
+			<-nativeCh
 			return nil, nil, fmt.Errorf("%s", msg)
 		}
-
-		fieldList, fieldValues := p.detectFieldsFromBody(body)
-		if len(fieldList) > 0 {
-			fieldList, fieldValues = mergeNativeDetectedFields(fieldList, fieldValues, filterNativeDetectedFields(nativeFields, scanNativeStreamLabelSet(body), p.labelTranslator))
-			p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
-			return fieldList, fieldValues, nil
-		}
-		if len(candidates) > 1 && !hadScanFailure {
-			emptyFields := []map[string]interface{}{}
-			emptyValues := map[string][]string{}
-			p.setCachedDetectedFields(ctx, query, start, end, lineLimit, emptyFields, emptyValues)
-			return emptyFields, emptyValues, nil
-		}
+		scanBody = rawBody
 		break
+	}
+
+	// Collect native fields result (always, to avoid goroutine leak).
+	nativeResult := <-nativeCh
+	nativeFields := nativeResult.fields
+	if nativeResult.err != nil {
+		nativeFields = nil
+	}
+
+	fieldList, fieldValues := p.detectFieldsFromBody(scanBody)
+	if len(fieldList) > 0 {
+		fieldList, fieldValues = mergeNativeDetectedFields(fieldList, fieldValues, filterNativeDetectedFields(nativeFields, scanNativeStreamLabelSet(scanBody), p.labelTranslator))
+		p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
+		return fieldList, fieldValues, nil
+	}
+	if len(candidates) > 1 && !hadScanFailure {
+		emptyFields := []map[string]interface{}{}
+		emptyValues := map[string][]string{}
+		p.setCachedDetectedFields(ctx, query, start, end, lineLimit, emptyFields, emptyValues)
+		return emptyFields, emptyValues, nil
 	}
 
 	if len(nativeFields) > 0 {
@@ -1477,7 +1552,7 @@ func (p *Proxy) detectFields(ctx context.Context, query, start, end string, line
 				nativeFields = filterNativeDetectedFields(nativeFields, streamLabels, p.labelTranslator)
 			}
 		}
-		fieldList, fieldValues := mergeNativeDetectedFields(nil, nil, nativeFields)
+		fieldList, fieldValues = mergeNativeDetectedFields(nil, nil, nativeFields)
 		p.setCachedDetectedFields(ctx, query, start, end, lineLimit, fieldList, fieldValues)
 		return fieldList, fieldValues, nil
 	}
@@ -1501,27 +1576,36 @@ func (p *Proxy) detectFieldSummaries(body []byte) ([]map[string]interface{}, map
 	// delete would incorrectly remove aliases added by earlier OTel entries.
 	anyOTelWithServiceName := false
 
+	streamLabelBuf := detectedLabelsBufPool.Get().(map[string]string)
+	defer func() {
+		for k := range streamLabelBuf {
+			delete(streamLabelBuf, k)
+		}
+		detectedLabelsBufPool.Put(streamLabelBuf)
+	}()
+
 	startIdx := 0
 	for startIdx < len(body) {
 		endIdx := startIdx
 		for endIdx < len(body) && body[endIdx] != '\n' {
 			endIdx++
 		}
-		line := strings.TrimSpace(string(body[startIdx:endIdx]))
+		line := bytes.TrimSpace(body[startIdx:endIdx])
 		if endIdx < len(body) {
 			startIdx = endIdx + 1
 		} else {
 			startIdx = len(body)
 		}
-		if line == "" {
+		if len(line) == 0 {
 			continue
 		}
 
 		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		streamLabels := buildDetectedLabels(entry)
+		fillDetectedLabels(entry, streamLabelBuf)
+		streamLabels := streamLabelBuf
 		if detectedLevel := strings.TrimSpace(streamLabels["detected_level"]); detectedLevel != "" {
 			addDetectedField(fields, "detected_level", "", "string", nil, detectedLevel)
 		}

@@ -712,6 +712,19 @@ func (p *Proxy) fetchBareParserMetricSeries(ctx context.Context, originalQuery s
 	streamDescriptorCache := make(map[string]cachedLogQueryStreamDescriptor, 16)
 	exposureCache := make(map[string][]metadataFieldExposure, 16)
 
+	smBuf := metadataMapPool.Get().(map[string]string)
+	pfBuf := metadataMapPool.Get().(map[string]string)
+	defer func() {
+		for k := range smBuf {
+			delete(smBuf, k)
+		}
+		for k := range pfBuf {
+			delete(pfBuf, k)
+		}
+		metadataMapPool.Put(smBuf)
+		metadataMapPool.Put(pfBuf)
+	}()
+
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -734,7 +747,7 @@ func (p *Proxy) fetchBareParserMetricSeries(ctx context.Context, originalQuery s
 		}
 		msg, _ := stringifyEntryValue(entry["_msg"])
 		desc := p.logQueryStreamDescriptor(asString(entry["_stream"]), asString(entry["level"]), streamLabelCache, streamDescriptorCache)
-		_, parsedFields := p.classifyEntryMetadataFields(entry, desc.rawLabels, true, exposureCache)
+		_, parsedFields := p.classifyEntryMetadataFields(entry, desc.rawLabels, true, exposureCache, smBuf, pfBuf)
 		metric := cloneStringMap(desc.translatedLabels)
 		for key, value := range parsedFields {
 			if spec.unwrapField != "" && key == spec.unwrapField {
@@ -1177,12 +1190,14 @@ func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, bod
 					delete(translated, k)
 				}
 				changed := false
+				hadStream := false
 				for k, v := range metric {
 					if k == "__name__" {
 						changed = true
 						continue
 					}
 					if k == "_stream" {
+						hadStream = true
 						if rawStream, ok := v.(string); ok {
 							for streamKey, streamValue := range parseStreamLabels(rawStream) {
 								lokiKey := streamKey
@@ -1216,11 +1231,12 @@ func (p *Proxy) translateStatsResponseLabelsWithContext(ctx context.Context, bod
 				beforeSyntheticCount := len(syntheticLabels)
 				hadLevel := syntheticLabels["level"] != ""
 				ensureDetectedLevel(syntheticLabels)
-				// If detected_level was synthesized from level, remove the raw level label.
-				// Metric aggregations like "sum by (detected_level)" translate to VL's
-				// "sum by (level)" and back — the result should only carry detected_level,
-				// matching Loki's behavior where both labels don't coexist in metric output.
-				if hadLevel && syntheticLabels["detected_level"] != "" {
+				// Remove the raw level label only when it came from an explicit VL grouping
+				// dimension (no _stream in the response), i.e. "sum by (detected_level)"
+				// translates to VL's "sum by (level)" and back. In that case level must be
+				// replaced by detected_level. When _stream IS present, level is a genuine
+				// stream label that Loki also returns alongside detected_level — keep both.
+				if hadLevel && !hadStream && syntheticLabels["detected_level"] != "" {
 					delete(syntheticLabels, "level")
 					delete(translated, "level")
 				}
