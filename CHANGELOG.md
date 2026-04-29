@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.2] - 2026-04-29
+
 ### Changed
 
 - ci: `permissions: contents: read` added at top level of `ci.yaml`, `compat-drilldown.yaml`, `compat-loki.yaml`, `compat-vl.yaml` (previously had no permission block, triggering OpenSSF Scorecard `Token-Permissions` = 0/10); write permissions in `auto-release.yaml` and `codeql.yaml` moved to job level so the top-level default is read-only.
