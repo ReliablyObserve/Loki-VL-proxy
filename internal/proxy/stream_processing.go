@@ -162,6 +162,7 @@ func (p *Proxy) streamLogQuery(w http.ResponseWriter, resp *http.Response, origi
 			continue
 		}
 		msg, _ := stringifyEntryValue(entry["_msg"])
+		msg = reconstructLogLine(msg, entry, originalQuery)
 
 		tsNanos, ok := formatEntryTimestamp(timeStr)
 		if !ok {
@@ -349,6 +350,11 @@ func vlLogsToLokiStreams(body []byte) []map[string]interface{} {
 		}
 		tsNanos := strconv.FormatInt(ts.UnixNano(), 10)
 
+		// Reconstruct JSON log line from VL's extracted fields. No originalQuery
+		// context is available here — pass empty string so only auto-ingestion
+		// fields are reconstructed (no text-extraction parser stages present).
+		msg = reconstructLogLine(msg, entry, "")
+
 		labels := buildEntryLabels(entry)
 		streamKey := canonicalLabelsKey(labels)
 
@@ -457,6 +463,7 @@ func (p *Proxy) vlReaderToLokiStreams(r io.Reader, originalQuery, step string, c
 			continue
 		}
 		msg, _ := stringifyEntryValue(entry["_msg"])
+		msg = reconstructLogLine(msg, entry, originalQuery)
 		rawStream := asString(entry["_stream"])
 		level, _ := stringifyEntryValue(entry["level"])
 
@@ -704,6 +711,10 @@ func (p *Proxy) classifyEntryFields(entry map[string]interface{}, originalQuery 
 	}
 	if value, ok := stringifyEntryValue(entry["level"]); ok && strings.TrimSpace(value) != "" {
 		labels["level"] = value
+		// Explicit level field always wins over VL's auto-detected level.
+		// VL may set detected_level="info" from _msg when the message body has no
+		// level keyword, even if the logfmt key level=warn was parsed separately.
+		delete(labels, "detected_level")
 	}
 	// Mirror Loki's ingest-time level detection: if VL did not surface level as
 	// a top-level field (native field or OTel severity), try to extract it from
