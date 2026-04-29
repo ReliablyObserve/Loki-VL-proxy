@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- fix(e2e): add `_msg` field to all JSON-format log generators so VictoriaLogs stores the human-readable message correctly and Grafana renders JSON service logs consistently with Loki.
+- fix(proxy): reconstruct JSON log lines so `|= "text"` line filters match any JSON field, not only the extracted `_msg` value; VL entries with extra fields are re-serialised as `{"_msg":"...","field":"value"}` before returning to Grafana.
+- fix(translator): revert line filter translation from invalid `*:~"text"` VictoriaLogs syntax to `~"text"` (regex/substring on `_msg`), which is valid across all supported VL versions.
+- fix(proxy): explicit logfmt/JSON `level=warn` field now always wins over VictoriaLogs auto-detected `detected_level`; previously VL could surface `detected_level=info` from `_msg` while also providing `level=warn`, causing Grafana to display the wrong log level badge.
+
 ## [1.24.0] - 2026-04-29
 
 ### Changed
@@ -185,7 +192,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - bench: warmup phase now runs at full benchmark concurrency with the same jitter as the real run, so the proxy cache is populated across the same time-window space the benchmark will query; warmup time is never counted in results.
 - e2e(vl): add VictoriaLogs block-cache and memory tuning flags to docker-compose (`-blockcache.missesBeforeCaching=1`, `-internStringCacheExpireDuration=15m`, `-memory.allowedPercent=75`) to improve repeated-query performance.
-
 ## [1.17.1] - 2026-04-25
 
 ### Fixed

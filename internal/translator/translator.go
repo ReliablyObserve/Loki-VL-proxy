@@ -303,8 +303,10 @@ func translateLogQuery(logql string, labelFn LabelTranslateFunc, streamFields ..
 		// CRITICAL: Loki |= is SUBSTRING match, not word match.
 		// VL's "text" is word-only; VL's ~"text" is substring/regexp.
 		// We must use ~"text" to match Loki's substring semantics.
+		// The proxy's reconstructLogLine puts the full JSON into _msg, so
+		// searching _msg via ~"text" finds text in any original JSON field.
 		if strings.HasPrefix(remaining, "|= ") || strings.HasPrefix(remaining, "|=\"") {
-			// Substring match: |= "text" → ~"text" (NOT "text" which is word-only)
+			// Substring match: |= "text" → ~"text"
 			remaining = strings.TrimSpace(remaining[2:])
 			val, rest := extractQuotedValue(remaining)
 			parts = append(parts, "~"+val)
