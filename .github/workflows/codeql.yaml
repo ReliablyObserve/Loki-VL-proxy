@@ -35,7 +35,6 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: go
-          config-file: .github/codeql/codeql-config.yml
 
       - name: Build
         run: go build ./...
