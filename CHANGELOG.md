@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-04-29
+
 ### Changed
 
 - refactor: split `internal/proxy/proxy.go` (14,105 lines) into 19 domain-focused modules (`middleware.go`, `stream_processing.go`, `multitenant.go`, `patterns.go`, `patterns_persistence.go`, `cache_keys.go`, `label_metadata.go`, `label_handlers.go`, `http_utils.go`, `query_translation.go`, `metric_agg.go`, `metric_binary.go`, `alerting.go`, `tail.go`, `volume.go`, `backend.go`, `label_index.go`, `telemetry.go`, `time_utils.go`), reducing `proxy.go` to 1,577 lines; no functional changes.
