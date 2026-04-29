@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-04-29
+
 ### Fixed
 
 - security: all cache keys (label_inventory, queryRange, detected_fields/labels, native_fields/streams coalescer, patterns autodetect, volume/range) now include an auth fingerprint (SHA-256 of configured forward headers + cookies), preventing tenants from receiving each other's cached metadata responses in multi-tenant deployments with forwarded auth.
